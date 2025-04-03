@@ -25,6 +25,7 @@ import {
   useColorModeValue,
 } from '@chakra-ui/react';
 import { FaGithub, FaBuilding, FaGlobe } from 'react-icons/fa';
+import githubConnectorApi from '../../api/githubConnectorApi';
 
 const GitHubConnectorPage = () => {
   const [isEnterprise, setIsEnterprise] = useState(false);
@@ -35,6 +36,7 @@ const GitHubConnectorPage = () => {
     isPublic: false,
   });
   const [savedConfigs, setSavedConfigs] = useState([]);
+  const [isLoading, setIsLoading] = useState(false);
   const toast = useToast();
   
   const cardBg = useColorModeValue('white', 'gray.800');
@@ -43,28 +45,39 @@ const GitHubConnectorPage = () => {
 
   // Load saved configurations on mount
   useEffect(() => {
-    const loadConfigurations = async () => {
-      try {
-        const response = await fetch('/api/settings/github_connectors');
-        if (!response.ok) {
-          throw new Error('Failed to fetch configurations');
-        }
-        const data = await response.json();
-        setSavedConfigs(data.configs || []);
-      } catch (error) {
-        console.error('Error loading configurations:', error);
-        toast({
-          title: 'Error',
-          description: 'Failed to load saved configurations',
-          status: 'error',
-          duration: 3000,
-          isClosable: true,
-        });
-      }
-    };
-
     loadConfigurations();
   }, []);
+
+  const loadConfigurations = async () => {
+    try {
+      setIsLoading(true);
+      const data = await githubConnectorApi.getAllConnectors();
+      
+      // Convert snake_case to camelCase
+      const formattedConfigs = data.map(config => ({
+        id: config.id,
+        username: config.username,
+        token: config.token,
+        repoUrl: config.repo_url,
+        isPublic: config.is_public,
+        isEnterprise: config.is_enterprise,
+        createdAt: config.created_at
+      }));
+      
+      setSavedConfigs(formattedConfigs || []);
+    } catch (error) {
+      console.error('Error loading configurations:', error);
+      toast({
+        title: 'Error',
+        description: 'Failed to load saved configurations',
+        status: 'error',
+        duration: 3000,
+        isClosable: true,
+      });
+    } finally {
+      setIsLoading(false);
+    }
+  };
 
   const handleInputChange = (e) => {
     const { name, value, type, checked } = e.target;
@@ -113,16 +126,10 @@ const GitHubConnectorPage = () => {
     }
 
     try {
-      // Create new configuration
-      const newConfig = {
-        id: Date.now(),
-        ...config,
-        isEnterprise,
-        createdAt: new Date().toISOString(),
-      };
-
+      setIsLoading(true);
+      
       // Format the repository URL correctly for the backend
-      let formattedUrl = newConfig.repoUrl.trim();
+      let formattedUrl = config.repoUrl.trim();
       
       // Ensure URL starts with https://
       if (!formattedUrl.startsWith('http://') && !formattedUrl.startsWith('https://')) {
@@ -137,8 +144,14 @@ const GitHubConnectorPage = () => {
         formattedUrl = `${formattedUrl}.git`;
       }
       
-      // Update the config with formatted URL
-      newConfig.repoUrl = formattedUrl;
+      // Create new configuration
+      const newConfig = {
+        username: config.username,
+        token: config.token,
+        repoUrl: formattedUrl,
+        isPublic: config.isPublic,
+        isEnterprise: isEnterprise,
+      };
 
       console.log('Sending configuration to backend:', {
         ...newConfig,
@@ -146,24 +159,23 @@ const GitHubConnectorPage = () => {
       });
       
       // Save to backend database
-      const response = await fetch('/api/settings/github_connectors', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify([...savedConfigs, newConfig]),
-      });
-
-      if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.detail || 'Failed to save configuration');
-      }
-
-      const result = await response.json();
+      const result = await githubConnectorApi.createConnector(newConfig);
+      
       console.log('Success response:', result);
       
+      // Convert returned data to match our frontend format
+      const createdConfig = {
+        id: result.id,
+        username: result.username,
+        token: result.token,
+        repoUrl: result.repo_url,
+        isPublic: result.is_public,
+        isEnterprise: result.is_enterprise,
+        createdAt: result.created_at
+      };
+      
       // Update local state
-      setSavedConfigs([...savedConfigs, newConfig]);
+      setSavedConfigs([...savedConfigs, createdConfig]);
 
       // Show success message
       toast({
@@ -181,51 +193,55 @@ const GitHubConnectorPage = () => {
         repoUrl: '',
         isPublic: false,
       });
+      setIsEnterprise(false);
     } catch (error) {
       console.error('Error saving configuration:', error);
       toast({
         title: 'Error',
-        description: error.message || 'Failed to save configuration',
+        description: error.response?.data?.detail || 'Failed to save configuration',
         status: 'error',
         duration: 5000,
         isClosable: true,
       });
+    } finally {
+      setIsLoading(false);
     }
   };
 
   const handleDelete = async (id) => {
     try {
+      setIsLoading(true);
       console.log('Attempting to delete configuration:', id);
-      const response = await fetch(`/api/settings/github_connectors/${id}`, {
-        method: 'DELETE',
-      });
-
-      if (!response.ok) {
-        const errorData = await response.json();
-        console.error('Delete request failed:', errorData);
-        throw new Error(errorData.detail || 'Failed to delete configuration');
-      }
-
-      // Update local state
-      const updatedConfigs = savedConfigs.filter(config => config.id !== id);
-      setSavedConfigs(updatedConfigs);
       
-      toast({
-        title: 'Success',
-        description: 'Configuration deleted successfully',
-        status: 'success',
-        duration: 3000,
-        isClosable: true,
-      });
+      // Delete from backend
+      const success = await githubConnectorApi.deleteConnector(id);
+      
+      if (success) {
+        // Update local state
+        const updatedConfigs = savedConfigs.filter(config => config.id !== id);
+        setSavedConfigs(updatedConfigs);
+        
+        toast({
+          title: 'Success',
+          description: 'Configuration deleted successfully',
+          status: 'success',
+          duration: 3000,
+          isClosable: true,
+        });
+      } else {
+        throw new Error('Failed to delete configuration');
+      }
     } catch (error) {
       console.error('Error deleting configuration:', error);
       toast({
         title: 'Error',
-        description: `Failed to delete configuration: ${error.message}`,
+        description: error.response?.data?.detail || 'Failed to delete configuration',
         status: 'error',
         duration: 5000,
         isClosable: true,
       });
+    } finally {
+      setIsLoading(false);
     }
   };
 
@@ -357,6 +373,7 @@ const GitHubConnectorPage = () => {
                     type="submit"
                     colorScheme="orange"
                     leftIcon={<FaGithub />}
+                    isLoading={isLoading}
                   >
                     Add Connection
                   </Button>
@@ -401,6 +418,7 @@ const GitHubConnectorPage = () => {
                             colorScheme="red"
                             variant="ghost"
                             onClick={() => handleDelete(savedConfig.id)}
+                            isLoading={isLoading}
                           >
                             Delete
                           </Button>
