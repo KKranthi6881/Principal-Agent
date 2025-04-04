@@ -1,12 +1,18 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import Dict, List, Optional, Any
-from .database_manager import DatabaseManager
-from .vector_store_manager import VectorStoreManager
+from api.database_manager import DatabaseManager
+from api.vector_store_manager import VectorStoreManager
+from api.models_api import router as models_router
+from api.llm_providers_api import router as llm_providers_router
 
 app = FastAPI(title="Data Architect API")
 db_manager = DatabaseManager()
 vector_manager = VectorStoreManager()
+
+# Include routers
+app.include_router(models_router)
+app.include_router(llm_providers_router)
 
 # Pydantic models for request/response
 class ThreadCreate(BaseModel):

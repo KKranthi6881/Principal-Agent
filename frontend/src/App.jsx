@@ -9,6 +9,7 @@ import FileUploadPage from './pages/knowledge/FileUploadPage'
 import ChatHistoryPage from './pages/ChatHistoryPage'
 import ConnectorsPage from './pages/ConnectorsPage'
 import GitHubConnectorPage from './pages/connectors/GitHubConnectorPage'
+import LLMProviderConnectorPage from './pages/connectors/LLMProviderConnectorPage'
 import ChatInterface from './components/ChatInterface'
 
 // Create theme
@@ -64,6 +65,11 @@ function App() {
             <Route path="/connectors/github" element={
               <MainLayout>
                 <GitHubConnectorPage />
+              </MainLayout>
+            } />
+            <Route path="/connectors/llm" element={
+              <MainLayout>
+                <LLMProviderConnectorPage />
               </MainLayout>
             } />
             <Route path="*" element={<Navigate to="/" />} />

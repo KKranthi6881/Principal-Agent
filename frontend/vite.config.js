@@ -9,7 +9,15 @@ export default defineConfig({
     proxy: {
       '/api': {
         target: 'http://localhost:8002',
-        changeOrigin: true
+        changeOrigin: true,
+        secure: false,
+        ws: true
+      },
+      '/models': {
+        target: 'http://localhost:8002',
+        changeOrigin: true,
+        secure: false,
+        ws: true
       }
     }
   }

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo, Component } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate, Link } from 'react-router-dom';
 import {
   Box,
   Container,
@@ -57,7 +57,9 @@ import {
   Alert,
   AlertIcon,
   AlertTitle,
-  AlertDescription
+  AlertDescription,
+  Flex,
+  FormControl
 } from '@chakra-ui/react';
 import { 
   IoSend, 
@@ -90,7 +92,8 @@ import {
   IoGitCompare,
   IoList,
   IoGitCompareOutline,
-  IoCodeSlashOutline
+  IoCodeSlashOutline,
+  IoPersonCircle
 } from 'react-icons/io5';
 import { LineageGraph } from '../components/LineageGraph';
 import { Prism } from 'react-syntax-highlighter';
@@ -100,6 +103,7 @@ import remarkGfm from 'remark-gfm';
 import { vscDarkPlus, oneDark } from 'react-syntax-highlighter/dist/cjs/styles/prism';
 import SyntaxHighlighter from 'react-syntax-highlighter';
 import { v4 as uuidv4 } from 'uuid';
+import { LineageVisualizer } from '../components/LineageVisualizer';
 
 // Error boundary component to catch rendering errors
 class ErrorBoundary extends Component {
@@ -2010,6 +2014,11 @@ const ChatPage = () => {
   const messagesEndRef = useRef(null);
   const [autoScroll, setAutoScroll] = useState(true);
   const messagesContainerRef = useRef(null);
+  const [providers, setProviders] = useState([]);
+  const [selectedProvider, setSelectedProvider] = useState('openai');
+  const [selectedModel, setSelectedModel] = useState('gpt-4o');
+  const [modelsForProvider, setModelsForProvider] = useState([]);
+  const [allModels, setAllModels] = useState([]);
 
   // Initialize conversation or load from ID - only runs when conversationId changes
   useEffect(() => {
@@ -2252,7 +2261,7 @@ const ChatPage = () => {
       // Set loading state
       setLoading(true);
       
-      const response = await fetch(`http://localhost:8000/api/conversation/${id}`);
+      const response = await fetch(`/api/conversation/${id}`);
       if (!response.ok) {
         throw new Error(`Error fetching conversation: ${response.statusText}`);
       }
@@ -2419,9 +2428,87 @@ const ChatPage = () => {
     return { lineageData, cleanedContent };
   };
 
+  // Add this effect to fetch the available models when the component mounts
+  useEffect(() => {
+    const fetchModels = async () => {
+      try {
+        console.log("Fetching models from backend...");
+        // Use the direct path to models endpoint without /api prefix
+        const response = await fetch('/models/models');
+        if (response.ok) {
+          const data = await response.json();
+          console.log("Models data received:", data);
+          setAllModels(data);
+          
+          // Group models by provider
+          const providerMap = {};
+          data.forEach(model => {
+            if (!providerMap[model.provider_id]) {
+              providerMap[model.provider_id] = {
+                id: model.provider_id,
+                name: model.provider_name,
+                models: []
+              };
+            }
+            providerMap[model.provider_id].models.push(model);
+          });
+          
+          console.log("Provider map:", providerMap);
+          const providersList = Object.values(providerMap);
+          console.log("Setting providers state with:", providersList);
+          setProviders(providersList);
+          
+          // Set default models for OpenAI provider or use the first provider if OpenAI isn't available
+          const openAIModels = data.filter(model => model.provider_id === 'openai');
+          console.log("OpenAI models:", openAIModels);
+          
+          if (openAIModels.length > 0) {
+            console.log("Setting OpenAI as default provider");
+            setModelsForProvider(openAIModels);
+            setSelectedModel(openAIModels[0].model_id);
+          } else if (data.length > 0) {
+            const firstProviderId = data[0].provider_id;
+            console.log("Using first available provider:", firstProviderId);
+            const firstProviderModels = data.filter(model => model.provider_id === firstProviderId);
+            console.log("First provider models:", firstProviderModels);
+            setSelectedProvider(firstProviderId);
+            setModelsForProvider(firstProviderModels);
+            setSelectedModel(firstProviderModels[0].model_id);
+          }
+        } else {
+          console.error('Failed to fetch models:', await response.text());
+        }
+      } catch (error) {
+        console.error('Error fetching models:', error);
+      }
+    };
+    
+    fetchModels();
+  }, []);
+  
+  // Add this effect to update available models when the provider changes
+  useEffect(() => {
+    console.log("Provider changed to:", selectedProvider);
+    console.log("All models:", allModels);
+    
+    const models = allModels.filter(model => model.provider_id === selectedProvider);
+    console.log("Filtered models for provider:", models);
+    
+    setModelsForProvider(models);
+    
+    // If there are models for the selected provider, select the first one
+    if (models.length > 0) {
+      console.log("Setting selected model to:", models[0].model_id);
+      setSelectedModel(models[0].model_id);
+    } else {
+      console.log("No models available for this provider");
+    }
+  }, [selectedProvider, allModels]);
+
   // Send message and get response from data architect
   const handleSubmit = async (e) => {
     e.preventDefault();
+    
     if (!input.trim()) return;
     
     // Add user message
@@ -2441,9 +2528,10 @@ const ChatPage = () => {
     
     try {
       console.log("Sending request to backend with input:", input);
+      console.log("Using provider:", selectedProvider, "and model:", selectedModel);
       
       // Use the Data Architect agent endpoint
-      const response = await fetch('http://localhost:8000/architect/analyze/', {
+      const response = await fetch('/api/architect/analyze/', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json'
@@ -2451,7 +2539,9 @@ const ChatPage = () => {
         body: JSON.stringify({ 
           query: input,
           conversation_id: currentConversationId,
-          thread_id: currentConversationId
+          thread_id: currentConversationId,
+          provider: selectedProvider,
+          model: selectedModel
         })
       });
       
@@ -2490,7 +2580,9 @@ const ChatPage = () => {
           sql_results: data.sql_results?.results || [],
           doc_results: data.doc_results?.results || [],
           dbt_results: data.dbt_results?.results || [],
-          relationship_results: data.relationship_results?.results || []
+          relationship_results: data.relationship_results?.results || [],
+          provider: selectedProvider,
+          model: selectedModel
         }
       };
       
@@ -2539,34 +2631,261 @@ const ChatPage = () => {
     </VStack>
   );
 
+  // Add effect for dynamic resizing of textarea based on content
+  useEffect(() => {
+    // Auto-resize textarea based on content length
+    if (input.length > 150) {
+      const rows = Math.min(Math.ceil(input.length / 80), 5); // Cap at 5 rows
+      const textarea = document.querySelector('textarea');
+      if (textarea) {
+        textarea.rows = rows;
+      }
+    }
+  }, [input]);
+
+  // Message component for better organization and styling
+  const Message = ({ message }) => {
+    const isUser = message.role === 'user';
+    
+    return (
+      <HStack 
+        alignItems="flex-start" 
+        spacing={3}
+        mb={4}
+      >
+        {/* Avatar/Icon */}
+        <Box
+          bg={isUser ? "purple.100" : "blue.100"}
+          color={isUser ? "purple.700" : "blue.700"}
+          p={2}
+          borderRadius="full"
+          display="flex"
+          alignItems="center"
+          justifyContent="center"
+        >
+          <Icon 
+            as={isUser ? IoPersonCircle : IoAnalytics} 
+            boxSize={5} 
+          />
+        </Box>
+        
+        {/* Message content */}
+        <Box
+          flex="1"
+          bg={isUser ? "white" : "white"}
+          p={4}
+          borderRadius="md"
+          borderWidth="1px"
+          borderColor={isUser ? "purple.200" : "blue.200"}
+          boxShadow="sm"
+        >
+          {/* Role label - only shown for non-user messages */}
+          {!isUser && (
+            <Text 
+              fontSize="xs" 
+              color="blue.600" 
+              fontWeight="bold" 
+              mb={1}
+            >
+              DATA ARCHITECT
+            </Text>
+          )}
+          
+          {/* Message content */}
+          <Box className={message.role === 'assistant' ? "confluence-styled-content" : ""}>
+            {message.role === 'assistant' ? (
+              <div 
+                dangerouslySetInnerHTML={{ 
+                  __html: markdownToHtml(message.content)
+                }} 
+              />
+            ) : (
+              <Text fontWeight={isUser ? "medium" : "normal"}>{message.content}</Text>
+            )}
+          </Box>
+          
+          {/* Lineage visualization if available */}
+          {message.hasLineage && (
+            <Box mt={4}>
+              <LineageVisualizer data={message.lineageData} />
+            </Box>
+          )}
+          
+          {/* Message details */}
+          <HStack mt={2} spacing={2} justify="flex-end">
+            {message.details?.provider && (
+              <Badge size="sm" colorScheme="purple" variant="subtle">
+                {message.details.provider}/{message.details.model.split('/').pop()}
+              </Badge>
+            )}
+            {message.details?.processing_time && (
+              <Badge size="sm" colorScheme="gray" variant="subtle">
+                {(message.details.processing_time / 1000).toFixed(2)}s
+              </Badge>
+            )}
+          </HStack>
+        </Box>
+      </HStack>
+    );
+  };
+
+  // Render message function now uses the Message component
+  const renderMessage = (message) => (
+    <Message key={message.id} message={message} />
+  );
+
+  // Utility function to convert markdown to HTML
+  const markdownToHtml = (markdown) => {
+    if (!markdown) return '';
+    
+    // Simple regex-based markdown parser (consider using a library like marked.js for production)
+    let html = markdown
+      // Handle code blocks with syntax highlighting
+      .replace(/```(\w+)?\n([\s\S]*?)```/g, (match, lang, code) => {
+        return `<div class="code-panel"><pre class="code-styled-content"><code class="${lang || ''}">${escapeHtml(code)}</code></pre></div>`;
+      })
+      // Handle inline code
+      .replace(/`([^`]+)`/g, '<code>$1</code>')
+      // Handle headings
+      .replace(/^### (.*$)/gm, '<h3>$1</h3>')
+      .replace(/^## (.*$)/gm, '<h2>$1</h2>')
+      .replace(/^# (.*$)/gm, '<h1>$1</h1>')
+      // Handle bold and italic
+      .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+      .replace(/\*(.*?)\*/g, '<em>$1</em>')
+      // Handle links
+      .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>')
+      // Handle unordered lists
+      .replace(/^\s*-\s+(.*$)/gm, '<li>$1</li>')
+      .replace(/(<li>.*<\/li>\n)+/g, '<ul>$&</ul>')
+      // Handle ordered lists
+      .replace(/^\s*\d+\.\s+(.*$)/gm, '<li>$1</li>')
+      .replace(/(<li>.*<\/li>\n)+/g, '<ol>$&</ol>')
+      // Handle tables (basic version)
+      .replace(/\|\s*(.*?)\s*\|/g, '<td>$1</td>')
+      .replace(/(<td>.*<\/td>)+/g, '<tr>$&</tr>')
+      .replace(/(<tr>.*<\/tr>)+/g, '<table>$&</table>')
+      // Handle paragraphs
+      .replace(/\n\s*\n/g, '</p><p>')
+      // Handle blockquotes
+      .replace(/^>\s*(.*$)/gm, '<blockquote>$1</blockquote>');
+    
+    // Wrap in a paragraph if it doesn't start with a block element
+    if (!html.startsWith('<h') && !html.startsWith('<ul') && !html.startsWith('<ol') && 
+        !html.startsWith('<p') && !html.startsWith('<blockquote') && !html.startsWith('<div')) {
+      html = `<p>${html}</p>`;
+    }
+    
+    return html;
+  };
+  
+  // Helper function to escape HTML
+  const escapeHtml = (unsafe) => {
+    return unsafe
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#039;');
+  };
+
   return (
-    <Container maxW="80%" py={4}>
+    <Container maxW="90%" py={4}>
       <Box 
-        h="calc(100vh - 170px)" 
+        h="calc(100vh - 120px)" 
         display="flex" 
         flexDirection="column"
+        borderRadius="lg"
+        overflow="hidden"
+        boxShadow="sm"
       >
-        {/* Auto-scroll button - only show when needed */}
-        <Box mb={4}>
-          {autoScroll ? (
-            <Button 
-              size="sm" 
-              colorScheme="gray" 
-              onClick={() => setAutoScroll(false)}
-              leftIcon={<IoContract />}
+        {/* Top bar with controls and model selection */}
+        <Box 
+          bg="white" 
+          py={3} 
+          px={4} 
+          borderBottom="1px solid" 
+          borderColor="gray.200"
+          display="flex"
+          justifyContent="space-between"
+          alignItems="center"
+        >
+          <HStack spacing={4}>
+            <Heading size="md" color="purple.700">Data Architect</Heading>
+            {autoScroll ? (
+              <Button 
+                size="sm" 
+                leftIcon={<IoContract />}
+                variant="ghost"
+                onClick={() => setAutoScroll(false)}
+              >
+                Auto-scroll
+              </Button>
+            ) : (
+              <Button 
+                size="sm" 
+                leftIcon={<IoExpand />}
+                colorScheme="purple"
+                variant="outline"
+                onClick={() => setAutoScroll(true)}
+              >
+                Enable auto-scroll
+              </Button>
+            )}
+          </HStack>
+          
+          <HStack spacing={4}>
+            <Box>
+              <FormControl size="sm">
+                <Select
+                  value={selectedProvider}
+                  onChange={(e) => setSelectedProvider(e.target.value)}
+                  size="sm"
+                  width="180px"
+                  bg="white"
+                  borderColor="gray.300"
+                  _hover={{ borderColor: "gray.400" }}
+                >
+                  {providers.map(provider => (
+                    <option key={provider.id} value={provider.id}>
+                      {provider.name}
+                    </option>
+                  ))}
+                </Select>
+              </FormControl>
+            </Box>
+            
+            <Box>
+              <FormControl size="sm">
+                <Select
+                  value={selectedModel}
+                  onChange={(e) => setSelectedModel(e.target.value)}
+                  size="sm"
+                  width="180px"
+                  bg="white"
+                  borderColor="gray.300"
+                  _hover={{ borderColor: "gray.400" }}
+                >
+                  {modelsForProvider.map(model => (
+                    <option key={model.model_id} value={model.model_id}>
+                      {model.name}
+                    </option>
+                  ))}
+                </Select>
+              </FormControl>
+            </Box>
+            
+            <Button
+              as={Link}
+              to="/connectors/llm"
+              size="sm"
+              colorScheme="purple"
+              variant="outline"
+              leftIcon={<IoServer />}
             >
-              Auto-scroll On
+              API Keys
             </Button>
-          ) : (
-            <Button 
-              size="sm" 
-              colorScheme="blue" 
-              onClick={() => setAutoScroll(true)}
-              leftIcon={<IoExpand />}
-            >
-              Auto-scroll Off
-            </Button>
-          )}
+          </HStack>
         </Box>
 
         {/* Messages area */}
@@ -2574,11 +2893,7 @@ const ChatPage = () => {
           ref={messagesContainerRef}
           flex="1" 
           overflowY="auto" 
-          px={4} 
-          py={4}
-          borderWidth="1px"
-          borderRadius="md"
-          mb={4}
+          p={4}
           bg="gray.50"
           position="relative"
         >
@@ -2590,7 +2905,7 @@ const ChatPage = () => {
               zIndex="10"
               size="sm"
               colorScheme="purple"
-              opacity="0.8"
+              opacity="0.9"
               _hover={{ opacity: 1 }}
               onClick={() => {
                 setAutoScroll(true);
@@ -2599,6 +2914,7 @@ const ChatPage = () => {
               leftIcon={<IoChevronUp />}
               float="right"
               mr={2}
+              boxShadow="md"
             >
               Scroll to Bottom
             </Button>
@@ -2608,49 +2924,125 @@ const ChatPage = () => {
             <VStack spacing={4} align="stretch">
               {messages.map(renderMessage)}
               <div ref={messagesEndRef} />
-              </VStack>
+            </VStack>
             : 
-            renderEmptyState()
+            <VStack 
+              spacing={6} 
+              py={12} 
+              textAlign="center" 
+              justify="center" 
+              height="100%"
+              color="gray.600"
+            >
+              <Icon as={IoAnalytics} boxSize={12} color="purple.400" />
+              <Heading size="lg" color="purple.700">Welcome to the Data Architect Chat</Heading>
+              <Text fontSize="lg">Ask questions about your data models, lineage, and more.</Text>
+              <HStack 
+                spacing={4} 
+                justify="center" 
+                wrap="wrap" 
+                maxW="750px"
+              >
+                <Box 
+                  p={4} 
+                  borderRadius="md" 
+                  bg="white" 
+                  borderWidth="1px" 
+                  borderColor="purple.200"
+                  _hover={{ borderColor: "purple.400", boxShadow: "sm" }}
+                  cursor="pointer"
+                  onClick={() => setInput("What models depend on stg_orders?")}
+                  width="300px"
+                >
+                  <Text fontWeight="medium" mb={1} color="purple.700">Model Dependencies</Text>
+                  <Text fontSize="sm">What models depend on stg_orders?</Text>
+                </Box>
+                <Box 
+                  p={4} 
+                  borderRadius="md" 
+                  bg="white" 
+                  borderWidth="1px" 
+                  borderColor="purple.200"
+                  _hover={{ borderColor: "purple.400", boxShadow: "sm" }}
+                  cursor="pointer"
+                  onClick={() => setInput("Show me the lineage for fct_orders")}
+                  width="300px"
+                >
+                  <Text fontWeight="medium" mb={1} color="purple.700">Table Lineage</Text>
+                  <Text fontSize="sm">Show me the lineage for fct_orders</Text>
+                </Box>
+              </HStack>
+            </VStack>
           }
           
           {loading && (
-            <Box p={4} bg="blue.50" borderRadius="md" mt={4}>
-                <HStack>
+            <Box 
+              p={4} 
+              borderRadius="md" 
+              bg="white" 
+              mt={4}
+              borderWidth="1px"
+              borderColor="blue.200"
+              boxShadow="sm"
+            >
+              <HStack>
                 <Icon as={IoAnalytics} color="blue.500" boxSize={5} mr={2} />
                 <Text>Processing your request...</Text>
-                </HStack>
-                <Progress size="xs" colorScheme="blue" isIndeterminate mt={3} />
-              </Box>
-            )}
+              </HStack>
+              <Progress size="xs" colorScheme="blue" isIndeterminate mt={3} />
+            </Box>
+          )}
         </Box>
         
         {/* Input area */}
-        <Box as="form" onSubmit={handleSubmit}>
+        <Box 
+          as="form" 
+          onSubmit={handleSubmit}
+          p={4}
+          bg="white"
+          borderTop="1px solid"
+          borderColor="gray.200"
+        >
           <InputGroup size="lg">
-              <Input
+            <Textarea
               placeholder="Ask about data models, lineage, or SQL..."
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
               borderColor="gray.300"
-              _focus={{ borderColor: 'purple.500', boxShadow: '0 0 0 1px purple.500' }}
+              _focus={{ 
+                borderColor: 'purple.400', 
+                boxShadow: '0 0 0 1px var(--chakra-colors-purple-400)' 
+              }}
               isDisabled={loading}
+              rows={input.length > 100 ? 3 : 1}
+              resize="none"
+              minHeight="52px"
+              py={2}
+              pr="70px"
+              fontSize="md"
+              borderRadius="md"
+              boxShadow="sm"
             />
-            <InputRightElement width="4.5rem">
+            <InputRightElement width="70px" height="100%" pr={2}>
               <Button
-                h="1.75rem" 
-                size="sm" 
+                size="md" 
                 colorScheme="purple" 
                 isLoading={loading}
                 type="submit"
                 leftIcon={<IoSend />}
                 disabled={!input.trim() || loading}
+                position="absolute"
+                right="8px"
+                top="50%"
+                transform="translateY(-50%)"
+                borderRadius="md"
               >
                 Send
               </Button>
             </InputRightElement>
           </InputGroup>
         </Box>
-    </Box>
+      </Box>
     </Container>
   );
 };

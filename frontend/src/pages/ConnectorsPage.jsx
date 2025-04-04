@@ -16,6 +16,7 @@ import {
   useColorModeValue,
 } from '@chakra-ui/react';
 import { FaSnowflake, FaGithub, FaDatabase } from 'react-icons/fa';
+import { IoServerOutline, IoChatboxEllipsesOutline } from 'react-icons/io5';
 import { Link } from 'react-router-dom';
 
 const ConnectorCard = ({ icon, title, description, status, to }) => {
@@ -73,13 +74,13 @@ const ConnectorsPage = () => {
           </Box>
 
           <SimpleGrid columns={{ base: 1, md: 2, lg: 3 }} spacing={6}>
-            {/* <ConnectorCard
-              icon={FaSnowflake}
-              title="Snowflake"
-              description="Connect to your Snowflake data warehouse to analyze schemas, tables, and views."
+            <ConnectorCard
+              icon={IoChatboxEllipsesOutline}
+              title="LLM Providers"
+              description="Configure API keys and settings for OpenAI, Anthropic, Google, and other LLM providers."
               status="active"
-              to="/connectors/snowflake"
-            /> */}
+              to="/connectors/llm"
+            />
             <ConnectorCard
               icon={FaGithub}
               title="GitHub"
@@ -87,6 +88,13 @@ const ConnectorsPage = () => {
               status="active"
               to="/connectors/github"
             />
+            {/* <ConnectorCard
+              icon={FaSnowflake}
+              title="Snowflake"
+              description="Connect to your Snowflake data warehouse to analyze schemas, tables, and views."
+              status="active"
+              to="/connectors/snowflake"
+            /> */}
             {/* <ConnectorCard
               icon={FaDatabase}
               title="Database"

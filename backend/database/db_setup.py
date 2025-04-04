@@ -1,6 +1,7 @@
 import sqlite3
 import os
 from pathlib import Path
+import json
 
 # Database paths
 DB_DIR = Path(__file__).parent
@@ -118,6 +119,53 @@ def setup_metadata_db():
     )
     ''')
     
+    # Create llm_providers table for storing provider information
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS llm_providers (
+        provider_id TEXT PRIMARY KEY,
+        name TEXT,
+        description TEXT,
+        api_url TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    ''')
+    
+    # Create llm_provider_configs table for storing user's provider configurations
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS llm_provider_configs (
+        config_id TEXT PRIMARY KEY,
+        user_id TEXT,
+        provider_id TEXT,
+        api_key TEXT,
+        api_key_encrypted BOOLEAN DEFAULT TRUE,
+        base_url TEXT,
+        organization TEXT,
+        default_model TEXT,
+        active BOOLEAN DEFAULT FALSE,
+        additional_settings JSON,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (provider_id) REFERENCES llm_providers (provider_id),
+        FOREIGN KEY (user_id) REFERENCES users (user_id)
+    )
+    ''')
+    
+    # Create llm_models table to store available models for each provider
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS llm_models (
+        model_id TEXT PRIMARY KEY,
+        provider_id TEXT,
+        name TEXT,
+        description TEXT,
+        context_length INTEGER,
+        is_default BOOLEAN DEFAULT FALSE,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (provider_id) REFERENCES llm_providers (provider_id)
+    )
+    ''')
+    
     conn.commit()
     conn.close()
 
@@ -129,6 +177,63 @@ def setup_all_databases():
     setup_conversations_db()
     setup_log_info_db()
     setup_metadata_db()
+    
+    # Insert default LLM providers if they don't exist
+    providers = [
+        ('openai', 'OpenAI', 'OpenAI API for GPT models', 'https://api.openai.com'),
+        ('anthropic', 'Anthropic', 'Anthropic API for Claude models', 'https://api.anthropic.com'),
+        ('google', 'Google AI', 'Google Gemini API', 'https://generativelanguage.googleapis.com'),
+        ('huggingface', 'HuggingFace', 'HuggingFace Inference API', 'https://api-inference.huggingface.co'),
+        ('ollama', 'Ollama', 'Local Ollama server for open-source models', 'http://localhost:11434')
+    ]
+    
+    conn_metadata = sqlite3.connect(METADATA_DB)
+    cursor_metadata = conn_metadata.cursor()
+    
+    for provider in providers:
+        cursor_metadata.execute(
+            'INSERT OR IGNORE INTO llm_providers (provider_id, name, description, api_url) VALUES (?, ?, ?, ?)',
+            provider
+        )
+    
+    # Insert default models for each provider
+    models = [
+        # OpenAI models
+        ('gpt-4o', 'openai', 'GPT-4o', 'Most capable OpenAI model', 128000, True),
+        ('gpt-4o-mini', 'openai', 'GPT-4o Mini', 'Smaller and more cost-effective', 128000, False),
+        ('gpt-4-turbo', 'openai', 'GPT-4 Turbo', 'Fast and powerful model', 128000, False),
+        ('gpt-3.5-turbo', 'openai', 'GPT-3.5 Turbo', 'Balanced performance and cost', 16000, False),
+        
+        # Anthropic models
+        ('claude-3-5-sonnet-20240620', 'anthropic', 'Claude 3.5 Sonnet', 'Latest Claude model with improved capabilities', 200000, True),
+        ('claude-3-opus-20240229', 'anthropic', 'Claude 3 Opus', 'Most powerful Claude model', 200000, False),
+        ('claude-3-sonnet-20240229', 'anthropic', 'Claude 3 Sonnet', 'Balanced performance and capabilities', 200000, False),
+        ('claude-3-haiku-20240307', 'anthropic', 'Claude 3 Haiku', 'Fast and efficient model', 200000, False),
+        
+        # Google models
+        ('gemini-1.5-pro', 'google', 'Gemini 1.5 Pro', 'Google\'s most capable model', 1000000, True),
+        ('gemini-1.5-flash', 'google', 'Gemini 1.5 Flash', 'Fast and efficient model', 1000000, False),
+        ('gemini-1.0-pro', 'google', 'Gemini 1.0 Pro', 'Previous generation model', 32000, False),
+        
+        # HuggingFace models
+        ('mistralai/Mixtral-8x7B-Instruct-v0.1', 'huggingface', 'Mixtral 8x7B', 'Powerful mixture of experts model', 32000, True),
+        ('meta-llama/Meta-Llama-3-8B-Instruct', 'huggingface', 'Llama 3 8B', 'Efficient open-source model', 8000, False),
+        ('meta-llama/Meta-Llama-3-70B-Instruct', 'huggingface', 'Llama 3 70B', 'Powerful open-source model', 8000, False),
+        
+        # Ollama models
+        ('llama3', 'ollama', 'Llama 3', 'Meta\'s Llama 3 model running locally', 8000, True),
+        ('mixtral', 'ollama', 'Mixtral 8x7B', 'Mixture of experts model running locally', 32000, False),
+        ('gemma', 'ollama', 'Gemma', 'Google\'s lightweight open model', 8000, False)
+    ]
+    
+    for model in models:
+        cursor_metadata.execute(
+            'INSERT OR IGNORE INTO llm_models (model_id, provider_id, name, description, context_length, is_default) VALUES (?, ?, ?, ?, ?, ?)',
+            model
+        )
+    
+    conn_metadata.commit()
+    conn_metadata.close()
     
     print("All databases and tables have been created successfully!")
 
