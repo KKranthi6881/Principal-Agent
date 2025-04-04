@@ -2,6 +2,7 @@
 API for GitHub vector store operations
 """
 import os
+import sys
 import json
 import time
 import tempfile
@@ -19,12 +20,62 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
 from utils import github_utils
-from vector_store.github_vectorstore import get_github_vector_store, decrypt_api_key
 from api.github_connectors_api import get_db_connection
 
 # Set up logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
+# Add the parent directory to the Python path if needed
+current_dir = os.path.dirname(os.path.abspath(__file__))
+parent_dir = os.path.dirname(current_dir)
+if parent_dir not in sys.path:
+    sys.path.insert(0, parent_dir)
+
+# Try importing from vector_store, with fallback functions if module isn't found
+try:
+    sys.path.append(parent_dir)
+    from vector_store.github_vectorstore import get_github_vector_store, decrypt_api_key
+    logger.info("Successfully imported vector_store functions")
+except ImportError as e:
+    logger.error(f"Error importing vector_store: {e}")
+    # Define fallback functions if the module isn't available
+    def get_github_vector_store():
+        """Fallback function to create the vector store"""
+        logger.warning("Using fallback vector store implementation")
+        try:
+            # Create the vector store directory
+            vector_store_path = os.path.join(parent_dir, "vector_store", "chromadb_github")
+            os.makedirs(vector_store_path, exist_ok=True)
+            
+            # Import and initialize ChromaDB
+            import chromadb
+            from chromadb.utils import embedding_functions
+            
+            # Create the client and collection
+            chroma_client = chromadb.PersistentClient(path=vector_store_path)
+            
+            try:
+                collection = chroma_client.get_collection("github_code")
+                logger.info(f"Found existing GitHub vector store with {collection.count()} documents")
+            except Exception:
+                # Create new collection
+                embedding_func = embedding_functions.DefaultEmbeddingFunction()
+                collection = chroma_client.create_collection(
+                    name="github_code",
+                    embedding_function=embedding_func
+                )
+                logger.info("Created new GitHub vector store collection")
+                
+            return collection
+        except Exception as e:
+            logger.error(f"Error in fallback vector store: {e}")
+            return None
+    
+    def decrypt_api_key(encrypted_key):
+        """Fallback decryption function"""
+        logger.warning("Using dummy decrypt_api_key function")
+        return encrypted_key  # Return as-is in fallback mode
 
 # Create router
 router = APIRouter(prefix="/api/github", tags=["github"])
