@@ -2433,50 +2433,52 @@ const ChatPage = () => {
     const fetchModels = async () => {
       try {
         console.log("Fetching models from backend...");
-        // Use the direct path to models endpoint without /api prefix
-        const response = await fetch('/models/models');
-        if (response.ok) {
-          const data = await response.json();
-          console.log("Models data received:", data);
-          setAllModels(data);
-          
-          // Group models by provider
-          const providerMap = {};
-          data.forEach(model => {
-            if (!providerMap[model.provider_id]) {
-              providerMap[model.provider_id] = {
-                id: model.provider_id,
-                name: model.provider_name,
-                models: []
-              };
-            }
-            providerMap[model.provider_id].models.push(model);
-          });
-          
-          console.log("Provider map:", providerMap);
-          const providersList = Object.values(providerMap);
-          console.log("Setting providers state with:", providersList);
-          setProviders(providersList);
-          
-          // Set default models for OpenAI provider or use the first provider if OpenAI isn't available
-          const openAIModels = data.filter(model => model.provider_id === 'openai');
-          console.log("OpenAI models:", openAIModels);
-          
-          if (openAIModels.length > 0) {
-            console.log("Setting OpenAI as default provider");
-            setModelsForProvider(openAIModels);
-            setSelectedModel(openAIModels[0].model_id);
-          } else if (data.length > 0) {
-            const firstProviderId = data[0].provider_id;
-            console.log("Using first available provider:", firstProviderId);
-            const firstProviderModels = data.filter(model => model.provider_id === firstProviderId);
-            console.log("First provider models:", firstProviderModels);
-            setSelectedProvider(firstProviderId);
-            setModelsForProvider(firstProviderModels);
-            setSelectedModel(firstProviderModels[0].model_id);
+        
+        // Change the URL from /models/models to just /models
+        const response = await fetch('/models');
+        
+        if (!response.ok) {
+          throw new Error(`API returned ${response.status}: ${response.statusText}`);
+        }
+        
+        const data = await response.json();
+        console.log("Models data received:", data);
+        setAllModels(data);
+        
+        // Group models by provider
+        const providerMap = {};
+        data.forEach(model => {
+          if (!providerMap[model.provider_id]) {
+            providerMap[model.provider_id] = {
+              id: model.provider_id,
+              name: model.provider_name,
+              models: []
+            };
           }
-        } else {
-          console.error('Failed to fetch models:', await response.text());
+          providerMap[model.provider_id].models.push(model);
+        });
+        
+        console.log("Provider map:", providerMap);
+        const providersList = Object.values(providerMap);
+        console.log("Setting providers state with:", providersList);
+        setProviders(providersList);
+        
+        // Set default models for OpenAI provider or use the first provider if OpenAI isn't available
+        const openAIModels = data.filter(model => model.provider_id === 'openai');
+        console.log("OpenAI models:", openAIModels);
+        
+        if (openAIModels.length > 0) {
+          console.log("Setting OpenAI as default provider");
+          setModelsForProvider(openAIModels);
+          setSelectedModel(openAIModels[0].model_id);
+        } else if (data.length > 0) {
+          const firstProviderId = data[0].provider_id;
+          console.log("Using first available provider:", firstProviderId);
+          const firstProviderModels = data.filter(model => model.provider_id === firstProviderId);
+          console.log("First provider models:", firstProviderModels);
+          setSelectedProvider(firstProviderId);
+          setModelsForProvider(firstProviderModels);
+          setSelectedModel(firstProviderModels[0].model_id);
         }
       } catch (error) {
         console.error('Error fetching models:', error);

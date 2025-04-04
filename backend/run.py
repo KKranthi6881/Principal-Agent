@@ -4,6 +4,8 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from api import llm_providers_api
 from api import github_connectors_api
+from api import github_vector_api
+from api import models_api
 from database.migrations import run_migrations
 
 # Create FastAPI app
@@ -21,6 +23,8 @@ app.add_middleware(
 # Include routers
 app.include_router(llm_providers_api.router)
 app.include_router(github_connectors_api.router)
+app.include_router(github_vector_api.router)
+app.include_router(models_api.router)
 
 # Startup event
 @app.on_event("startup")

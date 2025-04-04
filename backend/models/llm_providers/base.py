@@ -5,6 +5,16 @@ from abc import ABC, abstractmethod
 from typing import List, Dict, Any, Optional
 
 
+class ProviderError(Exception):
+    """Exception raised for provider-specific errors."""
+    pass
+
+
+class ModelNotFoundError(Exception):
+    """Exception raised when a requested model is not found."""
+    pass
+
+
 class BaseLLMProvider(ABC):
     """
     Abstract base class for LLM providers.

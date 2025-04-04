@@ -53,7 +53,7 @@ async def get_providers():
         raise HTTPException(status_code=500, detail=f"Error getting providers: {str(e)}")
 
 
-@router.get("/models")
+@router.get("/")
 async def get_models():
     """
     Get all available LLM models

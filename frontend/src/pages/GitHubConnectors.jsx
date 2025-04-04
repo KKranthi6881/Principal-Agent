@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   Box,
   Container,
@@ -69,7 +69,9 @@ import {
   Tab,
   TabPanel,
   SimpleGrid,
-  Icon
+  Icon,
+  Progress,
+  Circle
 } from '@chakra-ui/react';
 import {
   IoCheckmarkCircle,
@@ -122,10 +124,142 @@ const GitHubConnectors = () => {
   // Form errors
   const [errors, setErrors] = useState({});
   
+  // Vector sync modal state
+  const [isVectorSyncModalOpen, setIsVectorSyncModalOpen] = useState(false);
+  const [selectedVectorConnector, setSelectedVectorConnector] = useState(null);
+  const [selectedEmbeddingProvider, setSelectedEmbeddingProvider] = useState('openai-small');
+  const [embedddingProviders, setEmbeddingProviders] = useState([]);
+  const [isLoadingProviders, setIsLoadingProviders] = useState(false);
+  const [isSyncing, setIsSyncing] = useState(false);
+  const [syncResult, setSyncResult] = useState(null);
+  const [forceFullSync, setForceFullSync] = useState(false);
+  
+  // Sync status tracking
+  const [syncStatuses, setSyncStatuses] = useState({});
+  const [pollingActive, setPollingActive] = useState(false);
+  const pollingRef = useRef(null);
+  
   // Fetch connectors on component mount
   useEffect(() => {
     fetchConnectors();
+    fetchEmbeddingProviders();
+    
+    // Start polling for sync statuses
+    setPollingActive(true);
+    
+    return () => {
+      // Clean up polling interval on component unmount
+      setPollingActive(false);
+      if (pollingRef.current) {
+        clearTimeout(pollingRef.current);
+      }
+    };
   }, []);
+  
+  // Set up polling for sync statuses
+  useEffect(() => {
+    const pollSyncStatuses = async () => {
+      if (!pollingActive) return;
+      
+      try {
+        await fetchSyncStatuses();
+        
+        // Poll less frequently (10 seconds) to reduce load
+        pollingRef.current = setTimeout(pollSyncStatuses, 50000);
+      } catch (error) {
+        console.error('Error in polling sync statuses:', error);
+        // Wait for a little longer before trying again after an error
+        pollingRef.current = setTimeout(pollSyncStatuses, 50000);
+      }
+    };
+    
+    pollSyncStatuses();
+    
+    return () => {
+      if (pollingRef.current) {
+        clearTimeout(pollingRef.current);
+      }
+    };
+  }, [pollingActive]);
+  
+  // Fetch sync statuses for all connectors
+  const fetchSyncStatuses = async () => {
+    try {
+      const response = await fetch('/api/github/syncs?limit=50');
+      if (!response.ok) {
+        throw new Error(`API error: ${response.status}`);
+      }
+      
+      const data = await response.json();
+      
+      // Group syncs by connector_id and repo_url
+      const statusMap = {};
+      
+      if (data.syncs && data.syncs.length > 0) {
+        data.syncs.forEach(sync => {
+          const key = `${sync.connector_id}_${sync.repo_url}_${sync.embedding_provider}`;
+          
+          // Only keep the most recent sync for each connector+repo+provider combination
+          if (!statusMap[key] || new Date(sync.sync_timestamp) > new Date(statusMap[key].sync_timestamp)) {
+            statusMap[key] = sync;
+          }
+        });
+      }
+      
+      setSyncStatuses(statusMap);
+    } catch (error) {
+      console.error('Error fetching sync statuses:', error);
+    }
+  };
+  
+  // Get sync status for a specific connector and provider
+  const getSyncStatus = (connector, embeddingProvider) => {
+    // Create a repo URL if it's not directly available
+    let repoUrl = connector.repo_url || '';
+    
+    if (!repoUrl && connector.github_type === 'public') {
+      if (connector.repositories && connector.repositories.length > 0) {
+        const firstRepo = connector.repositories[0];
+        if (firstRepo.includes('/')) {
+          repoUrl = `https://github.com/${firstRepo}`;
+        } else if (connector.owner) {
+          repoUrl = `https://github.com/${connector.owner}/${firstRepo}`;
+        }
+      } else if (connector.owner) {
+        repoUrl = `https://github.com/${connector.owner}/${connector.name.replace(/\s+/g, '-').toLowerCase()}`;
+      }
+    }
+    
+    if (!repoUrl) return null;
+    
+    const key = `${connector.id}_${repoUrl}_${embeddingProvider}`;
+    return syncStatuses[key];
+  };
+  
+  // Check if a sync is active for a connector
+  const isConnectorSyncing = (connector) => {
+    const providers = ["openai-small", "openai-large", "ollama"];
+    
+    return providers.some(provider => {
+      const status = getSyncStatus(connector, provider);
+      return status && status.status === 'in_progress';
+    });
+  };
+  
+  // Get the most recent sync for a connector across all providers
+  const getMostRecentSync = (connector) => {
+    const providers = ["openai-small", "openai-large", "ollama"];
+    let mostRecent = null;
+    
+    providers.forEach(provider => {
+      const status = getSyncStatus(connector, provider);
+      if (status && (!mostRecent || new Date(status.sync_timestamp) > new Date(mostRecent.sync_timestamp))) {
+        mostRecent = status;
+      }
+    });
+    
+    return mostRecent;
+  };
   
   // Fetch all GitHub connectors
   const fetchConnectors = async () => {
@@ -138,6 +272,9 @@ const GitHubConnectors = () => {
       
       const data = await response.json();
       setConnectors(data.connectors || []);
+      
+      // After fetching connectors, fetch sync statuses
+      fetchSyncStatuses();
     } catch (error) {
       console.error('Error fetching GitHub connectors:', error);
       toast({
@@ -149,6 +286,31 @@ const GitHubConnectors = () => {
       });
     } finally {
       setIsLoading(false);
+    }
+  };
+  
+  // Fetch embedding providers
+  const fetchEmbeddingProviders = async () => {
+    setIsLoadingProviders(true);
+    try {
+      const response = await fetch('/api/github/providers');
+      if (!response.ok) {
+        throw new Error(`API error: ${response.status}`);
+      }
+      
+      const data = await response.json();
+      setEmbeddingProviders(data.providers || []);
+    } catch (error) {
+      console.error('Error fetching embedding providers:', error);
+      toast({
+        title: 'Error fetching embedding providers',
+        description: error.message,
+        status: 'error',
+        duration: 5000,
+        isClosable: true,
+      });
+    } finally {
+      setIsLoadingProviders(false);
     }
   };
   
@@ -465,6 +627,395 @@ const GitHubConnectors = () => {
     }
   };
   
+  // Handle vector sync button click
+  const handleVectorSync = (connector) => {
+    setSelectedVectorConnector(connector);
+    setIsVectorSyncModalOpen(true);
+    setSyncResult(null);
+    setForceFullSync(false);
+  };
+  
+  // Start vector sync
+  const startVectorSync = async () => {
+    if (!selectedVectorConnector) return;
+    
+    setIsSyncing(true);
+    setSyncResult(null);
+    
+    try {
+      // Build the request
+      const request = {
+        connector_id: selectedVectorConnector.id,
+        repo_url: selectedVectorConnector.repo_url || '', // Use repo_url if available
+        embedding_provider: selectedEmbeddingProvider,
+        force_full_sync: forceFullSync,
+        branch: selectedVectorConnector.default_branch || 'main'
+      };
+      
+      // If repo_url is not available, construct it from other fields
+      if (!request.repo_url && selectedVectorConnector.github_type === 'public') {
+        // Handle different repository formats
+        if (selectedVectorConnector.repositories && selectedVectorConnector.repositories.length > 0) {
+          const firstRepo = selectedVectorConnector.repositories[0];
+          if (firstRepo.includes('/')) {
+            // It's already in owner/repo format
+            request.repo_url = `https://github.com/${firstRepo}`;
+          } else if (selectedVectorConnector.owner) {
+            // We have owner and repo separately
+            request.repo_url = `https://github.com/${selectedVectorConnector.owner}/${firstRepo}`;
+          }
+        } else if (selectedVectorConnector.owner) {
+          // For older connectors that might not have repositories defined
+          request.repo_url = `https://github.com/${selectedVectorConnector.owner}/${selectedVectorConnector.name.replace(/\s+/g, '-').toLowerCase()}`;
+        }
+      }
+      
+      // Make sure we have a repo URL
+      if (!request.repo_url) {
+        throw new Error("No repository URL available for sync");
+      }
+      
+      // Call the API
+      const response = await fetch('/api/github/sync', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(request)
+      });
+      
+      const data = await response.json();
+      
+      if (!response.ok) {
+        // Handle specific error cases
+        if (data.detail && data.detail.includes("OpenAI API key is required")) {
+          throw new Error("OpenAI API key is missing. Please add an OpenAI provider in Settings > LLM Providers.");
+        } else if (data.detail && data.detail.includes("Ollama")) {
+          throw new Error("Ollama connection error. Make sure Ollama is running on your machine.");
+        } else {
+          throw new Error(data.detail || `API error: ${response.status}`);
+        }
+      }
+      
+      setSyncResult({
+        success: true,
+        syncId: data.sync_id,
+        message: `Sync started with ID ${data.sync_id}. Check status in background tasks.`,
+        status: data.status
+      });
+      
+      toast({
+        title: 'Vector Sync Started',
+        description: `Sync process started for repository. This may take some time to complete.`,
+        status: 'info',
+        duration: 5000,
+        isClosable: true,
+      });
+      
+      // Immediately fetch sync statuses to update UI
+      fetchSyncStatuses();
+      
+      // Auto-close the modal after successful sync start
+      setTimeout(() => {
+        closeVectorSyncModal();
+      }, 3000);
+      
+    } catch (error) {
+      console.error('Error starting vector sync:', error);
+      
+      // Create a more user-friendly error message with instructions
+      let errorMessage = error.message;
+      let detailedInstructions = "";
+      
+      if (error.message.includes("OpenAI API key")) {
+        errorMessage = "OpenAI API key is required for OpenAI embeddings";
+        detailedInstructions = `
+          To configure an OpenAI provider:
+          1. Go to Settings > LLM Providers
+          2. Click "Add Provider"
+          3. Select "OpenAI" as the provider
+          4. Enter your API key from openai.com
+          5. Click Save
+        `;
+      } else if (error.message.includes("Ollama")) {
+        errorMessage = "Error connecting to Ollama. Please make sure Ollama is running on your machine.";
+        detailedInstructions = `
+          To use Ollama:
+          1. Ensure Ollama is installed and running on your machine
+          2. Verify Ollama is accessible at http://localhost:11434
+        `;
+      }
+      
+      setSyncResult({
+        success: false,
+        message: errorMessage,
+        detailedInstructions: detailedInstructions,
+        status: 'failed'
+      });
+      
+      toast({
+        title: 'Error Starting Vector Sync',
+        description: errorMessage,
+        status: 'error',
+        duration: 5000,
+        isClosable: true,
+      });
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+  
+  // Delete vectors
+  const deleteVectors = async () => {
+    if (!selectedVectorConnector) return;
+    
+    setIsSyncing(true);
+    setSyncResult(null);
+    
+    try {
+      // Build the request
+      const request = {
+        connector_id: selectedVectorConnector.id,
+        repo_url: selectedVectorConnector.repo_url || '',
+        embedding_provider: selectedEmbeddingProvider
+      };
+      
+      // If repo_url is not available, construct it from other fields (same as in startVectorSync)
+      if (!request.repo_url && selectedVectorConnector.github_type === 'public') {
+        if (selectedVectorConnector.repositories && selectedVectorConnector.repositories.length > 0) {
+          const firstRepo = selectedVectorConnector.repositories[0];
+          if (firstRepo.includes('/')) {
+            request.repo_url = `https://github.com/${firstRepo}`;
+          } else if (selectedVectorConnector.owner) {
+            request.repo_url = `https://github.com/${selectedVectorConnector.owner}/${firstRepo}`;
+          }
+        } else if (selectedVectorConnector.owner) {
+          request.repo_url = `https://github.com/${selectedVectorConnector.owner}/${selectedVectorConnector.name.replace(/\s+/g, '-').toLowerCase()}`;
+        }
+      }
+      
+      // Make sure we have a repo URL
+      if (!request.repo_url) {
+        throw new Error("No repository URL available to delete");
+      }
+      
+      // Call the API
+      const response = await fetch('/api/github/delete', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(request)
+      });
+      
+      const data = await response.json();
+      
+      if (!response.ok) {
+        // Handle specific error cases
+        if (data.detail && data.detail.includes("OpenAI API key is required")) {
+          throw new Error("OpenAI API key is missing. Please add an OpenAI provider in Settings > LLM Providers with a valid API key.");
+        } else if (data.detail && data.detail.includes("Ollama")) {
+          throw new Error("Ollama connection error. Make sure Ollama is running on your machine.");
+        } else {
+          throw new Error(data.detail || `API error: ${response.status}`);
+        }
+      }
+      
+      setSyncResult({
+        success: data.success,
+        message: data.message,
+        status: data.success ? 'completed' : 'failed'
+      });
+      
+      toast({
+        title: data.success ? 'Vectors Deleted' : 'Error Deleting Vectors',
+        description: data.message,
+        status: data.success ? 'success' : 'error',
+        duration: 5000,
+        isClosable: true,
+      });
+      
+    } catch (error) {
+      console.error('Error deleting vectors:', error);
+      
+      // Create a more user-friendly error message
+      let errorMessage = error.message;
+      if (error.message.includes("OpenAI API key")) {
+        errorMessage = "OpenAI API key is required. Please configure an OpenAI provider in Settings > LLM Providers.";
+      } else if (error.message.includes("Ollama")) {
+        errorMessage = "Error connecting to Ollama. Please make sure Ollama is running on your machine.";
+      }
+      
+      setSyncResult({
+        success: false,
+        message: errorMessage,
+        status: 'failed'
+      });
+      
+      toast({
+        title: 'Error Deleting Vectors',
+        description: errorMessage,
+        status: 'error',
+        duration: 5000,
+        isClosable: true,
+      });
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+  
+  // Close vector sync modal
+  const closeVectorSyncModal = () => {
+    setIsVectorSyncModalOpen(false);
+    setSelectedVectorConnector(null);
+    setSyncResult(null);
+    
+    // Trigger a final fetch to ensure UI is up to date
+    fetchSyncStatuses();
+  };
+  
+  // Vector Sync Modal Component
+  const VectorSyncModal = () => (
+    <Modal isOpen={isVectorSyncModalOpen} onClose={closeVectorSyncModal} isCentered size="lg">
+      <ModalOverlay />
+      <ModalContent>
+        <ModalHeader>Vector Store Sync</ModalHeader>
+        <ModalCloseButton />
+        <ModalBody>
+          {selectedVectorConnector && (
+            <VStack spacing={4} align="stretch">
+              <Box>
+                <Text fontWeight="bold">Repository:</Text>
+                <Text mt={1}>{selectedVectorConnector.repo_url || 
+                  (selectedVectorConnector.owner && selectedVectorConnector.repositories && selectedVectorConnector.repositories.length > 0 ? 
+                    `${selectedVectorConnector.owner}/${selectedVectorConnector.repositories[0]}` : 
+                    'Unknown')}</Text>
+              </Box>
+              
+              <FormControl>
+                <FormLabel>Embedding Provider</FormLabel>
+                <Select 
+                  value={selectedEmbeddingProvider}
+                  onChange={(e) => setSelectedEmbeddingProvider(e.target.value)}
+                  isDisabled={isSyncing}
+                >
+                  {embedddingProviders.map(provider => (
+                    <option key={provider.id} value={provider.id}>
+                      {provider.name}
+                    </option>
+                  ))}
+                </Select>
+                <Text fontSize="xs" color="gray.600" mt={1}>
+                  Select the embedding model to use for vector storage
+                </Text>
+                
+                {selectedEmbeddingProvider.startsWith('openai') && (
+                  <Alert status="info" variant="left-accent" mt={2} size="sm">
+                    <AlertIcon />
+                    <Box>
+                      <Text fontSize="xs">
+                        Requires an OpenAI API key to be configured in Settings &gt; LLM Providers. 
+                        Uses your OpenAI account credits.
+                      </Text>
+                    </Box>
+                  </Alert>
+                )}
+                
+                {selectedEmbeddingProvider === 'ollama' && (
+                  <Alert status="info" variant="left-accent" mt={2} size="sm">
+                    <AlertIcon />
+                    <Box>
+                      <Text fontSize="xs">
+                        Uses local Ollama instance for embeddings (free, no API key required).
+                        Requires Ollama to be running on your machine.
+                      </Text>
+                    </Box>
+                  </Alert>
+                )}
+              </FormControl>
+              
+              <FormControl display="flex" alignItems="center" mt={2}>
+                <FormLabel htmlFor="force-full-sync" mb="0">
+                  Force Full Sync
+                </FormLabel>
+                <Switch 
+                  id="force-full-sync" 
+                  isChecked={forceFullSync}
+                  onChange={(e) => setForceFullSync(e.target.checked)}
+                  isDisabled={isSyncing}
+                  colorScheme="teal"
+                />
+                <Tooltip label="Re-sync all files ignoring previous sync history">
+                  <IconButton
+                    icon={<IoInformationCircle />}
+                    size="xs"
+                    variant="ghost"
+                    ml={1}
+                    aria-label="Force full sync info"
+                  />
+                </Tooltip>
+              </FormControl>
+              
+              {syncResult && (
+                <Alert
+                  status={syncResult.success ? 'success' : 'error'}
+                  variant="subtle"
+                  flexDirection="column"
+                  alignItems="flex-start"
+                  mt={2}
+                  mb={2}
+                  borderRadius="md"
+                >
+                  <HStack mb={1}>
+                    <AlertIcon />
+                    <AlertTitle>
+                      {syncResult.success ? 'Operation Successful' : 'Operation Failed'}
+                    </AlertTitle>
+                  </HStack>
+                  <AlertDescription>
+                    <Text>{syncResult.message}</Text>
+                    {syncResult.syncId && (
+                      <Text mt={2} fontSize="sm">Sync ID: {syncResult.syncId}</Text>
+                    )}
+                    
+                    {!syncResult.success && syncResult.detailedInstructions && (
+                      <Box mt={3} p={3} bg="gray.50" borderRadius="md">
+                        <Text fontWeight="bold" mb={2}>How to fix this:</Text>
+                        <Text whiteSpace="pre-line">{syncResult.detailedInstructions}</Text>
+                      </Box>
+                    )}
+                  </AlertDescription>
+                </Alert>
+              )}
+            </VStack>
+          )}
+        </ModalBody>
+        <ModalFooter>
+          <Button variant="outline" mr={3} onClick={closeVectorSyncModal}>
+            Close
+          </Button>
+          <Button
+            colorScheme="red"
+            mr={3}
+            isLoading={isSyncing}
+            onClick={deleteVectors}
+            leftIcon={<IoTrash />}
+          >
+            Delete Vectors
+          </Button>
+          <Button
+            colorScheme="teal"
+            isLoading={isSyncing}
+            onClick={startVectorSync}
+            leftIcon={<IoRefresh />}
+          >
+            Sync Now
+          </Button>
+        </ModalFooter>
+      </ModalContent>
+    </Modal>
+  );
+  
   // Render list of existing connectors
   const renderConnectorsList = () => {
     if (isLoading) {
@@ -488,123 +1039,183 @@ const GitHubConnectors = () => {
     
     return (
       <VStack spacing={4} align="stretch">
-        {connectors.map((connector) => (
-          <Card key={connector.id} variant="outline">
-            <CardHeader>
-              <Flex justify="space-between" align="center">
-                <HStack>
-                  <Icon as={IoLogoGithub} w={6} h={6} color="purple.500" />
-                  <Heading size="md">{connector.name}</Heading>
-                  <Badge colorScheme={connector.active ? 'green' : 'gray'}>
-                    {connector.active ? 'Active' : 'Inactive'}
-                  </Badge>
-                  <Badge colorScheme={connector.github_type === 'public' ? 'blue' : 'orange'}>
-                    {connector.github_type === 'public' ? 'Public GitHub' : 'Enterprise GitHub'}
-                  </Badge>
-                </HStack>
-                <HStack>
-                  <Button 
-                    size="sm" 
-                    leftIcon={<IoSettings />} 
-                    colorScheme="purple" 
-                    variant="outline"
-                    onClick={() => handleEdit(connector)}
-                  >
-                    Edit
-                  </Button>
-                  <Button 
-                    size="sm" 
-                    leftIcon={<IoTrash />} 
-                    colorScheme="red" 
-                    variant="outline"
-                    onClick={() => confirmDelete(connector)}
-                  >
-                    Delete
-                  </Button>
-                </HStack>
-              </Flex>
-            </CardHeader>
-            <CardBody pt={0}>
-              {connector.description && (
-                <Text mb={4} color="gray.600">{connector.description}</Text>
-              )}
-              
-              <SimpleGrid columns={{ base: 1, md: 2 }} spacing={4}>
-                <Box>
-                  <Heading size="xs" mb={2}>Connection Details</Heading>
-                  <List spacing={2}>
-                    <ListItem>
-                      <HStack>
-                        <Icon as={IoPerson} color="gray.500" />
-                        <Text fontWeight="bold" mr={1}>Owner:</Text>
-                        <Text>{connector.owner || '-'}</Text>
-                      </HStack>
-                    </ListItem>
-                    {connector.organization && (
-                      <ListItem>
-                        <HStack>
-                          <Icon as={IoServer} color="gray.500" />
-                          <Text fontWeight="bold" mr={1}>Organization:</Text>
-                          <Text>{connector.organization}</Text>
+        {connectors.map((connector) => {
+          const isSyncing = isConnectorSyncing(connector);
+          const recentSync = getMostRecentSync(connector);
+          
+          return (
+            <Card key={connector.id} variant="outline">
+              <CardHeader>
+                <Flex justify="space-between" align="center">
+                  <HStack>
+                    <Icon as={IoLogoGithub} w={6} h={6} color="purple.500" />
+                    <Heading size="md">{connector.name}</Heading>
+                    <Badge colorScheme={connector.active ? 'green' : 'gray'}>
+                      {connector.active ? 'Active' : 'Inactive'}
+                    </Badge>
+                    <Badge colorScheme={connector.github_type === 'public' ? 'blue' : 'orange'}>
+                      {connector.github_type === 'public' ? 'Public GitHub' : 'Enterprise GitHub'}
+                    </Badge>
+                    
+                    {/* Sync Status Badge */}
+                    {recentSync && (
+                      <Badge 
+                        colorScheme={
+                          recentSync.status === 'completed' ? 'green' : 
+                          recentSync.status === 'in_progress' ? 'blue' : 'red'
+                        }
+                      >
+                        <HStack spacing={1}>
+                          {recentSync.status === 'in_progress' && <Spinner size="xs" />}
+                          <Text>
+                            {recentSync.status === 'completed' ? 'Synced' : 
+                             recentSync.status === 'in_progress' ? 'Syncing' : 'Failed'}
+                          </Text>
                         </HStack>
-                      </ListItem>
+                      </Badge>
                     )}
-                    {connector.github_type === 'enterprise' && connector.api_url && (
-                      <ListItem>
-                        <HStack>
-                          <Icon as={IoLink} color="gray.500" />
-                          <Text fontWeight="bold" mr={1}>API URL:</Text>
-                          <Text>{connector.api_url}</Text>
-                        </HStack>
-                      </ListItem>
-                    )}
-                    <ListItem>
-                      <HStack>
-                        <Icon as={IoGitBranch} color="gray.500" />
-                        <Text fontWeight="bold" mr={1}>Default Branch:</Text>
-                        <Text>{connector.default_branch || 'main'}</Text>
-                      </HStack>
-                    </ListItem>
-                    <ListItem>
-                      <HStack>
-                        <Icon as={IoLockClosed} color="gray.500" />
-                        <Text fontWeight="bold" mr={1}>Token:</Text>
-                        <Text>{connector.has_token ? '••••••••' : 'Not set'}</Text>
-                      </HStack>
-                    </ListItem>
-                  </List>
-                </Box>
+                  </HStack>
+                  <HStack>
+                    <Button 
+                      size="sm" 
+                      leftIcon={isSyncing ? <Spinner size="xs" /> : <IoRefresh />} 
+                      colorScheme="teal" 
+                      variant="outline"
+                      onClick={() => handleVectorSync(connector)}
+                      isLoading={isSyncing}
+                      loadingText="Syncing"
+                    >
+                      {isSyncing ? 'Syncing' : 'Vector Sync'}
+                    </Button>
+                    <Button 
+                      size="sm" 
+                      leftIcon={<IoSettings />} 
+                      colorScheme="purple" 
+                      variant="outline"
+                      onClick={() => handleEdit(connector)}
+                    >
+                      Edit
+                    </Button>
+                    <Button 
+                      size="sm" 
+                      leftIcon={<IoTrash />} 
+                      colorScheme="red" 
+                      variant="outline"
+                      onClick={() => confirmDelete(connector)}
+                    >
+                      Delete
+                    </Button>
+                  </HStack>
+                </Flex>
+              </CardHeader>
+              <CardBody pt={0}>
+                {connector.description && (
+                  <Text mb={4} color="gray.600">{connector.description}</Text>
+                )}
                 
-                <Box>
-                  <Heading size="xs" mb={2}>Repositories</Heading>
-                  {connector.repositories && connector.repositories.length > 0 ? (
-                    <Box maxH="120px" overflowY="auto" p={2} borderWidth="1px" borderRadius="md">
-                      <List spacing={1}>
-                        {connector.repositories.map((repo, index) => (
-                          <ListItem key={index}>
-                            <HStack>
-                              <Icon as={IoCode} color="gray.500" />
-                              <Text>{repo}</Text>
-                            </HStack>
-                          </ListItem>
-                        ))}
-                      </List>
-                    </Box>
-                  ) : (
-                    <Text color="gray.500">No specific repositories configured</Text>
-                  )}
-                </Box>
-              </SimpleGrid>
-            </CardBody>
-            <CardFooter pt={0}>
-              <Text fontSize="sm" color="gray.500">
-                Created: {new Date(connector.created_at).toLocaleString()}
-                {connector.updated_at !== connector.created_at && 
-                  ` • Updated: ${new Date(connector.updated_at).toLocaleString()}`}
-              </Text>
-            </CardFooter>
-          </Card>
-        ))}
+                {/* Sync Progress Display */}
+                {isSyncing && (
+                  <Box mb={4}>
+                    <Text fontSize="sm" fontWeight="medium" mb={1}>Vector Sync in Progress</Text>
+                    <Progress size="sm" isIndeterminate colorScheme="blue" />
+                  </Box>
+                )}
+                
+                {/* Sync Status Info */}
+                {recentSync && recentSync.status !== 'in_progress' && (
+                  <Box mb={4}>
+                    <Flex align="center" gap={2}>
+                      <Circle 
+                        size="10px" 
+                        bg={recentSync.status === 'completed' ? 'green.500' : 'red.500'} 
+                      />
+                      <Text fontSize="sm" fontWeight="medium">
+                        {recentSync.status === 'completed' 
+                          ? `Last sync: ${recentSync.files_processed} files processed (${new Date(recentSync.sync_timestamp).toLocaleString()})` 
+                          : `Sync failed: ${recentSync.error_message || 'Unknown error'}`
+                        }
+                      </Text>
+                    </Flex>
+                  </Box>
+                )}
+                
+                <SimpleGrid columns={{ base: 1, md: 2 }} spacing={4}>
+                  <Box>
+                    <Heading size="xs" mb={2}>Connection Details</Heading>
+                    <List spacing={2}>
+                      <ListItem>
+                        <HStack>
+                          <Icon as={IoPerson} color="gray.500" />
+                          <Text fontWeight="bold" mr={1}>Owner:</Text>
+                          <Text>{connector.owner || '-'}</Text>
+                        </HStack>
+                      </ListItem>
+                      {connector.organization && (
+                        <ListItem>
+                          <HStack>
+                            <Icon as={IoServer} color="gray.500" />
+                            <Text fontWeight="bold" mr={1}>Organization:</Text>
+                            <Text>{connector.organization}</Text>
+                          </HStack>
+                        </ListItem>
+                      )}
+                      {connector.github_type === 'enterprise' && connector.api_url && (
+                        <ListItem>
+                          <HStack>
+                            <Icon as={IoLink} color="gray.500" />
+                            <Text fontWeight="bold" mr={1}>API URL:</Text>
+                            <Text>{connector.api_url}</Text>
+                          </HStack>
+                        </ListItem>
+                      )}
+                      <ListItem>
+                        <HStack>
+                          <Icon as={IoGitBranch} color="gray.500" />
+                          <Text fontWeight="bold" mr={1}>Default Branch:</Text>
+                          <Text>{connector.default_branch || 'main'}</Text>
+                        </HStack>
+                      </ListItem>
+                      <ListItem>
+                        <HStack>
+                          <Icon as={IoLockClosed} color="gray.500" />
+                          <Text fontWeight="bold" mr={1}>Token:</Text>
+                          <Text>{connector.has_token ? '••••••••' : 'Not set'}</Text>
+                        </HStack>
+                      </ListItem>
+                    </List>
+                  </Box>
+                  
+                  <Box>
+                    <Heading size="xs" mb={2}>Repositories</Heading>
+                    {connector.repositories && connector.repositories.length > 0 ? (
+                      <Box maxH="120px" overflowY="auto" p={2} borderWidth="1px" borderRadius="md">
+                        <List spacing={1}>
+                          {connector.repositories.map((repo, index) => (
+                            <ListItem key={index}>
+                              <HStack>
+                                <Icon as={IoCode} color="gray.500" />
+                                <Text>{repo}</Text>
+                              </HStack>
+                            </ListItem>
+                          ))}
+                        </List>
+                      </Box>
+                    ) : (
+                      <Text color="gray.500">No specific repositories configured</Text>
+                    )}
+                  </Box>
+                </SimpleGrid>
+              </CardBody>
+              <CardFooter pt={0}>
+                <Text fontSize="sm" color="gray.500">
+                  Created: {new Date(connector.created_at).toLocaleString()}
+                  {connector.updated_at !== connector.created_at && 
+                    ` • Updated: ${new Date(connector.updated_at).toLocaleString()}`}
+                </Text>
+              </CardFooter>
+            </Card>
+          );
+        })}
       </VStack>
     );
   };
@@ -994,6 +1605,9 @@ const GitHubConnectors = () => {
           </ModalFooter>
         </ModalContent>
       </Modal>
+      
+      {/* Vector Sync Modal */}
+      <VectorSyncModal />
     </Container>
   );
 };

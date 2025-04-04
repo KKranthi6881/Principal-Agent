@@ -15,8 +15,11 @@ from .llm_providers import get_llm_provider, BaseLLMProvider
 # These imports are just for type hints and for listing available models
 try:
     from .llm_providers.openai import OpenAIProvider
-except ImportError:
+    OPENAI_AVAILABLE = True
+except ImportError as e:
+    print(f"OpenAI provider import error: {e}")
     OpenAIProvider = None
+    OPENAI_AVAILABLE = False
 
 try:
     from .llm_providers.anthropic import AnthropicProvider
@@ -51,7 +54,7 @@ class ModelManager:
         
         # Dictionary of provider classes, filtered to only include those that are available
         self.providers = {}
-        if OpenAIProvider:
+        if OPENAI_AVAILABLE:
             self.providers["openai"] = OpenAIProvider
         if AnthropicProvider:
             self.providers["anthropic"] = AnthropicProvider
@@ -65,6 +68,13 @@ class ModelManager:
         # If no providers are available, add a default warning
         if not self.providers:
             print("WARNING: No LLM providers are available. Please install at least one provider package.")
+            
+        # If the default provider isn't available, update it to an available one
+        if self.default_provider not in self.providers and self.providers:
+            first_available = next(iter(self.providers.keys()))
+            print(f"WARNING: Default provider '{self.default_provider}' is not available. "
+                  f"Falling back to '{first_available}'")
+            self.default_provider = first_available
     
     def get_provider(self, provider_name: str = None, model_name: str = None, **kwargs) -> BaseLLMProvider:
         """

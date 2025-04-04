@@ -1,18 +1,47 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
 from typing import Dict, List, Optional, Any
 from api.database_manager import DatabaseManager
 from api.vector_store_manager import VectorStoreManager
-from api.models_api import router as models_router
+from api.github_connectors_api import router as github_connectors_router
 from api.llm_providers_api import router as llm_providers_router
+from api.models_api import router as models_router
+from api.github_vector_api import router as github_vector_router
+from fastapi.middleware.cors import CORSMiddleware
+import os
+import sqlite3
+import logging
 
-app = FastAPI(title="Data Architect API")
+# Set up logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+# Path to metadata database
+METADATA_DB = os.path.join('database', 'metadata.db')
+
+app = FastAPI(
+    title="Data Architect API",
+    description="API for Data Architect operations",
+    version="1.0.0"
+)
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # In production, specify the allowed origins
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 db_manager = DatabaseManager()
 vector_manager = VectorStoreManager()
 
 # Include routers
-app.include_router(models_router)
+app.include_router(models_router, prefix="/models")
 app.include_router(llm_providers_router)
+app.include_router(github_connectors_router)
+app.include_router(github_vector_router)
 
 # Pydantic models for request/response
 class ThreadCreate(BaseModel):
@@ -66,6 +95,175 @@ class VectorStoreDocument(BaseModel):
 class VectorStoreSearch(BaseModel):
     query: str
     n_results: int = 5
+
+# Initialize database
+def init_db():
+    """Initialize the database with necessary tables"""
+    conn = sqlite3.connect(METADATA_DB)
+    cursor = conn.cursor()
+    
+    # Create necessary tables
+    # Users table
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS users (
+        user_id TEXT PRIMARY KEY,
+        username TEXT NOT NULL,
+        email TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    ''')
+    
+    # LLM Providers table
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS llm_providers (
+        provider_id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        description TEXT,
+        api_url TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    ''')
+    
+    # LLM Provider Configuration table
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS llm_provider_configs (
+        config_id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        provider_id TEXT NOT NULL,
+        api_key TEXT,
+        api_key_encrypted BOOLEAN DEFAULT FALSE,
+        base_url TEXT,
+        organization TEXT,
+        default_model TEXT,
+        active BOOLEAN DEFAULT TRUE,
+        additional_settings TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (user_id) REFERENCES users (user_id),
+        FOREIGN KEY (provider_id) REFERENCES llm_providers (provider_id)
+    )
+    ''')
+    
+    # LLM Models table
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS llm_models (
+        model_id TEXT PRIMARY KEY,
+        provider_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        description TEXT,
+        context_length INTEGER,
+        is_default BOOLEAN DEFAULT FALSE,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (provider_id) REFERENCES llm_providers (provider_id)
+    )
+    ''')
+    
+    # GitHub connectors table
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS github_connectors (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        description TEXT,
+        github_type TEXT NOT NULL,
+        api_url TEXT,
+        token TEXT,
+        token_encrypted BOOLEAN DEFAULT FALSE,
+        owner TEXT,
+        organization TEXT,
+        repositories TEXT,
+        default_branch TEXT DEFAULT 'main',
+        active BOOLEAN DEFAULT TRUE,
+        repo_url TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (user_id) REFERENCES users (user_id)
+    )
+    ''')
+    
+    # Insert default LLM providers
+    providers = [
+        ('openai', 'OpenAI', 'OpenAI API for GPT models', 'https://api.openai.com'),
+        ('anthropic', 'Anthropic', 'Anthropic API for Claude models', 'https://api.anthropic.com'),
+        ('google', 'Google AI', 'Google AI API for Gemini models', 'https://generativelanguage.googleapis.com'),
+        ('huggingface', 'HuggingFace', 'HuggingFace Inference API', 'https://api-inference.huggingface.co'),
+        ('ollama', 'Ollama', 'Local LLM server using Ollama', 'http://localhost:11434')
+    ]
+    
+    for provider in providers:
+        cursor.execute(
+            '''
+            INSERT OR IGNORE INTO llm_providers (provider_id, name, description, api_url)
+            VALUES (?, ?, ?, ?)
+            ''',
+            provider
+        )
+    
+    # Insert default models for providers
+    models = [
+        # OpenAI models
+        ('gpt-4o', 'openai', 'GPT-4o', 'Latest GPT-4 Omni model with vision capabilities', 128000, True),
+        ('gpt-4-turbo', 'openai', 'GPT-4 Turbo', 'Improved GPT-4 model with longer context', 128000, False),
+        ('gpt-4', 'openai', 'GPT-4', 'High-capability GPT-4 model', 8192, False),
+        ('gpt-3.5-turbo', 'openai', 'GPT-3.5 Turbo', 'Fast and cost-effective GPT-3.5 model', 16385, False),
+        
+        # Anthropic models
+        ('claude-3-opus', 'anthropic', 'Claude 3 Opus', 'Highest capability Claude model', 200000, True),
+        ('claude-3-sonnet', 'anthropic', 'Claude 3 Sonnet', 'Balanced Claude model with good capabilities', 200000, False),
+        ('claude-3-haiku', 'anthropic', 'Claude 3 Haiku', 'Fast and efficient Claude model', 200000, False),
+        
+        # Google models
+        ('gemini-pro', 'google', 'Gemini Pro', 'Balanced model for most tasks', 32768, True),
+        ('gemini-ultra', 'google', 'Gemini Ultra', 'Highest capability Gemini model', 32768, False),
+        
+        # Ollama models
+        ('llama3', 'ollama', 'Llama 3', 'Meta\'s Llama 3 model via Ollama', 8192, True),
+        ('llama3:8b', 'ollama', 'Llama 3 8B', 'Smaller Llama 3 model', 8192, False),
+        ('mistral', 'ollama', 'Mistral', 'Mistral AI 7B model', 8192, False),
+        ('mixtral', 'ollama', 'Mixtral', 'Mixtral 8x7B MoE model', 32768, False)
+    ]
+    
+    for model in models:
+        cursor.execute(
+            '''
+            INSERT OR IGNORE INTO llm_models 
+            (model_id, provider_id, name, description, context_length, is_default)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ''',
+            model
+        )
+    
+    conn.commit()
+    conn.close()
+
+# Initialize database on startup
+@app.on_event("startup")
+async def startup_event():
+    """Run on application startup"""
+    init_db()
+
+# Root endpoint
+@app.get("/")
+async def root():
+    """Root endpoint"""
+    return {"message": "Welcome to the Data Architect API"}
+
+# Health check endpoint
+@app.get("/health")
+async def health_check():
+    """Health check endpoint"""
+    return {"status": "healthy"}
+
+# Request logging middleware
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    """Log all requests"""
+    response = await call_next(request)
+    logger.info(f"{request.method} {request.url.path} - {response.status_code}")
+    return response
 
 # Database endpoints
 @app.post("/threads/", response_model=Dict[str, str])
@@ -182,4 +380,18 @@ async def delete_document(collection_name: str, doc_id: str):
         vector_manager.delete_document(collection_name, doc_id)
         return {"message": "Document deleted successfully"}
     except AttributeError:
-        raise HTTPException(status_code=400, detail="Invalid collection name") 
+        raise HTTPException(status_code=400, detail="Invalid collection name")
+
+# Add a test endpoint to check if models are available
+@app.get("/test-models")
+async def test_models():
+    """Test endpoint to check if models are available"""
+    try:
+        if not model_manager:
+            from models.model_manager import model_manager
+            
+        models = model_manager.get_all_models()
+        return {"success": True, "models": models}
+    except Exception as e:
+        logger.error(f"Error in test-models endpoint: {str(e)}")
+        return {"success": False, "error": str(e)} 
