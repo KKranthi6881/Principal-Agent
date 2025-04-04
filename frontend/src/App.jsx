@@ -8,9 +8,9 @@ import ChatPage from './pages/ChatPage'
 import FileUploadPage from './pages/knowledge/FileUploadPage'
 import ChatHistoryPage from './pages/ChatHistoryPage'
 import ConnectorsPage from './pages/ConnectorsPage'
-import GitHubConnectorPage from './pages/connectors/GitHubConnectorPage'
 import LLMProviderConnectorPage from './pages/connectors/LLMProviderConnectorPage'
 import ChatInterface from './components/ChatInterface'
+import GitHubConnectors from './pages/GitHubConnectors'
 
 // Create theme
 const theme = extendTheme({
@@ -62,14 +62,14 @@ function App() {
                 <ConnectorsPage />
               </MainLayout>
             } />
-            <Route path="/connectors/github" element={
-              <MainLayout>
-                <GitHubConnectorPage />
-              </MainLayout>
-            } />
             <Route path="/connectors/llm" element={
               <MainLayout>
                 <LLMProviderConnectorPage />
+              </MainLayout>
+            } />
+            <Route path="/connectors/github" element={
+              <MainLayout>
+                <GitHubConnectors />
               </MainLayout>
             } />
             <Route path="*" element={<Navigate to="/" />} />
