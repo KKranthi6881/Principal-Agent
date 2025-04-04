@@ -6,6 +6,7 @@ from api import llm_providers_api
 from api import github_connectors_api
 from api import github_vector_api
 from api import models_api
+from api import sql_dependencies_api
 from database.migrations import run_migrations
 
 # Create FastAPI app
@@ -25,6 +26,7 @@ app.include_router(llm_providers_api.router)
 app.include_router(github_connectors_api.router)
 app.include_router(github_vector_api.router)
 app.include_router(models_api.router)
+app.include_router(sql_dependencies_api.router)
 
 # Startup event
 @app.on_event("startup")

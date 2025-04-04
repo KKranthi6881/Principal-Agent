@@ -76,7 +76,7 @@ import snowflakeLogo from '../../assets/snowflake.png'
 import dbtLogo from '../../assets/dbt.png'
 
 // API URL - change this to your FastAPI backend URL
-const API_URL = 'http://localhost:8000';
+const API_URL = 'http://localhost:8002';
 
 const FileUploadPage = () => {
   const [sqlFile, setSqlFile] = useState(null)

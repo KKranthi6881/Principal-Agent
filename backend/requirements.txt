@@ -1,6 +1,9 @@
 langgraph
 langchain
 openai
+anthropic
+cohere
+litellm
 python-dotenv
 langchain-openai
 langchain-ollama
@@ -36,3 +39,30 @@ gitpython
 requests
 pydantic
 trustcall
+python-multipart
+parsimonious
+SQLAlchemy
+PyYAML
+tenacity
+networkx
+
+# Security
+cryptography
+python-jose
+passlib
+bcrypt
+
+tqdm
+pytz
+
+# Testing
+pytest
+httpx
+
+# For Supabase
+supabase
+postgrest
+
+# Debugging
+ipdb
+
