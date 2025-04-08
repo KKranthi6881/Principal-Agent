@@ -34,7 +34,9 @@ class SQLDependencyTool:
         """
         # If path is None, use default
         if vector_store_path is None:
-            vector_store_path = os.path.join(os.getcwd(), "vector_store", "chromadb_github")
+            # Use the directory of this file to ensure we create in correct location
+            current_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            vector_store_path = os.path.join(current_dir, "vector_store", "chromadb_github")
             
         logger.info(f"SQLDependencyTool initializing with vector_store_path: {vector_store_path}")
         

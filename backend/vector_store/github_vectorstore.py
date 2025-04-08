@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 # Path to vector store
-GITHUB_VECTOR_STORE_PATH = os.path.join("vector_store", "chromadb_github")
+GITHUB_VECTOR_STORE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "chromadb_github")
 
 def get_encryption_key():
     # Use environment variable or a fixed salt (not ideal for production)
@@ -152,5 +152,45 @@ def _populate_demo_github_data(collection):
         return True
     except Exception as e:
         logger.error(f"Error populating demo GitHub data: {e}")
+        logger.error(traceback.format_exc())
+        return False
+
+def add_code_files_batch(ids, contents, metadatas, embedding_provider=None):
+    """
+    Add a batch of code files to the GitHub vector store
+    
+    Args:
+        ids: List of document IDs
+        contents: List of file contents
+        metadatas: List of metadata dictionaries
+        embedding_provider: Name of embedding provider to use
+        
+    Returns:
+        True if successful, False otherwise
+    """
+    try:
+        # Get the collection
+        collection = get_github_vector_store()
+        if not collection:
+            logger.error("Failed to get GitHub vector store")
+            return False
+        
+        # Set up embedding function if specified
+        if embedding_provider:
+            # In a full implementation, we'd switch embedding functions based on the provider
+            # For now, just use the default
+            logger.info(f"Using embedding provider: {embedding_provider}")
+            
+        # Add to collection
+        collection.add(
+            ids=ids,
+            documents=contents,
+            metadatas=metadatas
+        )
+        
+        logger.info(f"Added {len(ids)} documents to GitHub vector store")
+        return True
+    except Exception as e:
+        logger.error(f"Error adding code files to GitHub vector store: {e}")
         logger.error(traceback.format_exc())
         return False 

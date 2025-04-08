@@ -35,7 +35,7 @@ if parent_dir not in sys.path:
 # Try importing from vector_store, with fallback functions if module isn't found
 try:
     sys.path.append(parent_dir)
-    from vector_store.github_vectorstore import get_github_vector_store, decrypt_api_key
+    from vector_store.github_vectorstore import get_github_vector_store, decrypt_api_key, add_code_files_batch
     logger.info("Successfully imported vector_store functions")
 except ImportError as e:
     logger.error(f"Error importing vector_store: {e}")
@@ -76,6 +76,28 @@ except ImportError as e:
         """Fallback decryption function"""
         logger.warning("Using dummy decrypt_api_key function")
         return encrypted_key  # Return as-is in fallback mode
+
+    def add_code_files_batch(ids, contents, metadatas, embedding_provider=None):
+        """Fallback function to add code files in batch"""
+        logger.warning("Using fallback add_code_files_batch implementation")
+        try:
+            collection = get_github_vector_store()
+            if not collection:
+                logger.error("Failed to get GitHub vector store")
+                return False
+                
+            # Add documents to collection
+            collection.add(
+                ids=ids,
+                documents=contents,
+                metadatas=metadatas
+            )
+            
+            logger.info(f"Added {len(ids)} documents to GitHub vector store using fallback function")
+            return True
+        except Exception as e:
+            logger.error(f"Error in fallback add_code_files_batch: {e}")
+            return False
 
 # Create router
 router = APIRouter(prefix="/api/github", tags=["github"])
@@ -240,7 +262,7 @@ async def sync_repository_task(
                 
                 if ids:
                     # Add batch to vector store
-                    vector_store.add_code_files_batch(ids, contents, metadatas, embedding_provider)
+                    add_code_files_batch(ids, contents, metadatas, embedding_provider)
                     processed_count += len(ids)
             
             # Record completion

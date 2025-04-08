@@ -12,12 +12,15 @@ from tools.sql_tools.dependency_analyzer import SQLDependencyTool
 logging.basicConfig(level=logging.INFO, format='%(levelname)s:%(name)s:%(message)s')
 logger = logging.getLogger(__name__)
 
+# Define the vector store path
+VECTOR_STORE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vector_store", "chromadb_github")
+
 def test_search():
     """Test searching for SQL files"""
     print("\n=== Testing SQL search ===")
     
-    # Initialize the dependency tool
-    tool = SQLDependencyTool("chromadb_github")
+    # Initialize the dependency tool with full path
+    tool = SQLDependencyTool(VECTOR_STORE_PATH)
     tool.initialize()
     
     # Search for item_discount_amount
@@ -40,8 +43,8 @@ def test_table_dependencies():
     """Test tracing table dependencies"""
     print("\n=== Testing table dependencies ===")
     
-    # Initialize the dependency tool
-    tool = SQLDependencyTool("chromadb_github")
+    # Initialize the dependency tool with full path
+    tool = SQLDependencyTool(VECTOR_STORE_PATH)
     tool.initialize()
     
     # Test with fct_order_items
@@ -69,8 +72,8 @@ def test_column_lineage():
     """Test column lineage analysis"""
     print("\n=== Testing column lineage ===")
     
-    # Initialize the dependency tool
-    tool = SQLDependencyTool("chromadb_github")
+    # Initialize the dependency tool with full path
+    tool = SQLDependencyTool(VECTOR_STORE_PATH)
     tool.initialize()
     
     # Test with item_discount_amount column
