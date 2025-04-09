@@ -29,394 +29,482 @@ class DBTDialect(BaseSQLDialect):
     def __init__(self):
         """Initialize the DBT dialect parser"""
         super().__init__("dbt")
-        # DBT config patterns
-        self.dbt_config_pattern = re.compile(r'{{\s*config\s*\((.*?)\)\s*}}', re.DOTALL)
-        self.dbt_ref_pattern = re.compile(r'{{\s*ref\s*\(\s*[\'"]([^\'"]+)[\'"]\s*\)\s*}}')
-        self.dbt_source_pattern = re.compile(r'{{\s*source\s*\(\s*[\'"]([^\'"]+)[\'"]\s*,\s*[\'"]([^\'"]+)[\'"]\s*\)\s*}}')
-        self.dbt_macro_pattern = re.compile(r'{{\s*([a-zA-Z0-9_]+)\s*\((.*?)\)\s*}}', re.DOTALL)
-        
-    def _get_sqlglot_dialect(self) -> Any:
-        """Get the SQLGlot dialect for DBT (uses Snowflake as base)"""
-        return sqlglot.dialects.Snowflake
     
-    def clean_sql(self, sql_code: str) -> str:
+    def _get_sqlglot_dialect(self) -> str:
         """
-        Clean DBT SQL code before parsing, handling Jinja templating
+        Get the SQLGlot dialect name for DBT (uses postgres as base)
+        
+        Returns:
+            The SQLGlot dialect name
+        """
+        return "postgres"  # DBT is typically based on the target warehouse dialect, default to Postgres
+    
+    def parse_sql(self, sql_code: str) -> Tuple[Any, List[str]]:
+        """
+        Parse DBT SQL code using SQLGlot
         
         Args:
-            sql_code: DBT SQL code to clean
+            sql_code: SQL code to parse
             
         Returns:
-            Cleaned SQL code
+            Tuple of (AST, errors)
         """
+        errors = []
+        ast = None
+        
+        try:
+            # Handle DBT-specific syntax before parsing
+            cleaned_sql = self._preprocess_sql(sql_code)
+            
+            # Parse with SQLGlot
+            ast = parse_one(cleaned_sql, dialect=self._get_sqlglot_dialect())
+        except ParseError as e:
+            errors.append(f"Parse error: {str(e)}")
+        except Exception as e:
+            errors.append(f"Error parsing SQL: {str(e)}")
+        
+        return ast, errors
+    
+    def _preprocess_sql(self, sql_code: str) -> str:
+        """
+        Preprocess DBT-specific syntax like Jinja templates
+        
+        Args:
+            sql_code: SQL code to preprocess
+            
+        Returns:
+            Preprocessed SQL code
+        """
+        # Skip if not SQL content
+        if not self._looks_like_sql(sql_code):
+            return ""
+            
         # Remove Jinja comments
         sql_code = re.sub(r'{#.*?#}', '', sql_code, flags=re.DOTALL)
         
-        # Replace ref() with table names
-        # {{ ref('model_name') }} becomes model_name
-        sql_code = re.sub(r'{{\s*ref\s*\(\s*[\'"]([^\'"]+)[\'"]\s*\)\s*}}', r'\1', sql_code)
+        # Handle DBT jinja blocks (config, docs, etc.)
+        sql_code = re.sub(r'{{\s*config\s*\(.*?\)\s*}}', '', sql_code, flags=re.DOTALL)
+        sql_code = re.sub(r'{{\s*doc\s*\(.*?\)\s*}}', '', sql_code, flags=re.DOTALL)
         
-        # Replace source() with table names
-        # {{ source('source_name', 'table_name') }} becomes source_name__table_name
-        sql_code = re.sub(r'{{\s*source\s*\(\s*[\'"]([^\'"]+)[\'"]\s*,\s*[\'"]([^\'"]+)[\'"]\s*\)\s*}}', r'\1__\2', sql_code)
+        # Replace DBT refs with table names
+        def replace_ref(match):
+            ref_name = match.group(1).strip("' \"")
+            return f"table_{ref_name}"
         
-        # Replace other Jinja blocks with empty strings
-        sql_code = re.sub(r'{%.*?%}', '', sql_code, flags=re.DOTALL)
+        sql_code = re.sub(r'{{\s*ref\s*\(\s*([^)]+)\s*\)\s*}}', replace_ref, sql_code)
         
-        # Replace remaining Jinja variables with NULL
-        sql_code = re.sub(r'{{.*?}}', 'NULL', sql_code, flags=re.DOTALL)
+        # Replace DBT sources with table names
+        def replace_source(match):
+            source_parts = match.group(1).split(',')
+            if len(source_parts) >= 2:
+                source_name = source_parts[0].strip("' \"")
+                table_name = source_parts[1].strip("' \"")
+                return f"src_{source_name}_{table_name}"
+            return "source_table"
         
-        # Remove SQL comments and excessive whitespace
-        return super().clean_sql(sql_code)
+        sql_code = re.sub(r'{{\s*source\s*\(\s*([^)]+)\s*\)\s*}}', replace_source, sql_code)
+        
+        # Replace other Jinja expressions with placeholders
+        sql_code = re.sub(r'{{\s*([^}]+)\s*}}', 'NULL', sql_code)
+        
+        # Replace Jinja control structures with SQL comments
+        sql_code = re.sub(r'{%\s*if\s*.*?%}', '/* if condition */', sql_code, flags=re.DOTALL)
+        sql_code = re.sub(r'{%\s*else\s*.*?%}', '/* else condition */', sql_code, flags=re.DOTALL)
+        sql_code = re.sub(r'{%\s*endif\s*.*?%}', '/* endif */', sql_code, flags=re.DOTALL)
+        sql_code = re.sub(r'{%\s*for\s*.*?%}', '/* for loop */', sql_code, flags=re.DOTALL)
+        sql_code = re.sub(r'{%\s*endfor\s*.*?%}', '/* endfor */', sql_code, flags=re.DOTALL)
+        
+        # Replace macros with SQL comments
+        sql_code = re.sub(r'{{\s*([a-zA-Z0-9_]+)\((.*?)\)\s*}}', r'/* macro \1 */', sql_code, flags=re.DOTALL)
+        
+        return sql_code
     
-    def extract_dbt_configs(self, sql_code: str) -> Dict[str, Any]:
+    def _looks_like_sql(self, text: str) -> bool:
         """
-        Extract DBT configurations from SQL code
+        Check if the text looks like SQL code and not a YML file or markdown
         
         Args:
-            sql_code: DBT SQL code
+            text: Text to check
             
         Returns:
-            Dictionary with extracted configurations
+            True if it looks like SQL, False otherwise
         """
-        configs = {}
-        
-        # Extract config block
-        config_match = self.dbt_config_pattern.search(sql_code)
-        if config_match:
-            config_str = config_match.group(1)
+        # Skip empty text
+        if not text or not text.strip():
+            return False
             
-            # Try to parse configs
-            try:
-                # Extract key-value pairs like key="value" or key=value
-                key_value_pattern = re.compile(r'([a-zA-Z0-9_]+)\s*=\s*(?:[\'"]([^\'"]*)[\'"]|([a-zA-Z0-9_]+))')
-                for match in key_value_pattern.finditer(config_str):
-                    key = match.group(1)
-                    # Group 2 is quoted value, group 3 is unquoted value
-                    value = match.group(2) if match.group(2) is not None else match.group(3)
-                    configs[key] = value
-            except Exception as e:
-                logger.error(f"Error parsing DBT config: {e}")
-        
-        return configs
-    
-    def extract_dbt_refs(self, sql_code: str) -> List[str]:
-        """
-        Extract DBT ref() calls from SQL code
-        
-        Args:
-            sql_code: DBT SQL code
+        # Check if it starts with YAML markers
+        if text.lstrip().startswith('version:') or text.lstrip().startswith('---'):
+            return False
             
-        Returns:
-            List of referenced model names
-        """
-        refs = []
-        for match in self.dbt_ref_pattern.finditer(sql_code):
-            refs.append(match.group(1))
-        return refs
-    
-    def extract_dbt_sources(self, sql_code: str) -> List[Tuple[str, str]]:
-        """
-        Extract DBT source() calls from SQL code
+        # Check if it's markdown
+        if text.lstrip().startswith('#') or text.lstrip().startswith('##'):
+            return False
         
-        Args:
-            sql_code: DBT SQL code
-            
-        Returns:
-            List of (source_name, table_name) tuples
-        """
-        sources = []
-        for match in self.dbt_source_pattern.finditer(sql_code):
-            sources.append((match.group(1), match.group(2)))
-        return sources
-    
-    def extract_target_table(self, sql_code: str, file_path: Optional[str] = None) -> Optional[str]:
-        """
-        Extract target table name from DBT SQL model
+        # Look for common SQL keywords
+        sql_keywords = ['select', 'from', 'where', 'with', 'insert', 'update', 'delete', 'create', 'drop']
+        text_lower = text.lower()
+        for keyword in sql_keywords:
+            if re.search(rf'\b{keyword}\b', text_lower):
+                return True
         
-        Args:
-            sql_code: DBT SQL code
-            file_path: Path to the file (optional)
-            
-        Returns:
-            Target table name or None if not found
-        """
-        # For DBT models, the target table is usually derived from the filename
-        if file_path:
-            file_name = os.path.basename(file_path)
-            # Remove extension
-            target_table = os.path.splitext(file_name)[0]
-            return target_table
-        
-        # If no file path, try to extract from SQL AST
-        sql_ast = self.parse_sql(self.clean_sql(sql_code))
-        if sql_ast and isinstance(sql_ast, Create):
-            if hasattr(sql_ast, 'name'):
-                target_table = sql_ast.name
-                if hasattr(sql_ast, 'db') and sql_ast.db:
-                    target_table = f"{sql_ast.db}.{target_table}"
-                return target_table
-        
-        return None
+        return False
     
     def extract_dependencies(self, sql_code: str, file_path: Optional[str] = None) -> Dict[str, Any]:
         """
-        Extract dependencies from DBT SQL code
+        Extract table dependencies from DBT SQL code
         
         Args:
-            sql_code: DBT SQL code
+            sql_code: SQL code to analyze
             file_path: Path to the file (optional)
             
         Returns:
-            Dictionary with extracted dependencies
+            Dictionary with dependency information
         """
-        result = self.get_default_output_format()
-        result["file_path"] = file_path
+        # Initialize dependency result
+        result = {
+            "source_tables": [],
+            "target_table": None,
+            "errors": [],
+            "file_path": file_path
+        }
         
-        try:
-            # Extract DBT-specific references
-            refs = self.extract_dbt_refs(sql_code)
-            sources = self.extract_dbt_sources(sql_code)
-            
-            # Extract target table
-            target_table = self.extract_target_table(sql_code, file_path)
-            result["target_table"] = target_table
-            
-            # Add ref dependencies
-            source_tables = []
-            for ref in refs:
-                source_tables.append(ref)
-            
-            # Add source dependencies
-            for source_name, table_name in sources:
-                source_tables.append(f"{source_name}.{table_name}")
-            
-            result["source_tables"] = source_tables
-            
-            # Now try to extract more detailed info using sqlglot
-            cleaned_sql = self.clean_sql(sql_code)
-            sql_ast = self.parse_sql(cleaned_sql)
-            
-            if sql_ast:
-                # Extract additional table references from the AST
-                tables_from_ast = self._extract_tables_from_ast(sql_ast)
-                for table in tables_from_ast:
-                    if table not in source_tables and table != target_table:
-                        source_tables.append(table)
-                
-                # Extract columns and build dependencies
-                columns_dict = self._extract_columns_from_ast(sql_ast)
-                result["columns"] = columns_dict
-                
-                dependencies = []
-                for source_table in source_tables:
-                    dep = {
-                        "source": source_table,
-                        "target": target_table,
-                        "columns": columns_dict.get(source_table, [])
-                    }
-                    dependencies.append(dep)
-                
-                result["dependencies"] = dependencies
-            
+        # Skip non-SQL files like YML or MD
+        if not self._looks_like_sql(sql_code):
             return result
+            
+        # Extract DBT refs and sources directly from the Jinja syntax
+        refs = self._extract_refs(sql_code)
+        sources = self._extract_sources(sql_code)
+        
+        # Combine refs and sources as source tables
+        source_tables = refs + sources
+        
+        # Try to extract target table from model name or file path
+        target_table = self._extract_model_name(sql_code, file_path)
+        if target_table:
+            logger.info(f"Extracted target table from DBT model: {target_table}")
+        
+        # Add extracted dependencies to result
+        result["source_tables"] = source_tables
+        result["target_table"] = target_table
+        
+        # Try to parse the SQL code with SQLGlot for additional dependencies
+        cleaned_sql = self._preprocess_sql(sql_code)
+        if cleaned_sql:
+            ast, errors = self.parse_sql(cleaned_sql)
+            if errors:
+                result["errors"].extend(errors)
+            
+            if ast:
+                # Extract tables from parsed SQL
+                parsed_target, parsed_sources = self._extract_tables_from_ast(ast)
+                
+                # If we couldn't extract the target table earlier, use the parsed one
+                if not result["target_table"] and parsed_target:
+                    result["target_table"] = parsed_target
+                    logger.info(f"Using parsed target table: {parsed_target}")
+                
+                # Add any additional source tables found in the SQL
+                for src in parsed_sources:
+                    if src not in result["source_tables"]:
+                        result["source_tables"].append(src)
+        
+        return result
+    
+    def _extract_refs(self, sql_code: str) -> List[str]:
+        """
+        Extract DBT ref() dependencies
+        
+        Args:
+            sql_code: SQL code containing DBT refs
+            
+        Returns:
+            List of table names referenced with ref()
+        """
+        refs = []
+        
+        # Match ref('table_name') or ref("table_name") patterns
+        ref_pattern = r'{{\s*ref\s*\(\s*[\'"]([^\'"]+)[\'"]\s*\)\s*}}'
+        matches = re.findall(ref_pattern, sql_code)
+        
+        # Match ref(table_name) pattern (without quotes)
+        ref_pattern_no_quotes = r'{{\s*ref\s*\(\s*([a-zA-Z0-9_]+)\s*\)\s*}}'
+        matches_no_quotes = re.findall(ref_pattern_no_quotes, sql_code)
+        
+        # Combine both results
+        refs.extend(matches)
+        refs.extend(matches_no_quotes)
+        
+        # Log what we found to help with debugging
+        if refs:
+            logger.info(f"Found DBT refs: {refs}")
+        
+        return refs
+    
+    def _extract_sources(self, sql_code: str) -> List[str]:
+        """
+        Extract DBT source() dependencies
+        
+        Args:
+            sql_code: SQL code containing DBT sources
+            
+        Returns:
+            List of table names referenced with source()
+        """
+        sources = []
+        
+        # Match source('schema_name', 'table_name') patterns
+        source_pattern = r'{{\s*source\s*\(\s*[\'"]([^\'"]+)[\'"]\s*,\s*[\'"]([^\'"]+)[\'"]\s*\)\s*}}'
+        matches = re.findall(source_pattern, sql_code)
+        
+        # Format as schema.table
+        for schema, table in matches:
+            sources.append(f"{schema}.{table}")
+        
+        # Log what we found to help with debugging
+        if sources:
+            logger.info(f"Found DBT sources: {sources}")
+        
+        return sources
+    
+    def _extract_model_name(self, sql_code: str, file_path: Optional[str] = None) -> Optional[str]:
+        """
+        Extract the DBT model name from file path or code
+        
+        Args:
+            sql_code: SQL code of the DBT model
+            file_path: Path to the SQL file
+            
+        Returns:
+            Model name if found, otherwise None
+        """
+        # Try to extract from file path first
+        if file_path:
+            # Get the file name without extension
+            file_name = os.path.basename(file_path)
+            if file_name.endswith('.sql'):
+                return file_name[:-4]  # Remove .sql extension
+        
+        # Try to extract from model configuration
+        config_pattern = r'{{\s*config\s*\(\s*.*?[\'"](alias|materialized)[\'"]\s*:\s*[\'"]([^\'"]+)[\'"].*?\)\s*}}'
+        matches = re.findall(config_pattern, sql_code)
+        for config_type, value in matches:
+            if config_type == 'alias':
+                return value
+        
+        # Final fallback: try to get it from the first SELECT statement
+        if file_path:
+            return os.path.basename(file_path).split('.')[0]
+        
+        return None
+    
+    def _extract_tables_from_ast(self, ast: Any) -> Tuple[Optional[str], List[str]]:
+        """
+        Extract target and source tables from a parsed SQL AST
+        
+        Args:
+            ast: SQLGlot AST
+            
+        Returns:
+            Tuple of (target_table, source_tables)
+        """
+        target_table = None
+        source_tables = set()
+        
+        # Extract target table from CREATE or INSERT statements
+        if isinstance(ast, Create):
+            table_ref = ast.find(Table)
+            if table_ref:
+                target_table = self._extract_table_name(table_ref)
+        
+        # Extract source tables by traversing the AST
+        def extract_tables(node):
+            if node is None:
+                return
+            
+            # If it's a table reference, add it to source tables
+            if isinstance(node, Table):
+                table_name = self._extract_table_name(node)
+                if table_name and table_name != target_table:
+                    source_tables.add(table_name)
+            
+            # Process child nodes
+            if hasattr(node, 'args'):
+                for key, value in node.args.items():
+                    if isinstance(value, list):
+                        for item in value:
+                            extract_tables(item)
+                    else:
+                        extract_tables(value)
+        
+        # Start extraction
+        extract_tables(ast)
+        
+        return target_table, list(source_tables)
+    
+    def _extract_table_name(self, table_node: Table) -> Optional[str]:
+        """
+        Extract table name from a SQLGlot Table node
+        
+        Args:
+            table_node: SQLGlot Table node
+            
+        Returns:
+            Table name as string
+        """
+        try:
+            # Extract from direct attributes
+            if hasattr(table_node, 'name'):
+                table_name = table_node.name
+                if hasattr(table_node, 'db') and table_node.db:
+                    return f"{table_node.db}.{table_name}"
+                return table_name
+            
+            # Extract from args
+            if hasattr(table_node, 'args'):
+                if 'this' in table_node.args:
+                    table_name = table_node.args['this']
+                    db = table_node.args.get('db')
+                    if db:
+                        return f"{db}.{table_name}"
+                    return table_name
+            
+            # Extract from string representation
+            table_str = str(table_node)
+            if '.' in table_str:
+                parts = table_str.split('.')
+                return f"{parts[-2]}.{parts[-1]}"
+            return table_str
             
         except Exception as e:
-            error = self.format_error(f"Error extracting dependencies: {str(e)}")
-            result["errors"].append(error)
-            logger.error(f"Error extracting dependencies from DBT SQL: {e}")
-            return result
+            logger.error(f"Error extracting table name: {str(e)}")
+            return None
     
     def extract_lineage(self, sql_code: str, file_path: Optional[str] = None) -> Dict[str, Any]:
         """
-        Extract lineage information from DBT SQL code
+        Extract column-level lineage from DBT SQL code
         
         Args:
-            sql_code: DBT SQL code
+            sql_code: SQL code to analyze
             file_path: Path to the file (optional)
             
         Returns:
-            Dictionary with extracted lineage information
+            Dictionary with lineage information
         """
-        # Start with the default output format for lineage
+        # Initialize lineage result
         result = {
-            "dialect": self.name,
-            "file_path": file_path,
-            "file_name": os.path.basename(file_path) if file_path else None,
             "target_table": None,
             "source_tables": [],
             "column_level_lineage": {},
-            "errors": []
+            "errors": [],
+            "file_path": file_path
         }
         
+        # Skip non-SQL files like YML or MD
+        if not self._looks_like_sql(sql_code):
+            return result
+        
+        # Extract table-level dependencies
+        deps = self.extract_dependencies(sql_code, file_path)
+        result["target_table"] = deps["target_table"]
+        result["source_tables"] = deps["source_tables"]
+        result["errors"] = deps["errors"]
+        
+        # Try to preprocess and parse the SQL
+        cleaned_sql = self._preprocess_sql(sql_code)
+        if not cleaned_sql:
+            return result
+            
+        ast, errors = self.parse_sql(cleaned_sql)
+        if errors:
+            result["errors"].extend(errors)
+        
+        if not ast:
+            return result
+        
+        # Extract column mappings
         try:
-            # Extract dependencies first
-            deps = self.extract_dependencies(sql_code, file_path)
+            # Find the main SELECT statement
+            select_node = None
+            if isinstance(ast, Create) and hasattr(ast, 'args') and 'expression' in ast.args:
+                select_node = ast.args['expression']
+            elif isinstance(ast, Select):
+                select_node = ast
             
-            # Set target and source tables
-            result["target_table"] = deps["target_table"]
-            result["source_tables"] = deps["source_tables"]
-            
-            # Try to extract column-level lineage
-            cleaned_sql = self.clean_sql(sql_code)
-            sql_ast = self.parse_sql(cleaned_sql)
-            
-            if sql_ast:
-                column_lineage = self._extract_column_lineage_from_ast(sql_ast, result["target_table"], result["source_tables"])
-                result["column_level_lineage"] = column_lineage
-            
-            return result
-            
-        except Exception as e:
-            error = self.format_error(f"Error extracting lineage: {str(e)}")
-            result["errors"].append(error)
-            logger.error(f"Error extracting lineage from DBT SQL: {e}")
-            return result
-    
-    def _extract_tables_from_ast(self, sql_ast) -> List[str]:
-        """
-        Extract table references from SQL AST
-        
-        Args:
-            sql_ast: SQL AST
-            
-        Returns:
-            List of table references
-        """
-        tables = []
-        
-        def extract_tables_recursive(expr):
-            if isinstance(expr, Table):
-                table_name = expr.name
-                if hasattr(expr, 'db') and expr.db:
-                    table_name = f"{expr.db}.{table_name}"
-                tables.append(table_name)
-            
-            # Recursively process child expressions
-            if hasattr(expr, 'args'):
-                for arg_name, arg_value in expr.args.items():
-                    if arg_value:
-                        if isinstance(arg_value, list):
-                            for item in arg_value:
-                                extract_tables_recursive(item)
-                        else:
-                            extract_tables_recursive(arg_value)
-        
-        extract_tables_recursive(sql_ast)
-        return list(set(tables))
-    
-    def _extract_columns_from_ast(self, sql_ast) -> Dict[str, List[str]]:
-        """
-        Extract columns by table from SQL AST
-        
-        Args:
-            sql_ast: SQL AST
-            
-        Returns:
-            Dictionary of {table_name: [column_names]}
-        """
-        columns = {}
-        
-        def extract_columns_recursive(expr, current_table=None):
-            if isinstance(expr, Table):
-                table_name = expr.name
-                if hasattr(expr, 'db') and expr.db:
-                    table_name = f"{expr.db}.{table_name}"
+            if select_node and hasattr(select_node, 'args') and 'expressions' in select_node.args:
+                column_mappings = {}
                 
-                if table_name not in columns:
-                    columns[table_name] = []
-                
-                return table_name
-            
-            elif isinstance(expr, Column):
-                col_name = expr.name
-                if current_table and col_name not in columns.get(current_table, []):
-                    if current_table in columns:
-                        columns[current_table].append(col_name)
-            
-            # Recursively process child expressions
-            current_table_context = current_table
-            if hasattr(expr, 'args'):
-                for arg_name, arg_value in expr.args.items():
-                    if arg_value:
-                        if isinstance(arg_value, Table):
-                            current_table_context = extract_columns_recursive(arg_value)
-                        elif isinstance(arg_value, list):
-                            for item in arg_value:
-                                extract_columns_recursive(item, current_table_context)
-                        else:
-                            extract_columns_recursive(arg_value, current_table_context)
-            
-            return current_table_context
-        
-        extract_columns_recursive(sql_ast)
-        return columns
-    
-    def _extract_column_lineage_from_ast(self, sql_ast, target_table: str, source_tables: List[str]) -> Dict[str, List[Dict[str, str]]]:
-        """
-        Extract column-level lineage from SQL AST
-        
-        Args:
-            sql_ast: SQL AST
-            target_table: Target table name
-            source_tables: List of source table names
-            
-        Returns:
-            Dictionary of {target_column: [{"table": source_table, "column": source_column}, ...]}
-        """
-        column_lineage = {}
-        
-        # Simple implementation - extract target columns from SELECT clause
-        if isinstance(sql_ast, Select):
-            if hasattr(sql_ast, 'args') and 'expressions' in sql_ast.args:
-                select_expressions = sql_ast.args['expressions']
-                for expr in select_expressions:
-                    # Get target column name (either alias or column name)
+                # Process each column expression
+                for expr in select_node.args['expressions']:
+                    # Get target column name
                     target_column = None
                     if hasattr(expr, 'alias'):
                         target_column = expr.alias
+                    elif hasattr(expr, 'args') and 'alias' in expr.args:
+                        target_column = expr.args['alias']
                     elif isinstance(expr, Column):
-                        target_column = expr.name
+                        if hasattr(expr, 'name'):
+                            target_column = expr.name
+                        elif hasattr(expr, 'args') and 'this' in expr.args:
+                            target_column = expr.args['this']
                     
-                    if target_column:
-                        # Find source columns referenced in this expression
-                        source_columns = []
-                        
-                        def find_columns(expr, current_table=None):
-                            if isinstance(expr, Table):
-                                table_name = expr.name
-                                if hasattr(expr, 'db') and expr.db:
-                                    table_name = f"{expr.db}.{table_name}"
-                                return table_name
-                            
-                            elif isinstance(expr, Column):
-                                col_name = expr.name
-                                table = current_table
-                                
-                                # If table matches one of our source tables, add to lineage
-                                if table and table in source_tables:
-                                    source_columns.append({"table": table, "column": col_name})
-                            
-                            # Recursively process child expressions
-                            current_table_context = current_table
-                            if hasattr(expr, 'args'):
-                                for arg_name, arg_value in expr.args.items():
-                                    if arg_value:
-                                        if isinstance(arg_value, Table):
-                                            current_table_context = find_columns(arg_value)
-                                        elif isinstance(arg_value, list):
-                                            for item in arg_value:
-                                                find_columns(item, current_table_context)
-                                        else:
-                                            find_columns(arg_value, current_table_context)
-                            
-                            return current_table_context
-                        
-                        # Process the expression to find source columns
-                        find_columns(expr)
-                        
-                        # Add to column lineage if source columns were found
-                        if source_columns:
-                            column_lineage[target_column] = source_columns
+                    if not target_column:
+                        continue
+                    
+                    # Find source columns
+                    source_columns = []
+                    self._find_source_columns(expr, source_columns)
+                    
+                    if source_columns:
+                        column_mappings[target_column] = source_columns
+                
+                result["column_level_lineage"] = column_mappings
+        except Exception as e:
+            result["errors"].append(f"Error extracting column lineage: {str(e)}")
         
-        return column_lineage 
+        return result
+    
+    def _find_source_columns(self, node: Any, columns: List[Dict[str, str]]) -> None:
+        """
+        Recursively find source columns in an expression
+        
+        Args:
+            node: SQLGlot AST node
+            columns: List to populate with source columns
+        """
+        if node is None:
+            return
+        
+        # If it's a column reference, add it to the list
+        if isinstance(node, Column):
+            column_name = None
+            table_name = None
+            
+            # Extract column name
+            if hasattr(node, 'name'):
+                column_name = node.name
+            elif hasattr(node, 'args') and 'this' in node.args:
+                column_name = node.args['this']
+            
+            # Extract table name
+            if hasattr(node, 'table'):
+                table_name = node.table
+            elif hasattr(node, 'args') and 'table' in node.args:
+                table_name = node.args['table']
+            
+            # Add to source columns if we found a name
+            if column_name:
+                columns.append({
+                    "table": table_name,
+                    "column": column_name
+                })
+        
+        # Process child nodes
+        if hasattr(node, 'args'):
+            for key, value in node.args.items():
+                if isinstance(value, list):
+                    for item in value:
+                        self._find_source_columns(item, columns)
+                else:
+                    self._find_source_columns(value, columns) 

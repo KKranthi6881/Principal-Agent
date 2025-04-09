@@ -231,17 +231,51 @@ class EnhancedGitHubVectorStore:
             if file_path:
                 where_clause["file_path"] = file_path
             
+            # Execute query
             results = self.collection.query(
                 query_texts=[query_text],
                 n_results=n_results,
                 where=where_clause if where_clause else None
             )
             
-            return results
+            # Format results to ensure consistent structure
+            formatted_results = {
+                'ids': [],
+                'documents': [],
+                'metadatas': [],
+                'distances': []
+            }
+            
+            # Handle results from different ChromaDB versions
+            if results:
+                # For newer ChromaDB versions, the results might already be flattened
+                if 'ids' in results and isinstance(results['ids'][0], str):
+                    formatted_results['ids'] = results['ids']
+                    formatted_results['documents'] = results.get('documents', [])
+                    formatted_results['metadatas'] = results.get('metadatas', [])
+                    formatted_results['distances'] = results.get('distances', [])
+                # For older ChromaDB versions with nested lists
+                elif 'ids' in results and isinstance(results['ids'], list) and results['ids'] and isinstance(results['ids'][0], list):
+                    formatted_results['ids'] = results['ids'][0]
+                    if 'documents' in results and results['documents'] and isinstance(results['documents'][0], list):
+                        formatted_results['documents'] = results['documents'][0]
+                    if 'metadatas' in results and results['metadatas'] and isinstance(results['metadatas'][0], list):
+                        formatted_results['metadatas'] = results['metadatas'][0] 
+                    if 'distances' in results and results['distances'] and isinstance(results['distances'][0], list):
+                        formatted_results['distances'] = results['distances'][0]
+            
+            logger.info(f"Query for '{query_text}' returned {len(formatted_results['ids'])} results")
+            return formatted_results
+            
         except Exception as e:
             logger.error(f"Error querying vector store: {e}")
             logger.error(traceback.format_exc())
-            return None
+            return {
+                'ids': [],
+                'documents': [],
+                'metadatas': [],
+                'distances': []
+            }
     
     def get_stats(self, embedding_provider=None):
         """

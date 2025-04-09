@@ -82,6 +82,8 @@ class CompleteLineageRequest(BaseModel):
     table_name: str = Field(..., description="Table name to trace lineage for")
     direction: str = Field("upstream", description="Direction: 'upstream' or 'downstream'")
     max_depth: int = Field(10, description="Maximum recursion depth")
+    dialect: Optional[str] = Field(None, description="SQL dialect to use (dbt, postgresql, snowflake, mysql, tsql)")
+    repo_url: Optional[str] = Field(None, description="Repository URL to help detect dialect if not specified")
 
 class CompleteColumnLineageRequest(BaseModel):
     """Request model for complete column lineage tracing"""
@@ -89,6 +91,8 @@ class CompleteColumnLineageRequest(BaseModel):
     column_name: str = Field(..., description="Column name")
     direction: str = Field("upstream", description="Direction: 'upstream' or 'downstream'")
     max_depth: int = Field(10, description="Maximum recursion depth")
+    dialect: Optional[str] = Field(None, description="SQL dialect to use (dbt, postgresql, snowflake, mysql, tsql)")
+    repo_url: Optional[str] = Field(None, description="Repository URL to help detect dialect if not specified")
 
 # API endpoints
 @router.get("/dialects", response_model=DialectInfoResponse)
@@ -221,10 +225,17 @@ async def trace_complete_lineage(request: CompleteLineageRequest):
                 detail="Direction must be either 'upstream' or 'downstream'"
             )
         
+        # Determine dialect to use
+        dialect = request.dialect
+        if not dialect and request.repo_url:
+            dialect = sql_api.detect_dialect_from_repo_url(request.repo_url)
+            logger.info(f"Auto-detected dialect {dialect} from repo URL: {request.repo_url}")
+        
         result = sql_api.trace_complete_lineage(
             request.table_name,
             request.direction,
-            request.max_depth
+            request.max_depth,
+            dialect
         )
         
         if "error" in result:
@@ -252,11 +263,18 @@ async def trace_complete_column_lineage(request: CompleteColumnLineageRequest):
                 detail="Direction must be either 'upstream' or 'downstream'"
             )
         
+        # Determine dialect to use
+        dialect = request.dialect
+        if not dialect and request.repo_url:
+            dialect = sql_api.detect_dialect_from_repo_url(request.repo_url)
+            logger.info(f"Auto-detected dialect {dialect} from repo URL: {request.repo_url}")
+        
         result = sql_api.trace_column_complete_lineage(
             request.table_name,
             request.column_name,
             request.direction,
-            request.max_depth
+            request.max_depth,
+            dialect
         )
         
         if "error" in result:

@@ -1,16 +1,13 @@
 """
 GitHub SQL Finder
 
-This module uses vector search to find SQL files in GitHub repositories
-and extract their content for dependency analysis.
+This module provides functionality to search for SQL files in GitHub repositories
+using vector search.
 """
 
 import os
 import logging
-from typing import Dict, List, Optional, Any
-import re
-import chromadb
-import traceback
+from typing import Dict, List, Set, Tuple, Optional, Any
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -18,327 +15,125 @@ logger.setLevel(logging.INFO)
 
 class GitHubSQLFinder:
     """
-    Find SQL files in GitHub repositories using vector search
+    GitHub SQL Finder class for searching SQL files in GitHub repositories
     """
     
-    def __init__(self, vector_store_path=None):
+    def __init__(self, vector_store_path: Optional[str] = None):
         """
         Initialize the GitHub SQL Finder
         
         Args:
-            vector_store_path: Path to the ChromaDB vector store
+            vector_store_path: Path to vector store (optional)
         """
-        # Set default path if None
-        if vector_store_path is None:
-            # Use the directory of this file to ensure we create in correct location
-            current_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-            vector_store_path = os.path.join(current_dir, "vector_store", "chromadb_github")
-            
+        self.vector_store = None
         self.vector_store_path = vector_store_path
-        logger.info(f"GitHubSQLFinder initializing with vector_store_path: {self.vector_store_path}")
+    
+    def initialize(self) -> bool:
+        """
+        Initialize the vector store
         
-        self.chroma_client = None
-        self.collection = None
-        
-    def initialize(self):
-        """Initialize ChromaDB client and collection"""
+        Returns:
+            True if successful, False otherwise
+        """
         try:
-            logger.info(f"Initializing ChromaDB with path: {self.vector_store_path}")
+            # Import here to avoid circular imports
+            from vector_store.github_vectorstore import get_github_vector_store
             
-            # Verify the path exists or can be created
-            try:
-                # Ensure directory exists
-                os.makedirs(self.vector_store_path, exist_ok=True)
-                logger.info(f"Directory exists or created: {self.vector_store_path}")
-            except Exception as e:
-                logger.error(f"Error creating directory {self.vector_store_path}: {e}")
+            self.vector_store = get_github_vector_store()
+            if self.vector_store:
+                logger.info(f"Successfully initialized GitHub vector store with {self.vector_store.count()} documents")
+                return True
+            else:
+                logger.error("Failed to initialize GitHub vector store")
                 return False
-            
-            # Verify it's a valid directory
-            if not os.path.isdir(self.vector_store_path):
-                logger.error(f"Path is not a directory: {self.vector_store_path}")
-                return False
-                
-            # Initialize client
-            try:
-                logger.info(f"Creating ChromaDB client with path: {self.vector_store_path}")
-                self.chroma_client = chromadb.PersistentClient(path=self.vector_store_path)
-                logger.info("ChromaDB client created successfully")
-            except Exception as e:
-                logger.error(f"Error creating ChromaDB client: {str(e)}")
-                logger.error(traceback.format_exc())
-                return False
-            
-            # Get or create the collection
-            try:
-                # First try to get the existing collection
-                logger.info("Attempting to get existing collection 'github_code'")
-                self.collection = self.chroma_client.get_collection("github_code")
-                logger.info(f"Found existing ChromaDB collection with {self.collection.count()} documents")
-            except Exception as e:
-                # If not found, create a new collection
-                logger.info(f"Collection 'github_code' not found, creating it now...")
-                try:
-                    from chromadb.utils import embedding_functions
-                    embedding_func = embedding_functions.DefaultEmbeddingFunction()
-                    self.collection = self.chroma_client.create_collection(
-                        name="github_code",
-                        embedding_function=embedding_func
-                    )
-                    #logger.info("Created new collection, populating with sample data...")
-                    #self._populate_sample_data()
-                    return True
-                except Exception as create_e:
-                    logger.error(f"Error creating collection: {str(create_e)}")
-                    logger.error(traceback.format_exc())
-                    return False
-                
-            return True
         except Exception as e:
-            logger.error(f"Error initializing ChromaDB: {e}")
-            logger.error(traceback.format_exc())
+            logger.error(f"Error initializing GitHub vector store: {str(e)}")
             return False
-    
-    def _populate_sample_data(self):
-        """Add sample SQL data to the collection"""
-        # Sample SQL files to load
-        sample_files = [
-            {
-                "content": """
--- Final fact table for order items
-CREATE OR REPLACE TABLE analytics.fct_order_items AS
-SELECT 
-    o.order_id,
-    oi.order_item_id,
-    o.customer_id,
-    o.order_date,
-    p.product_id,
-    p.product_name,
-    p.category_id,
-    c.category_name,
-    oi.quantity,
-    oi.base_price,
-    oi.discount_pct,
-    -- Calculate the item discount amount
-    oi.base_price * oi.quantity * (oi.discount_pct / 100) AS item_discount_amount,
-    oi.base_price * oi.quantity * (1 - oi.discount_pct / 100) AS final_price,
-    o.order_status
-FROM 
-    raw_data.orders o
-JOIN 
-    raw_data.order_items oi ON o.order_id = oi.order_id
-JOIN 
-    raw_data.products p ON oi.product_id = p.product_id
-JOIN 
-    raw_data.categories c ON p.category_id = c.category_id
-""",
-                "metadata": {
-                    "repo": "analytics-dbt",
-                    "file_extension": ".sql",
-                    "source": "models/fct_order_items.sql",
-                    "url": "https://github.com/company/analytics-dbt/blob/main/models/fct_order_items.sql"
-                }
-            },
-            {
-                "content": """
--- Staging table for orders
-CREATE OR REPLACE TABLE raw_data.orders AS
-SELECT 
-    order_id,
-    customer_id,
-    order_date,
-    order_status,
-    total_amount
-FROM 
-    source_data.orders
-WHERE
-    order_date >= '2023-01-01'
-""",
-                "metadata": {
-                    "repo": "analytics-dbt",
-                    "file_extension": ".sql",
-                    "source": "models/staging/stg_orders.sql",
-                    "url": "https://github.com/company/analytics-dbt/blob/main/models/staging/stg_orders.sql"
-                }
-            },
-            {
-                "content": """
--- Staging table for order items
-CREATE OR REPLACE TABLE raw_data.order_items AS
-SELECT 
-    order_id,
-    order_item_id,
-    product_id,
-    quantity,
-    base_price,
-    discount_pct
-FROM 
-    source_data.order_items
-""",
-                "metadata": {
-                    "repo": "analytics-dbt",
-                    "file_extension": ".sql",
-                    "source": "models/staging/stg_order_items.sql",
-                    "url": "https://github.com/company/analytics-dbt/blob/main/models/staging/stg_order_items.sql"
-                }
-            },
-            {
-                "content": """
--- Staging table for products
-CREATE OR REPLACE TABLE raw_data.products AS
-SELECT 
-    product_id,
-    product_name,
-    category_id,
-    price,
-    inventory_count
-FROM 
-    source_data.products
-""",
-                "metadata": {
-                    "repo": "analytics-dbt",
-                    "file_extension": ".sql",
-                    "source": "models/staging/stg_products.sql",
-                    "url": "https://github.com/company/analytics-dbt/blob/main/models/staging/stg_products.sql"
-                }
-            },
-            {
-                "content": """
--- Staging table for categories
-CREATE OR REPLACE TABLE raw_data.categories AS
-SELECT 
-    category_id,
-    category_name,
-    parent_category_id,
-    category_description
-FROM 
-    source_data.categories
-""",
-                "metadata": {
-                    "repo": "analytics-dbt",
-                    "file_extension": ".sql",
-                    "source": "models/staging/stg_categories.sql",
-                    "url": "https://github.com/company/analytics-dbt/blob/main/models/staging/stg_categories.sql"
-                }
-            },
-            {
-                "content": """
--- Report on product discounts
-CREATE OR REPLACE TABLE analytics.rpt_discounts AS
-SELECT 
-    c.category_name,
-    p.product_name,
-    SUM(oi.quantity) as total_quantity,
-    SUM(oi.base_price * oi.quantity) as total_base_amount,
-    -- Reusing the discount calculation logic
-    SUM(oi.base_price * oi.quantity * (oi.discount_pct / 100)) as item_discount_amount,
-    AVG(oi.discount_pct) as avg_discount_pct
-FROM 
-    raw_data.order_items oi
-JOIN 
-    raw_data.products p ON oi.product_id = p.product_id
-JOIN 
-    raw_data.categories c ON p.category_id = c.category_id
-WHERE
-    oi.discount_pct > 0
-GROUP BY
-    c.category_name, p.product_name
-ORDER BY
-    item_discount_amount DESC
-""",
-                "metadata": {
-                    "repo": "analytics-dbt",
-                    "file_extension": ".sql",
-                    "source": "models/reporting/rpt_discounts.sql",
-                    "url": "https://github.com/company/analytics-dbt/blob/main/models/reporting/rpt_discounts.sql"
-                }
-            }
-        ]
-        
-        try:
-            # Add documents
-            ids = []
-            documents = []
-            metadatas = []
-            
-            for i, file_info in enumerate(sample_files):
-                ids.append(f"sql_{i}")
-                documents.append(file_info["content"])
-                metadatas.append(file_info["metadata"])
-            
-            # Add or update documents
-            self.collection.add(
-                ids=ids,
-                documents=documents,
-                metadatas=metadatas
-            )
-            
-            logger.info(f"Successfully added {len(ids)} sample SQL files to ChromaDB")
-        except Exception as e:
-            logger.error(f"Error populating sample data: {e}")
-            import traceback
-            traceback.print_exc()
-    
-    def set_vector_store(self, vector_store_client):
-        """For compatibility with earlier code"""
-        if vector_store_client:
-            logger.info("Vector store client provided, but GitHubSQLFinder now uses ChromaDB directly")
     
     def search_sql_files(self, query: str, limit: int = 20) -> List[Dict[str, Any]]:
         """
-        Search for SQL files based on the query
+        Search for SQL files in GitHub repositories
         
         Args:
             query: Search query
             limit: Maximum number of results
             
         Returns:
-            List of matching SQL files with metadata
+            List of SQL files with metadata
         """
-        if not self.collection:
-            logger.error("ChromaDB collection not initialized")
-            return [{"error": "ChromaDB collection not initialized"}]
+        # Make sure vector store is initialized
+        if not self.vector_store:
+            if not self.initialize():
+                return []
         
         try:
-            # Search the vector store
-            logger.info(f"Searching for SQL files with query: {query}")
-            results = self.collection.query(
-                query_texts=[query],
-                n_results=min(limit, self.collection.count())
-            )
+            # Add SQL file filter to query if not already present
+            if 'extension:' not in query and '.sql' not in query:
+                query = f"{query} extension:sql"
             
-            # Check for empty results
-            if not results or not results.get("documents") or len(results["documents"]) == 0 or len(results["documents"][0]) == 0:
-                logger.warning(f"No results found for query: {query}")
+            # Search the vector store
+            results = self.vector_store.query(query, n_results=limit)
+            
+            # Process results
+            formatted_results = []
+            
+            # Check the structure of results and handle it appropriately
+            if not results:
                 return []
                 
-            logger.info(f"Found {len(results['documents'][0])} SQL files matching query")
-            
-            # Process and return the results
-            sql_files = []
-            for i, doc_content in enumerate(results["documents"][0]):
-                # Make sure we have metadata for this document
-                if i >= len(results["metadatas"][0]):
-                    logger.warning(f"Missing metadata for document at index {i}")
-                    continue
-                    
-                metadata = results["metadatas"][0][i] or {}
+            # Check if 'metadatas' is a list of dictionaries or a list of lists
+            if 'metadatas' in results:
+                metadatas = results['metadatas']
+                documents = results.get('documents', [])
                 
-                # Extract file path, GitHub URL, etc.
-                sql_files.append({
-                    "content": doc_content,
-                    "path": metadata.get("source", ""),
-                    "url": metadata.get("url", ""),
-                    "github_repo": metadata.get("repo", ""),
-                    "file_name": os.path.basename(metadata.get("source", "")),
-                    "dialect": self._detect_sql_dialect(doc_content, metadata)
-                })
+                # Handle case where metadatas is a list of lists
+                if metadatas and isinstance(metadatas, list):
+                    if metadatas and isinstance(metadatas[0], list):
+                        # It's a list of lists (older ChromaDB format)
+                        metadatas = metadatas[0] if metadatas else []
+                        documents = documents[0] if documents and isinstance(documents, list) and documents and isinstance(documents[0], list) else []
+                
+                for i, metadata in enumerate(metadatas):
+                    if not metadata:
+                        continue
+                        
+                    # Check if this is actually a SQL file
+                    file_path = metadata.get('file_path', '')
+                    file_ext = metadata.get('file_extension', '')
+                    
+                    # Skip non-SQL files
+                    if not file_path.lower().endswith('.sql') and not file_ext.lower() == 'sql':
+                        continue
+                    
+                    # Get content
+                    content = documents[i] if i < len(documents) else ''
+                    
+                    # Get repository URL properly
+                    repo_url = metadata.get('repo_url', '')
+                    
+                    # Build proper URL with file path
+                    url = f"{repo_url}/blob/main/{file_path}" if repo_url else None
+                    
+                    # Create formatted result with consistent keys
+                    formatted_result = {
+                        'file_path': file_path,
+                        'content': content,
+                        'url': url,
+                        'github_repo': repo_url,
+                        'path': file_path,  # Add for backward compatibility with older code
+                        'dialect': self._detect_dialect(file_path, content)
+                    }
+                    
+                    formatted_results.append(formatted_result)
             
-            return sql_files
+            logger.info(f"Found {len(formatted_results)} SQL files in search results")
+            return formatted_results
             
         except Exception as e:
             logger.error(f"Error searching for SQL files: {str(e)}")
-            return [{"error": f"Error searching for SQL files: {str(e)}"}]
+            import traceback
+            logger.error(traceback.format_exc())
+            return []
     
     def search_for_table(self, table_name: str, limit: int = 20) -> List[Dict[str, Any]]:
         """
@@ -349,12 +144,17 @@ ORDER BY
             limit: Maximum number of results
             
         Returns:
-            List of matching SQL files with metadata
+            List of SQL files with metadata
         """
-        # First try a direct search for the table name
-        query = f"table {table_name} SQL"
-        logger.info(f"Searching for table: {table_name}")
-        return self.search_sql_files(query, limit)
+        query = f"extension:sql {table_name}"
+        # Additional DBT-specific patterns
+        dbt_ref_query = f'ref("{table_name}") OR ref(\'{table_name}\')'
+        source_query = f'source OR table:{table_name} OR "{table_name}" OR \'{table_name}\''
+        
+        # Combine queries
+        combined_query = f"{query} {dbt_ref_query} {source_query}"
+        
+        return self.search_sql_files(combined_query, limit)
     
     def search_for_column(self, table_name: str, column_name: str, limit: int = 20) -> List[Dict[str, Any]]:
         """
@@ -366,60 +166,84 @@ ORDER BY
             limit: Maximum number of results
             
         Returns:
-            List of matching SQL files with metadata
+            List of SQL files with metadata
         """
-        query = f"table {table_name} column {column_name} SQL"
+        # Build query for table and column
+        query = f"extension:sql {table_name} {column_name}"
+        
+        # Additional patterns for DBT and common SQL patterns
+        specific_patterns = [
+            f"{table_name}.{column_name}",
+            f'"{table_name}"."{column_name}"',
+            f"'{table_name}'.'{column_name}'",
+            f"select {column_name}",
+            f"SELECT {column_name}",
+            f"as {column_name}",
+            f"AS {column_name}"
+        ]
+        
+        # Add specific patterns to query
+        for pattern in specific_patterns:
+            query += f" OR {pattern}"
+        
         return self.search_sql_files(query, limit)
     
-    def _detect_sql_dialect(self, content: str, metadata: Dict[str, Any]) -> str:
+    def _detect_dialect(self, file_path: str, content: str) -> str:
         """
-        Detect the SQL dialect from content and metadata
+        Detect SQL dialect from file path and content
         
         Args:
-            content: SQL content
-            metadata: File metadata
+            file_path: Path to the SQL file
+            content: SQL file content
             
         Returns:
-            Detected SQL dialect
+            Detected dialect name
         """
-        # Check metadata first
-        repo = metadata.get("repo", "").lower()
-        file_path = metadata.get("source", "").lower()
+        # Check file path for clues
+        file_path_lower = file_path.lower()
         
-        # Check for dbt
-        if '/dbt/' in file_path or repo.startswith('dbt-') or repo.endswith('-dbt'):
-            return "dbt"
+        # Check for DBT
+        if any(pattern in file_path_lower for pattern in ['/models/', '/dbt/', '/macros/', '/analysis/']):
+            return 'dbt'
         
-        # Check for specific paths that might indicate dialect
-        if '/snowflake/' in file_path:
-            return "snowflake"
-        if '/redshift/' in file_path:
-            return "redshift"
-        if '/postgres/' in file_path or '/postgresql/' in file_path:
-            return "postgresql"
-        if '/mysql/' in file_path:
-            return "mysql"
-        if '/mssql/' in file_path or '/azure/' in file_path:
-            return "azuresql"
+        # Check for Snowflake
+        if '/snowflake/' in file_path_lower or 'snowflake_' in file_path_lower:
+            return 'snowflake'
         
-        # Check content for dialect-specific keywords
-        content_lower = content.lower()
+        # Check for PostgreSQL
+        if any(pattern in file_path_lower for pattern in ['/postgres/', 'postgresql', '.pg.sql']):
+            return 'postgresql'
+            
+        # Check for MySQL
+        if '/mysql/' in file_path_lower or '.mysql.' in file_path_lower:
+            return 'mysql'
+            
+        # Check for SQL Server
+        if any(pattern in file_path_lower for pattern in ['/sqlserver/', 'tsql', 'mssql']):
+            return 'tsql'
         
-        # Snowflake specific
-        if re.search(r'create\s+(?:or\s+replace\s+)?(?:table|view|procedure|function|stage|pipe)\s+', content_lower) and ('warehouse' in content_lower or 'lateral flatten' in content_lower):
-            return "snowflake"
+        # Check content for dialect-specific patterns
+        content_lower = content.lower()[:4000] if content else ''  # Limit content to avoid performance issues
         
-        # Redshift specific
-        if 'diststyle' in content_lower or 'distkey' in content_lower or 'sortkey' in content_lower:
-            return "redshift"
-        
-        # Azure SQL/TSQL specific
-        if 'with(nolock)' in content_lower.replace(' ', '') or 'exec sp_' in content_lower:
-            return "azuresql"
-        
-        # MySQL specific
-        if 'engine=innodb' in content_lower or 'auto_increment' in content_lower:
-            return "mysql"
-        
-        # Default to PostgreSQL which is most common and widely compatible
-        return "postgresql" 
+        # Check for DBT
+        if '{{' in content_lower and ('ref(' in content_lower or 'source(' in content_lower):
+            return 'dbt'
+            
+        # Check for Snowflake
+        if any(pattern in content_lower for pattern in ['lateral flatten', '$$', 'copy into']):
+            return 'snowflake'
+            
+        # Check for PostgreSQL
+        if any(pattern in content_lower for pattern in ['with ordinality', 'returning', 'jsonb']):
+            return 'postgresql'
+            
+        # Check for MySQL
+        if any(pattern in content_lower for pattern in ['force index', 'using index', 'engine=innodb']):
+            return 'mysql'
+            
+        # Check for SQL Server
+        if any(pattern in content_lower for pattern in ['for system_time', 'output inserted', 'merge into']):
+            return 'tsql'
+            
+        # Default to PostgreSQL
+        return 'postgresql' 

@@ -7,7 +7,7 @@ This module extracts lineage information from SQL AST using SQLGlot.
 import os
 import logging
 from typing import Dict, List, Set, Tuple, Optional, Any
-from sqlglot.expressions import Select, Create, Insert, Table, Column, Subquery, JoinExpression
+from sqlglot.expressions import Select, Create, Insert, Table, Column, Subquery
 
 from .base_lineage import BaseLineageExtractor
 
@@ -29,341 +29,277 @@ class SQLGlotLineageExtractor(BaseLineageExtractor):
         Extract table-level lineage from SQL AST
         
         Args:
-            sql_ast: SQL AST from SQLGlot
-            file_path: Path to the file (optional)
+            sql_ast: SQLGlot AST
+            file_path: Original file path
             
         Returns:
             Dictionary with table lineage information
         """
-        result = self.get_default_output_format()
-        result["file_path"] = file_path
-        
-        if not sql_ast:
-            result["errors"].append({
-                "error_type": "missing_ast",
-                "message": "No SQL AST provided"
-            })
-            return result
-        
         try:
-            # Extract target table
-            target_table = self._extract_target_table(sql_ast)
-            result["target_table"] = target_table
+            # Initialize result
+            result = {
+                "source_tables": [],
+                "target_table": None,
+                "file_path": file_path,
+                "relationships": []
+            }
             
-            # Extract source tables
-            source_tables = self._extract_source_tables(sql_ast)
-            result["source_tables"] = list(source_tables)
+            # Check for CREATE or INSERT statements to determine target table
+            if isinstance(sql_ast, Create):
+                target_obj = sql_ast.find(Table)
+                if target_obj:
+                    result["target_table"] = self._extract_table_name(target_obj)
+            elif isinstance(sql_ast, Insert):
+                target_obj = sql_ast.find(Table)
+                if target_obj:
+                    result["target_table"] = self._extract_table_name(target_obj)
             
-            # Extract column-level lineage if we have a target table
-            if target_table:
-                column_lineage = self.extract_column_lineage(sql_ast, file_path)["column_level_lineage"]
-                result["column_level_lineage"] = column_lineage
+            # Extract source tables from SELECT statements
+            self._extract_source_tables(sql_ast, result["source_tables"])
+            
+            # Remove duplicates while preserving order
+            seen = set()
+            result["source_tables"] = [x for x in result["source_tables"] 
+                                      if not (x in seen or seen.add(x))]
+            
+            # Build relationships
+            if result["target_table"] and result["source_tables"]:
+                for source_table in result["source_tables"]:
+                    result["relationships"].append({
+                        "source": source_table,
+                        "target": result["target_table"],
+                        "type": "depends_on"
+                    })
             
             return result
         except Exception as e:
             logger.error(f"Error extracting table lineage: {str(e)}")
-            result["errors"].append({
-                "error_type": "lineage_extraction_error",
-                "message": f"Error extracting table lineage: {str(e)}"
-            })
-            return result
+            return {
+                "source_tables": [],
+                "target_table": None,
+                "file_path": file_path,
+                "error": str(e)
+            }
+    
+    def _extract_source_tables(self, node: Any, tables: List[str]) -> None:
+        """
+        Recursively extract source tables from an AST node
+        
+        Args:
+            node: SQLGlot AST node
+            tables: List to populate with source table names
+        """
+        if node is None:
+            return
+        
+        # If it's a table reference, add it to the list
+        if isinstance(node, Table):
+            table_name = self._extract_table_name(node)
+            if table_name and table_name not in tables:
+                tables.append(table_name)
+        
+        # Handle join expressions which might have different structure in this sqlglot version
+        # Instead of checking for JoinExpression, look for join-related attributes
+        if hasattr(node, 'args') and isinstance(node.args, dict):
+            # Check for join-related attributes that might exist in different sqlglot versions
+            if 'join' in node.args or 'joins' in node.args:
+                # Handle joins by processing their table references
+                joins = node.args.get('join', []) or node.args.get('joins', [])
+                if isinstance(joins, list):
+                    for join_item in joins:
+                        self._extract_source_tables(join_item, tables)
+                else:
+                    self._extract_source_tables(joins, tables)
+        
+        # Process all child nodes
+        if hasattr(node, 'args'):
+            if isinstance(node.args, dict):
+                for child in node.args.values():
+                    if isinstance(child, list):
+                        for item in child:
+                            self._extract_source_tables(item, tables)
+                    else:
+                        self._extract_source_tables(child, tables)
+            elif isinstance(node.args, list):
+                for child in node.args:
+                    self._extract_source_tables(child, tables)
+    
+    def _extract_table_name(self, table_node: Any) -> Optional[str]:
+        """
+        Extract table name from a Table node
+        
+        Args:
+            table_node: SQLGlot Table node
+            
+        Returns:
+            Table name as string
+        """
+        try:
+            # Different versions of sqlglot might store table names differently
+            if hasattr(table_node, 'name'):
+                # Direct name attribute
+                name = table_node.name
+                if hasattr(table_node, 'db') and table_node.db:
+                    return f"{table_node.db}.{name}"
+                return name
+            elif hasattr(table_node, 'args') and 'this' in table_node.args:
+                # Name stored in args.this
+                name = table_node.args.get('this')
+                db = table_node.args.get('db')
+                if db:
+                    return f"{db}.{name}"
+                return name
+            elif hasattr(table_node, 'args') and 'name' in table_node.args:
+                # Name stored in args.name
+                name = table_node.args.get('name')
+                db = table_node.args.get('db')
+                if db:
+                    return f"{db}.{name}"
+                return name
+            else:
+                # Try to extract from string representation
+                return str(table_node).split('.')[-1].strip('`"[]')
+        except Exception as e:
+            logger.error(f"Error extracting table name: {str(e)}")
+            return None
     
     def extract_column_lineage(self, sql_ast: Any, file_path: Optional[str] = None) -> Dict[str, Any]:
         """
         Extract column-level lineage from SQL AST
         
         Args:
-            sql_ast: SQL AST from SQLGlot
-            file_path: Path to the file (optional)
+            sql_ast: SQLGlot AST
+            file_path: Original file path
             
         Returns:
             Dictionary with column lineage information
         """
-        result = self.get_default_output_format()
-        result["file_path"] = file_path
-        
-        if not sql_ast:
-            result["errors"].append({
-                "error_type": "missing_ast",
-                "message": "No SQL AST provided"
-            })
-            return result
-        
         try:
+            # Initialize result
+            result = {
+                "target_table": None,
+                "column_mappings": {},
+                "file_path": file_path
+            }
+            
             # Extract target table
-            target_table = self._extract_target_table(sql_ast)
-            result["target_table"] = target_table
+            if isinstance(sql_ast, Create):
+                target_obj = sql_ast.find(Table)
+                if target_obj:
+                    result["target_table"] = self._extract_table_name(target_obj)
+            elif isinstance(sql_ast, Insert):
+                target_obj = sql_ast.find(Table)
+                if target_obj:
+                    result["target_table"] = self._extract_table_name(target_obj)
             
-            # Extract source tables
-            source_tables = self._extract_source_tables(sql_ast)
-            result["source_tables"] = list(source_tables)
+            # Extract column mappings from SELECT statements
+            if isinstance(sql_ast, Select) or (hasattr(sql_ast, 'args') and 'expression' in sql_ast.args):
+                select_node = sql_ast if isinstance(sql_ast, Select) else sql_ast.args.get('expression')
+                if select_node:
+                    self._extract_column_mappings(select_node, result["column_mappings"])
             
-            # Extract column lineage
-            column_mappings = {}
-            
-            # For CREATE TABLE or INSERT statements, examine the SELECT part
-            select_ast = None
-            if isinstance(sql_ast, Create) or isinstance(sql_ast, Insert):
-                # Get the SELECT query if it's a CREATE TABLE AS or INSERT
-                if hasattr(sql_ast, 'args') and 'expression' in sql_ast.args:
-                    select_ast = sql_ast.args['expression']
-            elif isinstance(sql_ast, Select):
-                select_ast = sql_ast
-            
-            if select_ast and isinstance(select_ast, Select):
-                column_mappings = self._extract_column_mappings(select_ast, target_table, source_tables)
-            
-            result["column_level_lineage"] = column_mappings
             return result
-            
         except Exception as e:
             logger.error(f"Error extracting column lineage: {str(e)}")
-            result["errors"].append({
-                "error_type": "lineage_extraction_error",
-                "message": f"Error extracting column lineage: {str(e)}"
-            })
-            return result
+            return {
+                "target_table": None,
+                "column_mappings": {},
+                "file_path": file_path,
+                "error": str(e)
+            }
     
-    def _extract_target_table(self, sql_ast: Any) -> Optional[str]:
-        """
-        Extract target table name from SQL AST
-        
-        Args:
-            sql_ast: SQL AST
-            
-        Returns:
-            Target table name or None if not found
-        """
-        if isinstance(sql_ast, Create):
-            # For CREATE TABLE statements, the target is the table being created
-            if hasattr(sql_ast, 'this') and hasattr(sql_ast.this, 'name'):
-                table_name = sql_ast.this.name
-                if hasattr(sql_ast.this, 'db') and sql_ast.this.db:
-                    table_name = f"{sql_ast.this.db}.{table_name}"
-                return table_name
-        
-        elif isinstance(sql_ast, Insert):
-            # For INSERT statements, the target is the table being inserted into
-            if hasattr(sql_ast, 'this') and hasattr(sql_ast.this, 'name'):
-                table_name = sql_ast.this.name
-                if hasattr(sql_ast.this, 'db') and sql_ast.this.db:
-                    table_name = f"{sql_ast.this.db}.{table_name}"
-                return table_name
-        
-        # If it's just a SELECT statement, there's no target table
-        return None
-    
-    def _extract_source_tables(self, sql_ast: Any) -> Set[str]:
-        """
-        Extract source table references from SQL AST
-        
-        Args:
-            sql_ast: SQL AST
-            
-        Returns:
-            Set of source table references
-        """
-        source_tables = set()
-        
-        def extract_tables(expr, exclude_table=None):
-            if isinstance(expr, Table):
-                table_name = expr.name
-                if hasattr(expr, 'db') and expr.db:
-                    table_name = f"{expr.db}.{table_name}"
-                # Don't include the target table as a source
-                if table_name != exclude_table:
-                    source_tables.add(table_name)
-            
-            # Handle subqueries
-            if isinstance(expr, Subquery):
-                if hasattr(expr, 'this'):
-                    extract_tables(expr.this, exclude_table)
-            
-            # Process child expressions
-            if hasattr(expr, 'args'):
-                for arg_name, arg_value in expr.args.items():
-                    if arg_value:
-                        if isinstance(arg_value, list):
-                            for item in arg_value:
-                                extract_tables(item, exclude_table)
-                        else:
-                            extract_tables(arg_value, exclude_table)
-        
-        # Get the target table so we can exclude it
-        target_table = self._extract_target_table(sql_ast)
-        
-        # If it's a CREATE TABLE AS or INSERT ... SELECT, extract from the SELECT part
-        if isinstance(sql_ast, Create) or isinstance(sql_ast, Insert):
-            if hasattr(sql_ast, 'args') and 'expression' in sql_ast.args:
-                expression = sql_ast.args['expression']
-                extract_tables(expression, target_table)
-        else:
-            # Otherwise process the whole AST
-            extract_tables(sql_ast, target_table)
-        
-        return source_tables
-    
-    def _extract_column_mappings(self, select_ast: Select, target_table: Optional[str], 
-                                source_tables: Set[str]) -> Dict[str, List[Dict[str, str]]]:
+    def _extract_column_mappings(self, select_node: Any, mappings: Dict[str, List[Dict[str, str]]]) -> None:
         """
         Extract column mappings from a SELECT statement
         
         Args:
-            select_ast: SELECT AST from SQLGlot
-            target_table: Target table name
-            source_tables: Set of source table names
-            
-        Returns:
-            Dictionary of {target_column: [{"table": source_table, "column": source_column}, ...]}
+            select_node: SQLGlot SELECT node
+            mappings: Dictionary to populate with column mappings
         """
-        column_mappings = {}
-        
-        # Process the SELECT expressions to get target columns
-        if hasattr(select_ast, 'args') and 'expressions' in select_ast.args:
-            select_expressions = select_ast.args['expressions']
+        try:
+            # Extract column expressions from the SELECT clause
+            columns = []
+            if hasattr(select_node, 'args') and 'expressions' in select_node.args:
+                columns = select_node.args.get('expressions', [])
             
-            # Build a map of table aliases
-            table_aliases = self._extract_table_aliases(select_ast)
-            
-            # Process each SELECT expression
-            for i, expr in enumerate(select_expressions):
-                # Get target column name (either alias or column name)
-                target_column = None
-                if hasattr(expr, 'alias'):
-                    target_column = expr.alias
-                elif isinstance(expr, Column):
-                    target_column = expr.name
-                else:
-                    # For expressions without clear names, use a position-based name
-                    target_column = f"column_{i+1}"
+            # Process each column expression
+            for col_expr in columns:
+                target_col = self._extract_column_name(col_expr)
+                if not target_col:
+                    continue
                 
-                # Find source columns referenced in this expression
-                source_refs = []
-                self._find_column_references(expr, source_refs, table_aliases, source_tables)
+                source_cols = []
+                # Find all column references in the expression
+                self._find_column_references(col_expr, source_cols)
                 
-                # Add to column mappings if source columns were found
-                if source_refs:
-                    column_mappings[target_column] = source_refs
-        
-        return column_mappings
+                # Add mapping
+                if target_col and source_cols:
+                    mappings[target_col] = source_cols
+        except Exception as e:
+            logger.error(f"Error extracting column mappings: {str(e)}")
     
-    def _extract_table_aliases(self, select_ast: Select) -> Dict[str, str]:
+    def _extract_column_name(self, col_expr: Any) -> Optional[str]:
         """
-        Extract table aliases from a SELECT statement
+        Extract column name from a column expression
         
         Args:
-            select_ast: SELECT AST from SQLGlot
+            col_expr: SQLGlot column expression
             
         Returns:
-            Dictionary of {alias: table_name}
+            Column name as string
         """
-        table_aliases = {}
-        
-        # Process FROM clause
-        if hasattr(select_ast, 'args') and 'from' in select_ast.args:
-            from_clause = select_ast.args['from']
-            if from_clause:
-                # Process tables and subqueries in FROM clause
-                for item in from_clause:
-                    if isinstance(item, Table):
-                        # For tables with aliases
-                        if hasattr(item, 'alias'):
-                            alias = item.alias
-                            table_name = item.name
-                            if hasattr(item, 'db') and item.db:
-                                table_name = f"{item.db}.{table_name}"
-                            table_aliases[alias] = table_name
-                        # For tables without aliases, use the table name as its own alias
-                        else:
-                            table_name = item.name
-                            if hasattr(item, 'db') and item.db:
-                                table_name = f"{item.db}.{table_name}"
-                            table_aliases[table_name] = table_name
-                    
-                    # For subqueries with aliases
-                    elif isinstance(item, Subquery) and hasattr(item, 'alias'):
-                        table_aliases[item.alias] = item.alias  # Use alias as table name for subqueries
-                    
-                    # For JOINs
-                    elif isinstance(item, JoinExpression):
-                        # Process the main (left) table
-                        if hasattr(item, 'this') and isinstance(item.this, Table):
-                            left_table = item.this
-                            if hasattr(left_table, 'alias'):
-                                alias = left_table.alias
-                                table_name = left_table.name
-                                if hasattr(left_table, 'db') and left_table.db:
-                                    table_name = f"{left_table.db}.{table_name}"
-                                table_aliases[alias] = table_name
-                            else:
-                                table_name = left_table.name
-                                if hasattr(left_table, 'db') and left_table.db:
-                                    table_name = f"{left_table.db}.{table_name}"
-                                table_aliases[table_name] = table_name
-                        
-                        # Process the joined (right) table
-                        if hasattr(item, 'expression') and isinstance(item.expression, Table):
-                            right_table = item.expression
-                            if hasattr(right_table, 'alias'):
-                                alias = right_table.alias
-                                table_name = right_table.name
-                                if hasattr(right_table, 'db') and right_table.db:
-                                    table_name = f"{right_table.db}.{table_name}"
-                                table_aliases[alias] = table_name
-                            else:
-                                table_name = right_table.name
-                                if hasattr(right_table, 'db') and right_table.db:
-                                    table_name = f"{right_table.db}.{table_name}"
-                                table_aliases[table_name] = table_name
-        
-        return table_aliases
+        try:
+            # Check for an alias first
+            if hasattr(col_expr, 'args') and 'alias' in col_expr.args:
+                return col_expr.args.get('alias')
+            
+            # If it's a direct column reference, use its name
+            if isinstance(col_expr, Column):
+                return col_expr.name if hasattr(col_expr, 'name') else col_expr.args.get('this')
+            
+            # Try to extract from string representation
+            return str(col_expr).split('.')[-1].strip('`"[]')
+        except Exception as e:
+            logger.error(f"Error extracting column name: {str(e)}")
+            return None
     
-    def _find_column_references(self, expr, source_refs, table_aliases, source_tables, current_table=None):
+    def _find_column_references(self, node: Any, columns: List[Dict[str, str]]) -> None:
         """
-        Find column references in an expression
+        Recursively find column references in an expression
         
         Args:
-            expr: SQL expression
-            source_refs: List to populate with source references
-            table_aliases: Dictionary of {alias: table_name}
-            source_tables: Set of source table names
-            current_table: Current table context
+            node: SQLGlot AST node
+            columns: List to populate with column references
         """
-        if isinstance(expr, Column):
-            column_name = expr.name
-            table_ref = None
-            
-            # If the column has a table reference
-            if hasattr(expr, 'table'):
-                table_ref = expr.table
+        if node is None:
+            return
+        
+        # If it's a column reference, add it to the list
+        if isinstance(node, Column):
+            col_name = self._extract_column_name(node)
+            if col_name:
+                # Try to extract table name
+                table_name = None
+                if hasattr(node, 'table'):
+                    table_name = node.table
+                elif hasattr(node, 'args') and 'table' in node.args:
+                    table_name = node.args.get('table')
                 
-                # Resolve the table alias if needed
-                if table_ref in table_aliases:
-                    actual_table = table_aliases[table_ref]
-                    # Only include if it's one of our source tables
-                    if actual_table in source_tables:
-                        source_refs.append({"table": actual_table, "column": column_name})
-                # Might already be a full table name
-                elif table_ref in source_tables:
-                    source_refs.append({"table": table_ref, "column": column_name})
-            
-            # If no table reference but we have a current table context
-            elif current_table and current_table in source_tables:
-                source_refs.append({"table": current_table, "column": column_name})
+                if col_name and col_name not in [c.get('column') for c in columns]:
+                    columns.append({
+                        "table": table_name,
+                        "column": col_name
+                    })
         
-        # Set current table if we're at a table expression
-        if isinstance(expr, Table):
-            table_name = expr.name
-            if hasattr(expr, 'db') and expr.db:
-                table_name = f"{expr.db}.{table_name}"
-            current_table = table_name
-        
-        # Process child expressions
-        if hasattr(expr, 'args'):
-            for arg_name, arg_value in expr.args.items():
-                if arg_value:
-                    if isinstance(arg_value, list):
-                        for item in arg_value:
-                            self._find_column_references(item, source_refs, table_aliases, source_tables, current_table)
+        # Process all child nodes
+        if hasattr(node, 'args'):
+            if isinstance(node.args, dict):
+                for child in node.args.values():
+                    if isinstance(child, list):
+                        for item in child:
+                            self._find_column_references(item, columns)
                     else:
-                        self._find_column_references(arg_value, source_refs, table_aliases, source_tables, current_table) 
+                        self._find_column_references(child, columns)
+            elif isinstance(node.args, list):
+                for child in node.args:
+                    self._find_column_references(child, columns) 

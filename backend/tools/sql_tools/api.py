@@ -372,7 +372,86 @@ class SQLAnalysisAPI:
                 "column_name": column_name
             }
 
-    def trace_complete_lineage(self, table_name: str, direction: str = "upstream", max_depth: int = 10) -> Dict[str, Any]:
+    def detect_dialect_from_repo_url(self, repo_url: str) -> str:
+        """
+        Detect the appropriate SQL dialect based on repository URL patterns
+        
+        Args:
+            repo_url: GitHub repository URL
+            
+        Returns:
+            Detected dialect name (postgresql, snowflake, dbt, etc.)
+        """
+        if not repo_url:
+            return "postgresql"  # Default dialect
+            
+        repo_url = repo_url.lower()
+        
+        # Check for DBT repositories
+        if any(pattern in repo_url for pattern in ['/dbt-', '/dbt_', '/dbt/', 'dbt-labs', 'jaffle_shop']):
+            logger.info(f"Detected DBT repository from URL: {repo_url}")
+            return "dbt"
+        
+        # Check for Snowflake repositories
+        if any(pattern in repo_url for pattern in ['/snowflake-', '/snowflake_', '/snowflake/']):
+            logger.info(f"Detected Snowflake repository from URL: {repo_url}")
+            return "snowflake"
+        
+        # Check for PostgreSQL repositories
+        if any(pattern in repo_url for pattern in ['/postgres-', '/postgres_', '/postgresql']):
+            logger.info(f"Detected PostgreSQL repository from URL: {repo_url}")
+            return "postgresql"
+        
+        # Check for MySQL repositories
+        if any(pattern in repo_url for pattern in ['/mysql-', '/mysql_', '/mysql']):
+            logger.info(f"Detected MySQL repository from URL: {repo_url}")
+            return "mysql"
+        
+        # Check for SQL Server repositories
+        if any(pattern in repo_url for pattern in ['/sqlserver', '/tsql', '/mssql']):
+            logger.info(f"Detected SQL Server repository from URL: {repo_url}")
+            return "tsql"
+            
+        # Default to PostgreSQL
+        logger.info(f"No specific dialect detected from URL: {repo_url}, defaulting to PostgreSQL")
+        return "postgresql"
+    
+    def detect_dialect_from_file_path(self, file_path: str) -> str:
+        """
+        Detect the appropriate SQL dialect based on file path patterns
+        
+        Args:
+            file_path: Path to the SQL file
+            
+        Returns:
+            Detected dialect name (postgresql, snowflake, dbt, etc.)
+        """
+        file_path = file_path.lower()
+        
+        # Check for DBT models
+        if '/dbt/' in file_path or '/models/' in file_path or file_path.endswith('.sql') and ('/transform/' in file_path or '/transformations/' in file_path):
+            return "dbt"
+        
+        # Check for Snowflake scripts
+        if any(pattern in file_path for pattern in ['/snowflake/', '.snowflake.sql', 'snowflake_']):
+            return "snowflake"
+        
+        # Check for PostgreSQL scripts
+        if any(pattern in file_path for pattern in ['/postgres/', '.pg.sql', 'postgresql', '.pgsql']):
+            return "postgresql"
+        
+        # Check for MySQL scripts
+        if any(pattern in file_path for pattern in ['/mysql/', '.mysql.sql', 'mysql_']):
+            return "mysql"
+        
+        # Check for SQL Server/TSQL scripts
+        if any(pattern in file_path for pattern in ['/sqlserver/', '.tsql', '.mssql', 'sql-server']):
+            return "tsql"
+        
+        # Default to PostgreSQL as the most common dialect
+        return "postgresql"
+    
+    def trace_complete_lineage(self, table_name: str, direction: str = "upstream", max_depth: int = 10, dialect: Optional[str] = None) -> Dict[str, Any]:
         """
         Trace complete lineage for a table recursively through all levels of dependencies
         
@@ -380,12 +459,13 @@ class SQLAnalysisAPI:
             table_name: The table to trace lineage for
             direction: "upstream" (sources of this table) or "downstream" (tables that use this table)
             max_depth: Maximum depth to trace dependencies
+            dialect: Optional dialect to use for parsing (if None, will auto-detect)
             
         Returns:
             Dictionary with complete lineage information
         """
         try:
-            logger.info(f"Tracing {direction} lineage for table {table_name} (max depth: {max_depth})")
+            logger.info(f"Tracing {direction} lineage for table {table_name} (max depth: {max_depth}, dialect: {dialect or 'auto-detect'})")
             
             # Track visited tables to avoid cycles
             visited_tables = set()
@@ -419,12 +499,16 @@ class SQLAnalysisAPI:
                     file_path = file_info.get("path", "")
                     file_url = file_info.get("url", "")
                     file_content = file_info.get("content", "")
-                    dialect = file_info.get("dialect") or self.detect_dialect(file_content, file_path)
+                    
+                    # Use specified dialect or detect based on file path
+                    file_dialect = dialect
+                    if not file_dialect:
+                        file_dialect = file_info.get("dialect") or self.detect_dialect_from_file_path(file_path)
                     
                     # Extract dependencies and lineage
                     if direction == "upstream":
                         # For upstream, we want to find sources referenced in this file
-                        analysis = self.extract_dependencies(file_content, dialect, file_path)
+                        analysis = self.extract_dependencies(file_content, file_dialect, file_path)
                         
                         # Check if this file defines the current table (target table matches)
                         target_matches = analysis.get("target_table") == current_table
@@ -439,7 +523,7 @@ class SQLAnalysisAPI:
                             lineage_graph["files"][file_id] = {
                                 "path": file_path,
                                 "url": file_url,
-                                "dialect": dialect,
+                                "dialect": file_dialect,
                                 "defines_table": current_table
                             }
                             
@@ -484,7 +568,7 @@ class SQLAnalysisAPI:
                     
                     elif direction == "downstream":
                         # For downstream, we want to find tables that use the current table
-                        analysis = self.extract_dependencies(file_content, dialect, file_path)
+                        analysis = self.extract_dependencies(file_content, file_dialect, file_path)
                         
                         # Check if this file references the current table (as a source)
                         source_tables = analysis.get("source_tables", [])
@@ -500,7 +584,7 @@ class SQLAnalysisAPI:
                             lineage_graph["files"][file_id] = {
                                 "path": file_path,
                                 "url": file_url,
-                                "dialect": dialect,
+                                "dialect": file_dialect,
                                 "uses_table": current_table
                             }
                             
@@ -554,10 +638,14 @@ class SQLAnalysisAPI:
                 for file_info in sql_files:
                     file_path = file_info.get("path", "")
                     file_content = file_info.get("content", "")
-                    dialect = file_info.get("dialect") or self.detect_dialect(file_content, file_path)
+                    
+                    # Use specified dialect or detect based on file path
+                    file_dialect = dialect
+                    if not file_dialect:
+                        file_dialect = file_info.get("dialect") or self.detect_dialect_from_file_path(file_path)
                     
                     # Extract lineage
-                    lineage_info = self.extract_lineage(file_content, dialect, file_path)
+                    lineage_info = self.extract_lineage(file_content, file_dialect, file_path)
                     
                     # Get column mappings
                     if lineage_info.get("target_table") == node_id:
@@ -579,7 +667,8 @@ class SQLAnalysisAPI:
                 "lineage_graph": lineage_graph,
                 "column_lineage": column_lineage,
                 "total_files": len(lineage_graph["files"]),
-                "total_tables": len(lineage_graph["nodes"])
+                "total_tables": len(lineage_graph["nodes"]),
+                "dialect_used": dialect or "auto-detect"
             }
             
             # Add a summary for easy processing
@@ -612,7 +701,8 @@ class SQLAnalysisAPI:
             
             # Create a text summary
             summary = f"Traced {direction} dependencies for table {table_name} to a depth of {result['depth_reached']}.\n"
-            summary += f"Found {result['total_tables']} related tables across {result['total_files']} files.\n\n"
+            summary += f"Found {result['total_tables']} related tables across {result['total_files']} files.\n"
+            summary += f"Using dialect: {dialect or 'auto-detect (PostgreSQL)'}\n\n"
             
             if table_chain:
                 if direction == "upstream":
@@ -633,11 +723,13 @@ class SQLAnalysisAPI:
             return {
                 "error": f"Error tracing lineage: {str(e)}",
                 "table": table_name,
-                "direction": direction
+                "direction": direction,
+                "dialect_used": dialect or "auto-detect"
             }
 
     def trace_column_complete_lineage(self, table_name: str, column_name: str, 
-                                     direction: str = "upstream", max_depth: int = 10) -> Dict[str, Any]:
+                                     direction: str = "upstream", max_depth: int = 10,
+                                     dialect: Optional[str] = None) -> Dict[str, Any]:
         """
         Trace complete lineage for a specific column recursively through all dependencies
         
@@ -646,12 +738,13 @@ class SQLAnalysisAPI:
             column_name: Column name
             direction: "upstream" (sources of this column) or "downstream" (columns that use this column)
             max_depth: Maximum depth to trace dependencies
+            dialect: Optional dialect to use for parsing (if None, will auto-detect)
             
         Returns:
             Dictionary with complete column lineage information
         """
         try:
-            logger.info(f"Tracing {direction} lineage for column {table_name}.{column_name} (max depth: {max_depth})")
+            logger.info(f"Tracing {direction} lineage for column {table_name}.{column_name} (max depth: {max_depth}, dialect: {dialect or 'auto-detect'})")
             
             # Track visited columns to avoid cycles
             visited_columns = set()
@@ -692,10 +785,14 @@ class SQLAnalysisAPI:
                     file_path = file_info.get("path", "")
                     file_url = file_info.get("url", "")
                     file_content = file_info.get("content", "")
-                    dialect = file_info.get("dialect") or self.detect_dialect(file_content, file_path)
+                    
+                    # Use specified dialect or detect based on file path
+                    file_dialect = dialect
+                    if not file_dialect:
+                        file_dialect = file_info.get("dialect") or self.detect_dialect_from_file_path(file_path)
                     
                     # Extract lineage information
-                    lineage_info = self.extract_lineage(file_content, dialect, file_path)
+                    lineage_info = self.extract_lineage(file_content, file_dialect, file_path)
                     
                     if direction == "upstream":
                         # For upstream, we want to find sources of this column
@@ -715,7 +812,7 @@ class SQLAnalysisAPI:
                                 lineage_graph["files"][file_id] = {
                                     "path": file_path,
                                     "url": file_url,
-                                    "dialect": dialect,
+                                    "dialect": file_dialect,
                                     "defines_column": current_id
                                 }
                                 
@@ -789,7 +886,7 @@ class SQLAnalysisAPI:
                                         lineage_graph["files"][file_id] = {
                                             "path": file_path,
                                             "url": file_url,
-                                            "dialect": dialect,
+                                            "dialect": file_dialect,
                                             "uses_column": current_id
                                         }
                                         
@@ -844,7 +941,8 @@ class SQLAnalysisAPI:
                 "dependencies_by_level": dependencies_by_level,
                 "lineage_graph": lineage_graph,
                 "total_files": len(lineage_graph["files"]),
-                "total_columns": len(lineage_graph["nodes"])
+                "total_columns": len(lineage_graph["nodes"]),
+                "dialect_used": dialect or "auto-detect"
             }
             
             # Add a summary for easy processing
@@ -889,7 +987,8 @@ class SQLAnalysisAPI:
             
             # Create a text summary
             summary = f"Traced {direction} dependencies for column {table_name}.{column_name} to a depth of {result['depth_reached']}.\n"
-            summary += f"Found {result['total_columns']} related columns across {result['total_files']} files.\n\n"
+            summary += f"Found {result['total_columns']} related columns across {result['total_files']} files.\n"
+            summary += f"Using dialect: {dialect or 'auto-detect (PostgreSQL)'}\n\n"
             
             if column_chain:
                 if direction == "upstream":
@@ -911,7 +1010,8 @@ class SQLAnalysisAPI:
                 "error": f"Error tracing column lineage: {str(e)}",
                 "table": table_name,
                 "column": column_name,
-                "direction": direction
+                "direction": direction,
+                "dialect_used": dialect or "auto-detect"
             }
 
 # Singleton instance for easy access
