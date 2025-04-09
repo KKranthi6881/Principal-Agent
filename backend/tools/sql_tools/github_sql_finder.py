@@ -168,25 +168,84 @@ class GitHubSQLFinder:
         Returns:
             List of SQL files with metadata
         """
-        # Build query for table and column
-        query = f"extension:sql {table_name} {column_name}"
+        # Generate different ways the column might be referenced in SQL
+        column_patterns = []
         
-        # Additional patterns for DBT and common SQL patterns
-        specific_patterns = [
-            f"{table_name}.{column_name}",
-            f'"{table_name}"."{column_name}"',
-            f"'{table_name}'.'{column_name}'",
-            f"select {column_name}",
-            f"SELECT {column_name}",
-            f"as {column_name}",
-            f"AS {column_name}"
-        ]
+        # If table name is provided, add table-qualified patterns
+        if table_name:
+            column_patterns.extend([
+                f"{table_name}.{column_name}",  # direct reference
+                f'"{table_name}"."{column_name}"',  # quoted reference (double quotes)
+                f"'{table_name}'.'{column_name}'",  # quoted reference (single quotes)
+                f"{table_name}.{column_name} as",  # column alias pattern
+                f"from {table_name}",  # from clause containing the table
+            ])
         
-        # Add specific patterns to query
-        for pattern in specific_patterns:
-            query += f" OR {pattern}"
+        # Add common patterns for column references
+        column_patterns.extend([
+            f"select {column_name}",  # direct in select list
+            f"SELECT {column_name}",  # uppercase variant
+            f"as {column_name}",  # column alias
+            f"AS {column_name}",  # uppercase alias
+            f", {column_name}",  # column in list
+            f"{column_name} =",  # column in where/join clause
+            f"{column_name},",  # column in select list
+            f"{column_name} as",  # column with alias
+            f"{column_name} from"  # column before from clause
+        ])
         
-        return self.search_sql_files(query, limit)
+        # Additional patterns for SQL frameworks like DBT
+        column_patterns.extend([
+            f"field('{column_name}'",  # dbt field reference
+            f"\"column\": \"{column_name}\"",  # JSON column reference
+            f"column: {column_name}",  # YAML column reference
+            f"`{column_name}`",  # backtick quoting (MySQL, BigQuery)
+            f"[{column_name}]"  # bracket quoting (SQL Server)
+        ])
+        
+        # Convert patterns to query with OR
+        query = " OR ".join([f'"{pattern}"' for pattern in column_patterns])
+        
+        # Add simple column name search at the end
+        query = f"extension:sql ({query} OR {column_name})"
+        
+        # Run the search
+        results = self.search_sql_files(query, limit)
+        
+        # Post-process to improve relevance
+        if results:
+            # Prioritize results that have the column name in a more specific context
+            for result in results:
+                # Check content for relevant patterns
+                content = result.get("content", "").lower()
+                if content:
+                    # Calculate relevance score based on pattern matches
+                    score = 0
+                    
+                    # Higher score for table-qualified references
+                    if table_name and f"{table_name.lower()}.{column_name.lower()}" in content:
+                        score += 5
+                    
+                    # Medium score for column in select list or join/where conditions
+                    if any(pattern.lower() in content for pattern in [
+                        f"select {column_name.lower()}",
+                        f", {column_name.lower()},",
+                        f"{column_name.lower()} as",
+                        f"{column_name.lower()} =",
+                        f"{column_name.lower()} from"
+                    ]):
+                        score += 3
+                    
+                    # Base score for any mention
+                    score += 1
+                    
+                    # Store score in result
+                    result["relevance_score"] = score
+            
+            # Sort by relevance score
+            results.sort(key=lambda x: x.get("relevance_score", 0), reverse=True)
+        
+        return results
     
     def _detect_dialect(self, file_path: str, content: str) -> str:
         """

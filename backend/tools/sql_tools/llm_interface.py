@@ -269,6 +269,128 @@ class SQLLLMInterface:
         except Exception as e:
             logger.error(f"Error in detect_dialect: {str(e)}")
             return {"error": str(e)}
+    
+    def search_columns(self, column_name: str, limit: int = 5) -> Dict[str, Any]:
+        """
+        Search for columns across all tables in the codebase
+        
+        Args:
+            column_name: Name of the column to search for
+            limit: Maximum number of results
+            
+        Returns:
+            Simplified search results
+        """
+        try:
+            # Use column search with empty table name for global search
+            results = self.sql_api.search_for_column("", column_name, limit)
+            
+            # Create simplified result for LLM consumption
+            llm_result = {
+                "column": column_name,
+                "files_found": len(results),
+                "results": []
+            }
+            
+            # Extract likely tables containing this column
+            tables_containing_column = set()
+            
+            for result in results:
+                file_info = {
+                    "file_path": result.get("file_path", ""),
+                    "dialect": result.get("dialect", "unknown"),
+                    "repo": result.get("github_repo", "")
+                }
+                
+                # Only include URL if available
+                if "url" in result and result["url"]:
+                    file_info["url"] = result["url"]
+                
+                # Add a summary of the content (first 200 chars)
+                content = result.get("content", "")
+                if content:
+                    file_info["content_summary"] = content[:200] + "..." if len(content) > 200 else content
+                    
+                    # Try to extract table name from the content
+                    table_name = self._extract_table_for_column(content, column_name, result.get("file_path", ""))
+                    if table_name:
+                        file_info["likely_table"] = table_name
+                        tables_containing_column.add(table_name)
+                
+                llm_result["results"].append(file_info)
+            
+            # Add list of likely tables
+            llm_result["likely_tables"] = list(tables_containing_column)
+            
+            return llm_result
+            
+        except Exception as e:
+            logger.error(f"Error in search_columns: {str(e)}")
+            return {"error": str(e)}
+    
+    def _extract_table_for_column(self, content: str, column_name: str, file_path: str = "") -> Optional[str]:
+        """
+        Extract the likely table name for a column from SQL content
+        
+        Args:
+            content: SQL content
+            column_name: Column name to find
+            file_path: File path (optional, used for context)
+            
+        Returns:
+            Likely table name or None
+        """
+        # First try to find the table name from the file path (DBT convention)
+        if file_path:
+            # Extract file name without extension
+            file_name = file_path.split('/')[-1]
+            if file_name.endswith('.sql'):
+                file_name = file_name[:-4]
+                
+            # Check for DBT model naming conventions
+            if any(prefix in file_name for prefix in ['stg_', 'fct_', 'dim_', 'int_']):
+                return file_name
+        
+        # Try to extract from SQL content
+        # Lowercase for consistent matching
+        content_lower = content.lower()
+        column_lower = column_name.lower()
+        
+        # Look for explicit table.column references
+        table_column_pattern = rf'([a-zA-Z0-9_]+)\.{column_lower}'
+        import re
+        matches = re.findall(table_column_pattern, content_lower)
+        if matches:
+            return matches[0]
+        
+        # Look for table in CREATE TABLE statements
+        create_patterns = [
+            'create table ',
+            'create or replace table ',
+            'create view '
+        ]
+        
+        for pattern in create_patterns:
+            if pattern in content_lower:
+                idx = content_lower.find(pattern) + len(pattern)
+                end_idx = content_lower.find('(', idx)
+                if end_idx == -1:
+                    end_idx = content_lower.find('\n', idx)
+                if end_idx == -1:
+                    end_idx = len(content_lower)
+                
+                table_name = content_lower[idx:end_idx].strip()
+                # Remove schema prefixes if present
+                if '.' in table_name:
+                    table_name = table_name.split('.')[-1]
+                
+                return table_name
+        
+        # Fallback: Use file name as table name
+        if file_path:
+            return file_path.split('/')[-1].split('.')[0]
+                
+        return None
 
 # Create a singleton instance
 llm_interface = SQLLLMInterface() 

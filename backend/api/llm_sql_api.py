@@ -56,6 +56,11 @@ class DetectDialectRequest(BaseModel):
     """Request model for dialect detection"""
     repo_url: str = Field(..., description="Repository URL")
 
+class SearchColumnRequest(BaseModel):
+    """Request model for column search"""
+    column_name: str = Field(..., description="Column name to search for")
+    limit: int = Field(5, description="Maximum number of results")
+
 # API routes
 @router.post("/table_lineage")
 async def trace_table_lineage(request: TableLineageRequest):
@@ -145,6 +150,23 @@ async def detect_dialect(request: DetectDialectRequest):
     except Exception as e:
         logger.error(f"Error detecting dialect: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error detecting dialect: {str(e)}")
+
+@router.post("/search_column")
+async def search_column(request: SearchColumnRequest):
+    """
+    Search for column references across all tables
+    
+    This endpoint provides a simplified response format optimized for LLMs.
+    """
+    try:
+        result = llm_interface.search_columns(
+            column_name=request.column_name,
+            limit=request.limit
+        )
+        return result
+    except Exception as e:
+        logger.error(f"Error searching for column: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error searching for column: {str(e)}")
 
 # Add this router to the main app in backend/app.py
 # app.include_router(llm_sql_api.router) 
