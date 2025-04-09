@@ -20,6 +20,7 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
 from utils import github_utils
+from utils import repo_manager
 from api.github_connectors_api import get_db_connection
 
 # Set up logging
@@ -181,6 +182,11 @@ async def sync_repository_task(
     try:
         # Get vector store
         vector_store = get_github_vector_store()
+        if not vector_store:
+            error_msg = "Failed to initialize vector store"
+            logger.error(error_msg)
+            github_utils.record_sync_completion(sync_id, '', 0, 'failed', error_msg)
+            return
         
         # Get last sync for incremental update
         previous_commit = None
@@ -188,94 +194,164 @@ async def sync_repository_task(
             last_sync = github_utils.get_last_sync(connector_id, repo_url, embedding_provider)
             if last_sync:
                 previous_commit = last_sync['commit_hash']
+                logger.info(f"Found previous sync with commit hash: {previous_commit[:8]} for {repo_url}")
         
-        # Process repository
-        success, commit_hash, file_paths, _, error = github_utils.process_repository(
-            repo_url, branch, previous_commit)
+        # Get or clone the repository using repo manager (persistent storage)
+        if repo_manager.has_local_repo(repo_url, branch):
+            # Repository exists, update it
+            logger.info(f"Repository {repo_url} exists locally. Updating...")
+            repo_path = repo_manager.get_repo_storage_path(repo_url, branch)
+            success, error = repo_manager.update_repository(repo_path, branch)
+            
+            if not success:
+                logger.error(f"Failed to update repository: {error}")
+                # Try cloning again if update fails
+                success, repo_path, error = repo_manager.clone_repository(repo_url, branch)
+                if not success:
+                    github_utils.record_sync_completion(sync_id, '', 0, 'failed', error)
+                    return
+        else:
+            # Repository doesn't exist, clone it
+            logger.info(f"Repository {repo_url} doesn't exist locally. Cloning...")
+            success, repo_path, error = repo_manager.clone_repository(repo_url, branch)
+            if not success:
+                github_utils.record_sync_completion(sync_id, '', 0, 'failed', error)
+                return
         
-        if not success:
-            github_utils.record_sync_completion(
-                sync_id, '', 0, 'failed', error)
+        logger.info(f"Using repository at path: {repo_path}")
+        
+        # Get current commit hash
+        current_commit = repo_manager.get_current_commit_hash(repo_path)
+        if not current_commit:
+            error_msg = "Failed to get current commit hash"
+            logger.error(error_msg)
+            github_utils.record_sync_completion(sync_id, '', 0, 'failed', error_msg)
             return
         
-        # If no files to process, record completion and return
-        if not file_paths:
+        logger.info(f"Current commit hash: {current_commit[:8]}")
+        
+        # Check if already synced to this commit
+        if previous_commit and previous_commit == current_commit and not force_full_sync:
+            logger.info(f"Repository already synced to commit {current_commit[:8]}. No changes detected.")
             github_utils.record_sync_completion(
-                sync_id, commit_hash, 0, 'completed', 'No files to process')
+                sync_id, current_commit, 0, 'completed', 'No changes detected since last sync')
             return
         
-        # Clone the repository again to access file contents
-        # This is needed because the previous process_repository call cleans up the temp dir
-        success, temp_dir, error = github_utils.clone_repository(repo_url, branch)
-        if not success:
-            github_utils.record_sync_completion(
-                sync_id, '', 0, 'failed', error)
-            return
+        # Determine files to process
+        files_to_process = []
+        deleted_files = []
         
-        try:
-            # Extract repository metadata
-            repo_name = github_utils.get_repo_name_from_url(repo_url)
-            repo_owner = repo_url.split('/')[-2] if '/' in repo_url else 'unknown'
+        if previous_commit and not force_full_sync:
+            # Incremental sync - only process changed files
+            success, changed_files, error = repo_manager.get_changed_files(repo_path, previous_commit)
             
-            # Process files in batches to avoid memory issues
-            batch_size = 50
-            processed_count = 0
-            
-            for i in range(0, len(file_paths), batch_size):
-                batch_files = file_paths[i:i+batch_size]
+            if success:
+                # Filter changed files to include only code files
+                files_to_process = github_utils.filter_code_files(changed_files)
+                logger.info(f"Incremental sync: Found {len(files_to_process)} changed code files to process")
                 
-                ids = []
-                contents = []
-                metadatas = []
-                
-                for file_path in batch_files:
-                    abs_path = os.path.join(temp_dir, file_path)
-                    success, content, error = github_utils.read_file_content(abs_path)
-                    
-                    if success and content:
-                        # Generate file metadata
-                        content_hash = github_utils.get_file_hash(content)
-                        file_id = github_utils.generate_file_id(repo_url, file_path, content_hash)
-                        
-                        # Get file extension for language detection
-                        _, ext = os.path.splitext(file_path)
-                        if ext:
-                            ext = ext[1:]  # Remove the dot
-                        
-                        # Create metadata
-                        metadata = {
-                            "repo_url": repo_url,
-                            "repo_name": repo_name,
-                            "repo_owner": repo_owner,
-                            "file_path": file_path,
-                            "file_name": os.path.basename(file_path),
-                            "file_extension": ext,
-                            "content_hash": content_hash,
-                            "commit_hash": commit_hash,
-                            "connector_id": connector_id,
-                            "sync_id": sync_id
-                        }
-                        
-                        ids.append(file_id)
-                        contents.append(content)
-                        metadatas.append(metadata)
-                
-                if ids:
-                    # Add batch to vector store
-                    add_code_files_batch(ids, contents, metadatas, embedding_provider)
-                    processed_count += len(ids)
-            
-            # Record completion
-            github_utils.record_sync_completion(
-                sync_id, commit_hash, processed_count, 'completed')
-                
-        finally:
-            # Clean up
+                # Get deleted files to remove from vector store
+                success, deleted_files, error = repo_manager.get_deleted_files(repo_path, previous_commit)
+                if success:
+                    deleted_files = github_utils.filter_code_files(deleted_files)
+                    logger.info(f"Incremental sync: Found {len(deleted_files)} deleted code files to remove")
+            else:
+                # Fallback to full sync if getting changed files fails
+                logger.warning(f"Failed to get changed files: {error}. Falling back to full sync.")
+                files_to_process = github_utils.get_all_code_files(repo_path)
+                logger.info(f"Full sync fallback: Processing {len(files_to_process)} code files")
+        else:
+            # First sync or forced full sync - process all files
+            files_to_process = github_utils.get_all_code_files(repo_path)
+            logger.info(f"Full sync: Processing {len(files_to_process)} code files")
+        
+        # Process deleted files first (remove them from vector store)
+        for file_path in deleted_files:
             try:
-                shutil.rmtree(temp_dir, ignore_errors=True)
+                vector_store.delete_by_file_path(repo_url, file_path)
+                logger.info(f"Removed deleted file from vector store: {file_path}")
             except Exception as e:
-                logger.error(f"Error cleaning up temporary directory: {str(e)}")
+                logger.error(f"Error removing deleted file {file_path} from vector store: {str(e)}")
+        
+        # Now process files to add/update
+        if not files_to_process:
+            logger.info("No files to process")
+            github_utils.record_sync_completion(
+                sync_id, current_commit, 0, 'completed', 'No files to process')
+            return
+        
+        # Extract repository metadata
+        repo_name = github_utils.get_repo_name_from_url(repo_url)
+        repo_owner = repo_url.split('/')[-2] if '/' in repo_url else 'unknown'
+        
+        # Process files in batches to avoid memory issues
+        batch_size = 50
+        processed_count = 0
+        
+        for i in range(0, len(files_to_process), batch_size):
+            if i > 0:
+                logger.info(f"Processing batch {i//batch_size + 1}/{(len(files_to_process) + batch_size - 1)//batch_size}")
                 
+            batch_files = files_to_process[i:i+batch_size]
+            
+            ids = []
+            contents = []
+            metadatas = []
+            
+            for file_path in batch_files:
+                abs_path = os.path.join(repo_path, file_path)
+                success, content, error = github_utils.read_file_content(abs_path)
+                
+                if success and content:
+                    # Generate file metadata
+                    content_hash = github_utils.get_file_hash(content)
+                    file_id = github_utils.generate_file_id(repo_url, file_path, content_hash)
+                    
+                    # Get file extension for language detection
+                    _, ext = os.path.splitext(file_path)
+                    if ext:
+                        ext = ext[1:]  # Remove the dot
+                    
+                    # Create metadata with enhanced information about file path
+                    metadata = {
+                        "repo_url": repo_url,
+                        "repo_name": repo_name,
+                        "repo_owner": repo_owner,
+                        "file_path": file_path,
+                        "file_name": os.path.basename(file_path),
+                        "file_extension": ext,
+                        "content_hash": content_hash,
+                        "commit_hash": current_commit,
+                        "connector_id": connector_id,
+                        "sync_id": sync_id,
+                        # Add directory information for better filtering
+                        "directory": os.path.dirname(file_path) or "root",
+                        # Add embedding provider info to metadata for filtering
+                        "embedding_provider": embedding_provider
+                    }
+                    
+                    ids.append(file_id)
+                    contents.append(content)
+                    metadatas.append(metadata)
+            
+            if ids:
+                # Add batch to vector store
+                success = add_code_files_batch(ids, contents, metadatas, embedding_provider)
+                if success:
+                    processed_count += len(ids)
+                    logger.info(f"Added {len(ids)} documents to vector store (total: {processed_count})")
+                else:
+                    logger.error(f"Failed to add documents to vector store")
+        
+        # Record completion
+        github_utils.record_sync_completion(
+            sync_id, current_commit, processed_count, 'completed')
+        
+        # Run cleanup operation for old repositories
+        try:
+            repo_manager.clean_old_repositories()
+        except Exception as e:
+            logger.warning(f"Error during repository cleanup: {str(e)}")
     except Exception as e:
         error_msg = f"Error syncing repository: {str(e)}"
         logger.error(error_msg)
@@ -729,4 +805,92 @@ async def get_embedding_providers():
                 "description": "Local Ollama embedding model"
             }
         ]
-    } 
+    }
+
+@router.get("/repo_storage", response_model=dict)
+async def get_repo_storage_status():
+    """
+    Get statistics about the repository storage
+    """
+    try:
+        # Check if the storage directory exists
+        if not os.path.exists(repo_manager.REPO_STORAGE_BASE):
+            return {
+                "status": "not_found",
+                "message": f"Repository storage directory does not exist: {repo_manager.REPO_STORAGE_BASE}",
+                "repos": [],
+                "total_size": 0,
+                "total_count": 0
+            }
+        
+        # Get all repository directories
+        repo_stats = []
+        total_size = 0
+        
+        for dirname in os.listdir(repo_manager.REPO_STORAGE_BASE):
+            repo_path = os.path.join(repo_manager.REPO_STORAGE_BASE, dirname)
+            if os.path.isdir(repo_path) and os.path.exists(os.path.join(repo_path, '.git')):
+                # Get repository size
+                size = repo_manager.get_repository_size(repo_path)
+                size_mb = size / (1024 * 1024)
+                total_size += size
+                
+                # Try to get the remote URL
+                try:
+                    result = subprocess.run(['git', '-C', repo_path, 'config', '--get', 'remote.origin.url'], 
+                                          capture_output=True, text=True)
+                    url = result.stdout.strip() if result.returncode == 0 else "Unknown"
+                except Exception:
+                    url = "Unknown"
+                
+                # Try to get the current branch
+                try:
+                    result = subprocess.run(['git', '-C', repo_path, 'rev-parse', '--abbrev-ref', 'HEAD'], 
+                                          capture_output=True, text=True)
+                    branch = result.stdout.strip() if result.returncode == 0 else "Unknown"
+                except Exception:
+                    branch = "Unknown"
+                
+                # Try to get the last commit timestamp
+                try:
+                    result = subprocess.run(['git', '-C', repo_path, 'log', '-1', '--format=%at'], 
+                                          capture_output=True, text=True)
+                    if result.returncode == 0:
+                        timestamp = int(result.stdout.strip())
+                        last_commit = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(timestamp))
+                    else:
+                        last_commit = "Unknown"
+                except Exception:
+                    last_commit = "Unknown"
+                
+                repo_stats.append({
+                    "name": dirname,
+                    "url": url,
+                    "branch": branch,
+                    "size_mb": round(size_mb, 2),
+                    "last_commit": last_commit,
+                    "last_accessed": time.strftime('%Y-%m-%d %H:%M:%S', 
+                                               time.localtime(os.path.getatime(repo_path)))
+                })
+        
+        # Sort by size (largest first)
+        repo_stats.sort(key=lambda r: r["size_mb"], reverse=True)
+        
+        return {
+            "status": "ok",
+            "message": f"Found {len(repo_stats)} repositories",
+            "storage_path": repo_manager.REPO_STORAGE_BASE,
+            "repos": repo_stats,
+            "total_size_mb": round(total_size / (1024 * 1024), 2),
+            "total_size_gb": round(total_size / (1024 * 1024 * 1024), 2),
+            "total_count": len(repo_stats)
+        }
+    except Exception as e:
+        logger.error(f"Error getting repository storage status: {str(e)}")
+        return {
+            "status": "error",
+            "message": f"Error getting repository storage status: {str(e)}",
+            "repos": [],
+            "total_size": 0,
+            "total_count": 0
+        } 

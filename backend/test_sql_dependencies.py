@@ -189,14 +189,14 @@ def setup_chromadb():
         collection = None
         try:
             # Try to get existing collection
-            collection = chroma_client.get_collection("github_sql")
+            collection = chroma_client.get_collection("github_code")
             logger.info(f"Using existing collection with {collection.count()} documents")
         except Exception as e:
             logger.info(f"Collection not found: {e}, creating new one")
             # Create new collection with default embedding function
             embedding_func = embedding_functions.DefaultEmbeddingFunction()
             collection = chroma_client.create_collection(
-                name="github_sql",
+                name="github_code",
                 embedding_function=embedding_func
             )
             logger.info("Created new collection")

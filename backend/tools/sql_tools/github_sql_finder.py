@@ -72,17 +72,17 @@ class GitHubSQLFinder:
             # Get or create the collection
             try:
                 # First try to get the existing collection
-                logger.info("Attempting to get existing collection 'github_sql'")
-                self.collection = self.chroma_client.get_collection("github_sql")
+                logger.info("Attempting to get existing collection 'github_code'")
+                self.collection = self.chroma_client.get_collection("github_code")
                 logger.info(f"Found existing ChromaDB collection with {self.collection.count()} documents")
             except Exception as e:
                 # If not found, create a new collection
-                logger.info(f"Collection 'github_sql' not found, creating it now...")
+                logger.info(f"Collection 'github_code' not found, creating it now...")
                 try:
                     from chromadb.utils import embedding_functions
                     embedding_func = embedding_functions.DefaultEmbeddingFunction()
                     self.collection = self.chroma_client.create_collection(
-                        name="github_sql",
+                        name="github_code",
                         embedding_function=embedding_func
                     )
                     #logger.info("Created new collection, populating with sample data...")

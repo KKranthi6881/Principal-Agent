@@ -91,69 +91,238 @@ def get_github_vector_store():
                 embedding_function=embedding_func
             )
             logger.info("Created new GitHub vector store collection")
-            
-        # Check if the collection has data, add demo data if empty
-        if collection.count() == 0:
-            logger.warning("Collection is empty, it may have been deleted. Adding demo data...")
-            _populate_demo_github_data(collection)
-            
-        return collection
+        
+        # Wrap the collection with our enhanced functionality
+        return EnhancedGitHubVectorStore(collection)
     except Exception as e:
         logger.error(f"Error getting GitHub vector store: {e}")
         logger.error(traceback.format_exc())
         return None
 
-def _populate_demo_github_data(collection):
-    """Add demo GitHub data to the collection"""
-    try:
-        # Sample GitHub files to add
-        sample_files = [
-            {
-                "id": "gh_1",
-                "content": "def calculate_discount(price, quantity, discount_percent):\n    return price * quantity * (discount_percent / 100)",
-                "metadata": {
-                    "repo": "demo-repository",
-                    "path": "utils/pricing.py",
-                    "language": "python",
-                    "url": "https://github.com/demo/repo/blob/main/utils/pricing.py"
+
+class EnhancedGitHubVectorStore:
+    """
+    Enhanced wrapper for ChromaDB collection that provides additional functionality
+    for GitHub code embeddings
+    """
+    
+    def __init__(self, collection):
+        """
+        Initialize with a ChromaDB collection
+        
+        Args:
+            collection: ChromaDB collection
+        """
+        self.collection = collection
+    
+    def add(self, ids, documents, metadatas):
+        """
+        Add documents to the vector store
+        
+        Args:
+            ids: List of document IDs
+            documents: List of document contents
+            metadatas: List of metadata dictionaries
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            self.collection.add(
+                ids=ids,
+                documents=documents,
+                metadatas=metadatas
+            )
+            return True
+        except Exception as e:
+            logger.error(f"Error adding documents to vector store: {e}")
+            logger.error(traceback.format_exc())
+            return False
+    
+    def delete_by_repo_url(self, repo_url, embedding_provider=None):
+        """
+        Delete all documents for a specific repository from the vector store
+        
+        Args:
+            repo_url: The repository URL
+            embedding_provider: The embedding provider used (optional filter)
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            where_clause = {"repo_url": repo_url}
+            
+            if embedding_provider:
+                # No direct way to filter by embedding provider in metadata
+                # We'll need to get the IDs first, then delete them
+                results = self.collection.get(
+                    where=where_clause
+                )
+                
+                # Filter IDs by embedding provider if we can determine it
+                # This is a limitation - we may not be able to directly filter by embedding provider
+                # unless it's stored in the metadata
+                
+                # Delete by IDs
+                if results and len(results['ids']) > 0:
+                    self.collection.delete(
+                        ids=results['ids']
+                    )
+            else:
+                # Delete all documents for this repo
+                self.collection.delete(
+                    where=where_clause
+                )
+            
+            logger.info(f"Deleted vectors for repository: {repo_url}")
+            return True
+        except Exception as e:
+            logger.error(f"Error deleting vectors for repository {repo_url}: {e}")
+            logger.error(traceback.format_exc())
+            return False
+    
+    def delete_by_file_path(self, repo_url, file_path):
+        """
+        Delete a specific file from the vector store
+        
+        Args:
+            repo_url: The repository URL
+            file_path: The file path within the repository
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            # Delete document based on repo_url and file_path
+            self.collection.delete(
+                where={
+                    "repo_url": repo_url,
+                    "file_path": file_path
                 }
-            },
-            {
-                "id": "gh_2",
-                "content": "CREATE OR REPLACE TABLE analytics.fct_order_items AS SELECT * FROM raw_data.orders",
-                "metadata": {
-                    "repo": "analytics-dbt",
-                    "path": "models/fct_order_items.sql",
-                    "language": "sql",
-                    "file_extension": ".sql",
-                    "url": "https://github.com/demo/analytics-dbt/blob/main/models/fct_order_items.sql"
+            )
+            
+            logger.info(f"Deleted vectors for file: {repo_url}/{file_path}")
+            return True
+        except Exception as e:
+            logger.error(f"Error deleting vectors for file {repo_url}/{file_path}: {e}")
+            logger.error(traceback.format_exc())
+            return False
+    
+    def query(self, query_text, repo_url=None, file_path=None, n_results=10):
+        """
+        Query the vector store for similar documents
+        
+        Args:
+            query_text: The query text
+            repo_url: Optional repository URL to filter by
+            file_path: Optional file path to filter by
+            n_results: Number of results to return
+            
+        Returns:
+            Query results
+        """
+        try:
+            where_clause = {}
+            
+            if repo_url:
+                where_clause["repo_url"] = repo_url
+            
+            if file_path:
+                where_clause["file_path"] = file_path
+            
+            results = self.collection.query(
+                query_texts=[query_text],
+                n_results=n_results,
+                where=where_clause if where_clause else None
+            )
+            
+            return results
+        except Exception as e:
+            logger.error(f"Error querying vector store: {e}")
+            logger.error(traceback.format_exc())
+            return None
+    
+    def get_stats(self, embedding_provider=None):
+        """
+        Get statistics about the vector store
+        
+        Args:
+            embedding_provider: Optional embedding provider to filter by
+            
+        Returns:
+            Dictionary of statistics
+        """
+        try:
+            # Get all documents if count is not too large
+            count = self.collection.count()
+            
+            if count > 10000:
+                # For large collections, return basic info
+                return {
+                    "github_code": {
+                        "count": count,
+                        "embedding_providers": ["unknown"],
+                        "repos": ["unknown - too many documents to analyze"]
+                    }
+                }
+            
+            # Get all documents
+            results = self.collection.get()
+            
+            # Analyze metadata
+            stats = {
+                "github_code": {
+                    "count": count,
+                    "repos": set(),
+                    "file_extensions": {},
+                    "embedding_providers": set()
                 }
             }
-        ]
+            
+            if results and results.get('metadatas'):
+                for metadata in results['metadatas']:
+                    # Extract repo info
+                    if 'repo_url' in metadata:
+                        stats["github_code"]["repos"].add(metadata['repo_url'])
+                    
+                    # Extract file extension info
+                    if 'file_extension' in metadata:
+                        ext = metadata['file_extension']
+                        if ext not in stats["github_code"]["file_extensions"]:
+                            stats["github_code"]["file_extensions"][ext] = 0
+                        stats["github_code"]["file_extensions"][ext] += 1
+            
+            # Convert sets to lists for JSON serialization
+            stats["github_code"]["repos"] = list(stats["github_code"]["repos"])
+            stats["github_code"]["embedding_providers"] = list(["unknown"]) # Can't determine from ChromaDB directly
+            
+            return stats
+        except Exception as e:
+            logger.error(f"Error getting vector store stats: {e}")
+            logger.error(traceback.format_exc())
+            return {
+                "github_code": {
+                    "count": 0,
+                    "embedding_providers": [],
+                    "repos": [],
+                    "error": str(e)
+                }
+            }
+    
+    def count(self):
+        """
+        Get the number of documents in the vector store
         
-        # Add documents
-        ids = []
-        documents = []
-        metadatas = []
-        
-        for file in sample_files:
-            ids.append(file["id"])
-            documents.append(file["content"])
-            metadatas.append(file["metadata"])
-        
-        # Add to collection
-        collection.add(
-            ids=ids,
-            documents=documents,
-            metadatas=metadatas
-        )
-        
-        logger.info(f"Added {len(ids)} demo documents to GitHub vector store")
-        return True
-    except Exception as e:
-        logger.error(f"Error populating demo GitHub data: {e}")
-        logger.error(traceback.format_exc())
-        return False
+        Returns:
+            Document count
+        """
+        try:
+            return self.collection.count()
+        except Exception as e:
+            logger.error(f"Error getting document count: {e}")
+            return 0
+
 
 def add_code_files_batch(ids, contents, metadatas, embedding_provider=None):
     """
@@ -182,14 +351,11 @@ def add_code_files_batch(ids, contents, metadatas, embedding_provider=None):
             logger.info(f"Using embedding provider: {embedding_provider}")
             
         # Add to collection
-        collection.add(
+        return collection.add(
             ids=ids,
             documents=contents,
             metadatas=metadatas
         )
-        
-        logger.info(f"Added {len(ids)} documents to GitHub vector store")
-        return True
     except Exception as e:
         logger.error(f"Error adding code files to GitHub vector store: {e}")
         logger.error(traceback.format_exc())

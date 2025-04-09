@@ -48,8 +48,8 @@ def test_table_dependencies():
     tool.initialize()
     
     # Test with fct_order_items
-    print("\nTracing dependencies for 'analytics.fct_order_items'...")
-    dependencies = tool.trace_table_dependencies("analytics.fct_order_items", depth=5)
+    print("\nTracing dependencies for 'fct_orders'...")
+    dependencies = tool.trace_table_dependencies("fct_orders", depth=5)
     
     if "error" in dependencies:
         print(f"Error: {dependencies['error']}")
@@ -77,8 +77,8 @@ def test_column_lineage():
     tool.initialize()
     
     # Test with item_discount_amount column
-    print("\nTracing lineage for 'item_discount_amount' in 'analytics.fct_order_items'...")
-    lineage = tool.get_column_lineage("analytics.fct_order_items", "item_discount_amount")
+    print("\nTracing lineage for 'item_discount_amount' in 'fct_orders'...")
+    lineage = tool.get_column_lineage("fct_orders", "item_discount_amount")
     
     if "error" in lineage:
         print(f"Error: {lineage['error']}")

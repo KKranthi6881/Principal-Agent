@@ -1,0 +1,7 @@
+# Ignore cloned repositories in storage folder
+backend/storage/repos/
+backend/storage/repos/**/*
+
+# Prevent accidental inclusion of Git repositories
+**/.git/
+**/node_modules/ 
