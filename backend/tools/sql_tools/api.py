@@ -389,31 +389,26 @@ class SQLAnalysisAPI:
         
         # Check for DBT repositories
         if any(pattern in repo_url for pattern in ['/dbt-', '/dbt_', '/dbt/', 'dbt-labs', 'jaffle_shop']):
-            logger.info(f"Detected DBT repository from URL: {repo_url}")
+            # Use minimal logging for LLM-friendly output
             return "dbt"
         
         # Check for Snowflake repositories
         if any(pattern in repo_url for pattern in ['/snowflake-', '/snowflake_', '/snowflake/']):
-            logger.info(f"Detected Snowflake repository from URL: {repo_url}")
             return "snowflake"
         
         # Check for PostgreSQL repositories
         if any(pattern in repo_url for pattern in ['/postgres-', '/postgres_', '/postgresql']):
-            logger.info(f"Detected PostgreSQL repository from URL: {repo_url}")
             return "postgresql"
         
         # Check for MySQL repositories
         if any(pattern in repo_url for pattern in ['/mysql-', '/mysql_', '/mysql']):
-            logger.info(f"Detected MySQL repository from URL: {repo_url}")
             return "mysql"
         
         # Check for SQL Server repositories
         if any(pattern in repo_url for pattern in ['/sqlserver', '/tsql', '/mssql']):
-            logger.info(f"Detected SQL Server repository from URL: {repo_url}")
             return "tsql"
             
         # Default to PostgreSQL
-        logger.info(f"No specific dialect detected from URL: {repo_url}, defaulting to PostgreSQL")
         return "postgresql"
     
     def detect_dialect_from_file_path(self, file_path: str) -> str:
@@ -451,281 +446,147 @@ class SQLAnalysisAPI:
         # Default to PostgreSQL as the most common dialect
         return "postgresql"
     
-    def trace_complete_lineage(self, table_name: str, direction: str = "upstream", max_depth: int = 10, dialect: Optional[str] = None) -> Dict[str, Any]:
+    def trace_complete_lineage(self, table_name: str, direction: str = "upstream", 
+                             max_depth: int = 10, dialect: Optional[str] = None) -> Dict[str, Any]:
         """
-        Trace complete lineage for a table recursively through all levels of dependencies
+        Trace complete lineage for a table through all levels of dependencies
         
         Args:
-            table_name: The table to trace lineage for
+            table_name: Table name
             direction: "upstream" (sources of this table) or "downstream" (tables that use this table)
-            max_depth: Maximum depth to trace dependencies
-            dialect: Optional dialect to use for parsing (if None, will auto-detect)
+            max_depth: Maximum depth to trace
+            dialect: Optional dialect to use for parsing
             
         Returns:
             Dictionary with complete lineage information
         """
+        result = {
+            "table": table_name,
+            "direction": direction,
+            "max_depth": max_depth,
+            "dialect_used": dialect or "auto",
+            "dependencies": [],
+            "dependencies_by_level": {},
+            "errors": []
+        }
+        
+        # Keep track of visited tables to avoid cycles
+        visited_tables = set()
+        
+        # Generate a summary message
         try:
-            logger.info(f"Tracing {direction} lineage for table {table_name} (max depth: {max_depth}, dialect: {dialect or 'auto-detect'})")
+            # Set up the dialect parser if provided
+            dialect_parser = None
+            if dialect:
+                dialect_parser = self.get_dialect_parser(dialect)
             
-            # Track visited tables to avoid cycles
-            visited_tables = set()
-            # Track the lineage graph
-            lineage_graph = {
-                "nodes": [],
-                "edges": [],
-                "files": {}
-            }
-            # Track dependencies by level
+            # For result
+            if dialect_parser:
+                result["dialect_used"] = dialect_parser.name
+            
+            # Find all tables that match the name
+            matching_files = self.search_for_table(table_name)
+            
+            if not matching_files:
+                result["summary"] = f"No files found for table '{table_name}'"
+                return result
+            
+            total_deps = 0
             dependencies_by_level = {}
+            level = 0
+            current_level_tables = [table_name]
             
-            # Function to recursively trace dependencies
-            def trace_recursive(current_table, current_depth=0, parent_table=None):
-                # Stop if we've reached max depth or already visited this table
-                if current_depth >= max_depth or current_table in visited_tables:
-                    return
+            # Collect dependency information
+            while current_level_tables and level < max_depth:
+                next_level_tables = []
+                level_deps = []
                 
-                # Mark this table as visited
-                visited_tables.add(current_table)
-                
-                # Add this level to dependencies_by_level if needed
-                if current_depth not in dependencies_by_level:
-                    dependencies_by_level[current_depth] = []
-                
-                # Search for SQL files that reference this table
-                query = f"table:{current_table}"
-                sql_files = self.search_for_sql_files(query, limit=20)
-                
-                for file_info in sql_files:
-                    file_path = file_info.get("path", "")
-                    file_url = file_info.get("url", "")
-                    file_content = file_info.get("content", "")
+                for table in current_level_tables:
+                    if table in visited_tables:
+                        continue
                     
-                    # Use specified dialect or detect based on file path
-                    file_dialect = dialect
-                    if not file_dialect:
-                        file_dialect = file_info.get("dialect") or self.detect_dialect_from_file_path(file_path)
+                    visited_tables.add(table)
                     
-                    # Extract dependencies and lineage
-                    if direction == "upstream":
-                        # For upstream, we want to find sources referenced in this file
-                        analysis = self.extract_dependencies(file_content, file_dialect, file_path)
-                        
-                        # Check if this file defines the current table (target table matches)
-                        target_matches = analysis.get("target_table") == current_table
-                        
-                        # Get the source tables (upstream dependencies)
-                        next_tables = analysis.get("source_tables", [])
-                        
-                        # Store dependency info
-                        if target_matches and next_tables:
-                            # Store file information
-                            file_id = f"file_{len(lineage_graph['files'])}"
-                            lineage_graph["files"][file_id] = {
-                                "path": file_path,
-                                "url": file_url,
-                                "dialect": file_dialect,
-                                "defines_table": current_table
+                    # Find files for this table
+                    table_files = self.search_for_table(table)
+                    
+                    if table_files:
+                        for file_info in table_files:
+                            table_deps = []
+                            if direction == "upstream":
+                                # For upstream, find dependencies (source tables)
+                                file_dialect = dialect_parser or self.get_dialect_parser(file_info.get("dialect", "postgresql"))
+                                if not file_dialect:
+                                    continue
+                                    
+                                deps = self._extract_dependencies(file_info, file_dialect)
+                                if deps["source_tables"]:
+                                    table_deps.extend(deps["source_tables"])
+                                    next_level_tables.extend(deps["source_tables"])
+                            else:
+                                # For downstream, find tables that depend on this table (used_by)
+                                downstream_files = self._find_downstream_tables(table)
+                                if downstream_files:
+                                    downstream_tables = [f.get("table", "") for f in downstream_files]
+                                    table_deps.extend(downstream_tables)
+                                    next_level_tables.extend(downstream_tables)
+                            
+                            # Create dependency entry
+                            dep_entry = {
+                                "table": table,
+                                "file_path": file_info.get("file_path", ""),
+                                "url": file_info.get("url", ""),
+                                "dependencies": table_deps,
+                                "level": level
                             }
                             
-                            # Add file relationship to the current level
-                            dependencies_by_level[current_depth].append({
-                                "table": current_table,
-                                "file_id": file_id,
-                                "file_path": file_path,
-                                "file_url": file_url,
-                                "dependencies": next_tables
-                            })
+                            # For downstream, add 'used_by' instead of 'dependencies'
+                            if direction == "downstream":
+                                dep_entry["used_by"] = table_deps
                             
-                            # Add to the lineage graph
-                            # Add node for current table if not already present
-                            if current_table not in [node["id"] for node in lineage_graph["nodes"]]:
-                                lineage_graph["nodes"].append({
-                                    "id": current_table, 
-                                    "label": current_table,
-                                    "depth": current_depth
-                                })
-                            
-                            # Add edges for each dependency
-                            for dep_table in next_tables:
-                                # Add node for dependency if not already present
-                                if dep_table not in [node["id"] for node in lineage_graph["nodes"]]:
-                                    lineage_graph["nodes"].append({
-                                        "id": dep_table, 
-                                        "label": dep_table,
-                                        "depth": current_depth + 1
-                                    })
-                                
-                                # Add edge
-                                lineage_graph["edges"].append({
-                                    "source": dep_table,
-                                    "target": current_table,
-                                    "file_id": file_id
-                                })
-                            
-                            # Recursively trace dependencies
-                            for dep_table in next_tables:
-                                trace_recursive(dep_table, current_depth + 1, current_table)
-                    
-                    elif direction == "downstream":
-                        # For downstream, we want to find tables that use the current table
-                        analysis = self.extract_dependencies(file_content, file_dialect, file_path)
-                        
-                        # Check if this file references the current table (as a source)
-                        source_tables = analysis.get("source_tables", [])
-                        references_current = current_table in source_tables
-                        
-                        # Get the target table (downstream dependency)
-                        target_table = analysis.get("target_table")
-                        
-                        # Store dependency info
-                        if references_current and target_table:
-                            # Store file information
-                            file_id = f"file_{len(lineage_graph['files'])}"
-                            lineage_graph["files"][file_id] = {
-                                "path": file_path,
-                                "url": file_url,
-                                "dialect": file_dialect,
-                                "uses_table": current_table
-                            }
-                            
-                            # Add file relationship to the current level
-                            dependencies_by_level[current_depth].append({
-                                "table": current_table,
-                                "file_id": file_id,
-                                "file_path": file_path,
-                                "file_url": file_url,
-                                "used_by": target_table
-                            })
-                            
-                            # Add to the lineage graph
-                            # Add node for current table if not already present
-                            if current_table not in [node["id"] for node in lineage_graph["nodes"]]:
-                                lineage_graph["nodes"].append({
-                                    "id": current_table, 
-                                    "label": current_table,
-                                    "depth": current_depth
-                                })
-                            
-                            # Add node for target if not already present
-                            if target_table not in [node["id"] for node in lineage_graph["nodes"]]:
-                                lineage_graph["nodes"].append({
-                                    "id": target_table, 
-                                    "label": target_table,
-                                    "depth": current_depth + 1
-                                })
-                            
-                            # Add edge
-                            lineage_graph["edges"].append({
-                                "source": current_table,
-                                "target": target_table,
-                                "file_id": file_id
-                            })
-                            
-                            # Recursively trace dependencies
-                            trace_recursive(target_table, current_depth + 1, current_table)
-            
-            # Start tracing recursively from the initial table
-            trace_recursive(table_name)
-            
-            # Generate column-level lineage for each table
-            column_lineage = {}
-            for node_id in [node["id"] for node in lineage_graph["nodes"]]:
-                # Search for SQL files that reference this table
-                query = f"table:{node_id}"
-                sql_files = self.search_for_sql_files(query, limit=5)  # Limit to save resources
+                            result["dependencies"].append(dep_entry)
+                            level_deps.append(dep_entry)
+                            total_deps += 1
                 
-                table_columns = []
-                for file_info in sql_files:
-                    file_path = file_info.get("path", "")
-                    file_content = file_info.get("content", "")
-                    
-                    # Use specified dialect or detect based on file path
-                    file_dialect = dialect
-                    if not file_dialect:
-                        file_dialect = file_info.get("dialect") or self.detect_dialect_from_file_path(file_path)
-                    
-                    # Extract lineage
-                    lineage_info = self.extract_lineage(file_content, file_dialect, file_path)
-                    
-                    # Get column mappings
-                    if lineage_info.get("target_table") == node_id:
-                        col_lineage = lineage_info.get("column_level_lineage", {})
-                        for col, sources in col_lineage.items():
-                            if col not in table_columns:
-                                table_columns.append(col)
+                # Store dependencies for this level
+                if level_deps:
+                    dependencies_by_level[str(level)] = level_deps
                 
-                # Store column information
-                if table_columns:
-                    column_lineage[node_id] = table_columns
+                # Move to next level
+                current_level_tables = list(set(next_level_tables))
+                level += 1
             
-            # Generate the final result
-            result = {
-                "table": table_name,
-                "direction": direction,
-                "depth_reached": max(dependencies_by_level.keys()) if dependencies_by_level else 0,
-                "dependencies_by_level": dependencies_by_level,
-                "lineage_graph": lineage_graph,
-                "column_lineage": column_lineage,
-                "total_files": len(lineage_graph["files"]),
-                "total_tables": len(lineage_graph["nodes"]),
-                "dialect_used": dialect or "auto-detect"
-            }
-            
-            # Add a summary for easy processing
-            table_chain = []
-            if direction == "upstream":
-                # For upstream, we want to build a chain from the target back to sources
-                levels = sorted(dependencies_by_level.keys())
-                for level in levels:
-                    level_tables = set()
-                    for dep in dependencies_by_level[level]:
-                        level_tables.add(dep["table"])
-                        for src in dep.get("dependencies", []):
-                            if src not in level_tables:
-                                level_tables.add(src)
-                    
-                    table_chain.append(list(level_tables))
+            # Generate summary message
+            if total_deps > 0:
+                result["summary"] = f"Found {total_deps} related tables across {len(visited_tables) - 1} {'upstream' if direction == 'upstream' else 'downstream'} levels for table '{table_name}'"
             else:
-                # For downstream, we want to build a chain from the source to targets
-                levels = sorted(dependencies_by_level.keys())
-                for level in levels:
-                    level_tables = set()
-                    for dep in dependencies_by_level[level]:
-                        level_tables.add(dep["table"])
-                        if "used_by" in dep and dep["used_by"] not in level_tables:
-                            level_tables.add(dep["used_by"])
-                    
-                    table_chain.append(list(level_tables))
+                result["summary"] = f"No {'upstream' if direction == 'upstream' else 'downstream'} dependencies found for table '{table_name}'"
             
-            result["table_chain"] = table_chain
+            result["dependencies_by_level"] = dependencies_by_level
             
-            # Create a text summary
-            summary = f"Traced {direction} dependencies for table {table_name} to a depth of {result['depth_reached']}.\n"
-            summary += f"Found {result['total_tables']} related tables across {result['total_files']} files.\n"
-            summary += f"Using dialect: {dialect or 'auto-detect (PostgreSQL)'}\n\n"
-            
-            if table_chain:
-                if direction == "upstream":
-                    summary += "Dependency chain (from target to sources):\n"
-                    for i, level in enumerate(table_chain):
-                        summary += f"Level {i}: {', '.join(level)}\n"
-                else:
-                    summary += "Usage chain (from source to targets):\n"
-                    for i, level in enumerate(table_chain):
-                        summary += f"Level {i}: {', '.join(level)}\n"
-            
-            result["summary"] = summary
-            
-            return result
-            
+            # Extract column information if available
+            if total_deps > 0:
+                column_info = {}
+                for table in visited_tables:
+                    table_files = self.search_for_table(table)
+                    for file_info in table_files:
+                        if "content" in file_info and file_info["content"]:
+                            # Parse the file to extract columns
+                            file_dialect = dialect_parser or self.get_dialect_parser(file_info.get("dialect", "postgresql"))
+                            if file_dialect:
+                                columns = self._extract_columns(file_info["content"], file_dialect)
+                                if columns:
+                                    column_info[table] = columns
+                
+                if column_info:
+                    result["column_lineage"] = column_info
+        
         except Exception as e:
-            logger.error(f"Error tracing {direction} lineage for table {table_name}: {str(e)}")
-            return {
-                "error": f"Error tracing lineage: {str(e)}",
-                "table": table_name,
-                "direction": direction,
-                "dialect_used": dialect or "auto-detect"
-            }
+            error_message = f"Error tracing complete lineage: {str(e)}"
+            result["errors"].append(error_message)
+            result["summary"] = error_message
+        
+        return result
 
     def trace_column_complete_lineage(self, table_name: str, column_name: str, 
                                      direction: str = "upstream", max_depth: int = 10,
