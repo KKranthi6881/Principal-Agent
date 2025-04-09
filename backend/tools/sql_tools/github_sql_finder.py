@@ -85,8 +85,8 @@ class GitHubSQLFinder:
                         name="github_sql",
                         embedding_function=embedding_func
                     )
-                    logger.info("Created new collection, populating with sample data...")
-                    self._populate_sample_data()
+                    #logger.info("Created new collection, populating with sample data...")
+                    #self._populate_sample_data()
                     return True
                 except Exception as create_e:
                     logger.error(f"Error creating collection: {str(create_e)}")
