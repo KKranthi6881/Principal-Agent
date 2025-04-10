@@ -74,6 +74,7 @@ class GitHubConnectorCreate(BaseModel):
     default_branch: Optional[str] = "main"
     active: bool = True
     repo_url: Optional[str] = Field(None, description="Direct GitHub repository URL")
+    tech_stack: Optional[str] = Field("postgresql", description="Tech stack for SQL parsing: postgresql, mysql, snowflake, tsql, dbt")
 
 class GitHubConnectorResponse(BaseModel):
     """GitHub connector response model"""
@@ -91,6 +92,7 @@ class GitHubConnectorResponse(BaseModel):
     created_at: str
     updated_at: str
     repo_url: Optional[str] = None
+    tech_stack: Optional[str] = "postgresql"
 
 class GitHubConnectorUpdate(BaseModel):
     """GitHub connector update model"""
@@ -105,6 +107,7 @@ class GitHubConnectorUpdate(BaseModel):
     default_branch: Optional[str] = None
     active: Optional[bool] = None
     repo_url: Optional[str] = None
+    tech_stack: Optional[str] = None
 
 class GitHubConnectorList(BaseModel):
     """GitHub connector list response"""
@@ -182,13 +185,14 @@ async def create_github_connector(connector: GitHubConnectorCreate):
             """
             INSERT INTO github_connectors
             (id, name, description, github_type, api_url, token, owner, repositories, 
-            organization, default_branch, active, created_at, updated_at, repo_url)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?)
+            organization, default_branch, active, created_at, updated_at, repo_url, tech_stack)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?, ?)
             """,
             (
                 connector_id, connector.name, connector.description, connector.github_type,
                 connector.api_url, encrypted_token, connector.owner, repositories_json,
-                connector.organization, connector.default_branch, connector.active, connector.repo_url
+                connector.organization, connector.default_branch, connector.active, connector.repo_url,
+                connector.tech_stack
             )
         )
         
@@ -273,33 +277,35 @@ async def update_github_connector(connector_id: str, connector: GitHubConnectorU
         existing_connector = cursor.fetchone()
         
         if not existing_connector:
+            conn.close()
             raise HTTPException(status_code=404, detail=f"GitHub connector with ID {connector_id} not found")
         
-        existing_connector = dict(existing_connector)
-        
-        # If token is being updated, encrypt it
+        # Handle token update
         token_update = None
         if connector.token:
-            # Test connection with new token before updating
-            test_connector = GitHubConnectorCreate(
-                name=connector.name or existing_connector['name'],
-                github_type=connector.github_type or existing_connector['github_type'],
-                api_url=connector.api_url or existing_connector['api_url'],
+            # Validate GitHub connection before saving
+            test_data = GitHubConnectorCreate(
+                name=existing_connector['name'],
+                github_type=existing_connector['github_type'],
                 token=connector.token,
-                owner=connector.owner or existing_connector['owner'],
-                organization=connector.organization or existing_connector['organization'],
-                repositories=connector.repositories or (
-                    json.loads(existing_connector['repositories']) 
-                    if existing_connector.get('repositories') else None
-                )
+                api_url=connector.api_url if connector.api_url is not None else existing_connector['api_url'],
+                owner=connector.owner if connector.owner is not None else existing_connector['owner'],
+                repositories=connector.repositories if connector.repositories is not None else json.loads(existing_connector['repositories']) if existing_connector['repositories'] else None,
+                organization=connector.organization if connector.organization is not None else existing_connector['organization'],
+                default_branch=connector.default_branch if connector.default_branch is not None else existing_connector['default_branch'],
+                active=connector.active if connector.active is not None else existing_connector['active'],
+                repo_url=connector.repo_url if connector.repo_url is not None else existing_connector['repo_url']
             )
-            test_result = await test_github_connection(test_connector)
+            
+            test_result = await test_github_connection(test_data)
             if not test_result.success:
+                conn.close()
                 raise HTTPException(status_code=400, detail=f"GitHub connection failed: {test_result.message}")
             
+            # Encrypt the token
             token_update = encrypt_token(connector.token)
-        
-        # Convert repositories list to JSON if provided
+            
+        # Handle repositories update
         repositories_json = None
         if connector.repositories is not None:
             repositories_json = json.dumps(connector.repositories)
@@ -351,6 +357,10 @@ async def update_github_connector(connector_id: str, connector: GitHubConnectorU
         if connector.repo_url is not None:
             update_fields.append("repo_url = ?")
             params.append(connector.repo_url)
+            
+        if connector.tech_stack is not None:
+            update_fields.append("tech_stack = ?")
+            params.append(connector.tech_stack)
         
         update_fields.append("updated_at = CURRENT_TIMESTAMP")
         
@@ -441,6 +451,11 @@ async def test_github_connection(connector: GitHubConnectorCreate) -> TestConnec
     Test GitHub connection helper function
     """
     try:
+        # Log request details for debugging (excluding token for security)
+        sanitized_connector = connector.dict()
+        sanitized_connector['token'] = '***REDACTED***' if sanitized_connector.get('token') else None
+        print(f"Testing GitHub connection with: {sanitized_connector}")
+        
         # Extract owner and repository from repo_url if provided
         if connector.github_type == 'public' and connector.repo_url:
             try:
@@ -473,9 +488,19 @@ async def test_github_connection(connector: GitHubConnectorCreate) -> TestConnec
             'User-Agent': 'DataArchitect-App'
         }
         
+        # Log the API endpoint and headers (excluding Auth token)
+        print(f"Making GitHub API request to: {base_url}/user")
+        sanitized_headers = headers.copy()
+        sanitized_headers['Authorization'] = 'token ***REDACTED***'
+        print(f"Headers: {sanitized_headers}")
+        
         # Try to get user info as a basic authentication test
         user_url = f"{base_url}/user"
         response = requests.get(user_url, headers=headers)
+        
+        # Log response status and beginning of response body
+        print(f"GitHub API response status: {response.status_code}")
+        print(f"GitHub API response body (truncated): {response.text[:100] if response.text else 'Empty response'}")
         
         if response.status_code != 200:
             return TestConnectionResponse(

@@ -71,6 +71,7 @@ class RepositoryAnalysisRequest(BaseModel):
     """Request model for repository analysis"""
     repo_url: str = Field(..., description="GitHub repository URL")
     dialect: Optional[str] = Field(None, description="SQL dialect to use")
+    connector_id: Optional[str] = Field(None, description="Connector ID")
 
 class ColumnLineageRequest(BaseModel):
     """Request model for column lineage tracing"""
@@ -196,7 +197,30 @@ async def analyze_uploaded_file(
 async def analyze_repository(request: RepositoryAnalysisRequest):
     """Analyze SQL files in a GitHub repository"""
     try:
-        results = sql_api.analyze_repository(request.repo_url, request.dialect)
+        # Get connector_id from the request
+        connector_id = request.connector_id if hasattr(request, 'connector_id') else None
+        tech_stack = None
+        
+        # If connector_id is provided, get the tech_stack from the connector
+        if connector_id:
+            try:
+                from api.github_connectors_api import get_db_connection
+                conn = get_db_connection()
+                cursor = conn.cursor()
+                cursor.execute("SELECT * FROM github_connectors WHERE id = ?", (connector_id,))
+                connector = cursor.fetchone()
+                conn.close()
+                
+                if connector and 'tech_stack' in connector:
+                    tech_stack = connector['tech_stack']
+            except Exception as e:
+                # Log the error but continue with default tech_stack
+                print(f"Error retrieving connector tech_stack: {str(e)}")
+        
+        # Use the dialect from the request or tech_stack from the connector
+        dialect = request.dialect or tech_stack
+        
+        results = sql_api.analyze_repository(request.repo_url, dialect, tech_stack)
         return results
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error analyzing repository: {str(e)}")

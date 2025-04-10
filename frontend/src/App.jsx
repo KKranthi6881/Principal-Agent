@@ -11,6 +11,8 @@ import ConnectorsPage from './pages/ConnectorsPage'
 import LLMProviderConnectorPage from './pages/connectors/LLMProviderConnectorPage'
 import ChatInterface from './components/ChatInterface'
 import GitHubConnectors from './pages/GitHubConnectors'
+import TestPage from './pages/TestPage'
+import ErrorBoundary from './components/ErrorBoundary'
 
 // Create theme
 const theme = extendTheme({
@@ -27,56 +29,59 @@ function App() {
   console.log('App is rendering');
   
   return (
-    <ChakraProvider theme={theme}>
-      <Router>
-        <Box minH="100vh">
-          <Routes>
-            <Route path="/" element={<HomePage />} />
-            <Route path="/chat" element={
-              <MainLayout>
-                <ChatPage />
-              </MainLayout>
-            } />
-            <Route path="/chat/:conversationId" element={
-              <MainLayout>
-                <ChatPage />
-              </MainLayout>
-            } />
-           {/* <Route path="/upload" element={
-              <MainLayout>
-                <FileUploadPage />
-              </MainLayout>
-            } /> */}
-            <Route path="/history" element={
-              <MainLayout>
-                <ChatHistoryPage />
-              </MainLayout>
-            } />
-            <Route path="/history/:conversationId" element={
-              <MainLayout>
-                <ChatHistoryPage />
-              </MainLayout>
-            } />
-            <Route path="/connectors" element={
-              <MainLayout>
-                <ConnectorsPage />
-              </MainLayout>
-            } />
-            <Route path="/connectors/llm" element={
-              <MainLayout>
-                <LLMProviderConnectorPage />
-              </MainLayout>
-            } />
-            <Route path="/connectors/github" element={
-              <MainLayout>
-                <GitHubConnectors />
-              </MainLayout>
-            } />
-            <Route path="*" element={<Navigate to="/" />} />
-          </Routes>
-        </Box>
-      </Router>
-    </ChakraProvider>
+    <ErrorBoundary>
+      <ChakraProvider theme={theme}>
+        <Router>
+          <Box minH="100vh">
+            <Routes>
+              <Route path="/test" element={<TestPage />} />
+              <Route path="/" element={<HomePage />} />
+              <Route path="/chat" element={
+                <MainLayout>
+                  <ChatPage />
+                </MainLayout>
+              } />
+              <Route path="/chat/:conversationId" element={
+                <MainLayout>
+                  <ChatPage />
+                </MainLayout>
+              } />
+             {/* <Route path="/upload" element={
+                <MainLayout>
+                  <FileUploadPage />
+                </MainLayout>
+              } /> */}
+              <Route path="/history" element={
+                <MainLayout>
+                  <ChatHistoryPage />
+                </MainLayout>
+              } />
+              <Route path="/history/:conversationId" element={
+                <MainLayout>
+                  <ChatHistoryPage />
+                </MainLayout>
+              } />
+              <Route path="/connectors" element={
+                <MainLayout>
+                  <ConnectorsPage />
+                </MainLayout>
+              } />
+              <Route path="/connectors/llm" element={
+                <MainLayout>
+                  <LLMProviderConnectorPage />
+                </MainLayout>
+              } />
+              <Route path="/connectors/github" element={
+                <MainLayout>
+                  <GitHubConnectors />
+                </MainLayout>
+              } />
+              <Route path="*" element={<Navigate to="/" />} />
+            </Routes>
+          </Box>
+        </Router>
+      </ChakraProvider>
+    </ErrorBoundary>
   )
 }
 

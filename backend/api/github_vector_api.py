@@ -180,6 +180,24 @@ async def sync_repository_task(
         branch: The branch to sync
     """
     try:
+        # Get connector data to retrieve tech_stack
+        tech_stack = 'postgresql'  # Default value
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM github_connectors WHERE id = ?", (connector_id,))
+            connector = cursor.fetchone()
+            conn.close()
+            
+            if connector:
+                # Convert connector to a dictionary to make attribute access safe
+                connector_dict = dict(connector)
+                tech_stack = connector_dict.get('tech_stack', 'postgresql')
+            
+            logger.info(f"Using tech stack: {tech_stack} for repository {repo_url}")
+        except Exception as e:
+            logger.warning(f"Error retrieving tech_stack for connector {connector_id}: {str(e)}. Using default postgresql.")
+        
         # Get vector store
         vector_store = get_github_vector_store()
         if not vector_store:
@@ -312,6 +330,36 @@ async def sync_repository_task(
                     if ext:
                         ext = ext[1:]  # Remove the dot
                     
+                    # Process SQL files with the specified tech_stack
+                    if ext.lower() == 'sql':
+                        try:
+                            # Import the SQL finder here to avoid circular imports
+                            from tools.sql_tools.github_sql_finder import GitHubSQLFinder
+                            sql_finder = GitHubSQLFinder()
+                            file_info = sql_finder.process_file(file_path, content, tech_stack)
+                            if file_info:
+                                # Add SQL-specific data like dialect and references
+                                metadata_sql = {
+                                    "dialect": file_info.get('dialect', tech_stack),
+                                    "sql_references": json.dumps(file_info.get('references', [])),
+                                    "sql_structure": json.dumps(file_info.get('structure', {})),
+                                }
+                            else:
+                                metadata_sql = {
+                                    "dialect": tech_stack,
+                                    "sql_references": json.dumps([]),
+                                    "sql_structure": json.dumps({}),
+                                }
+                        except Exception as e:
+                            logger.error(f"Error processing SQL file {file_path}: {str(e)}")
+                            metadata_sql = {
+                                "dialect": tech_stack,
+                                "sql_references": json.dumps([]),
+                                "sql_structure": json.dumps({}),
+                            }
+                    else:
+                        metadata_sql = {}
+                    
                     # Create metadata with enhanced information about file path
                     metadata = {
                         "repo_url": repo_url,
@@ -327,7 +375,11 @@ async def sync_repository_task(
                         # Add directory information for better filtering
                         "directory": os.path.dirname(file_path) or "root",
                         # Add embedding provider info to metadata for filtering
-                        "embedding_provider": embedding_provider
+                        "embedding_provider": embedding_provider,
+                        # Add tech_stack to metadata
+                        "tech_stack": tech_stack,
+                        # Add SQL metadata if present
+                        **metadata_sql
                     }
                     
                     ids.append(file_id)

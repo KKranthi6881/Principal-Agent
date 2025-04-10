@@ -7,6 +7,7 @@ using vector search.
 
 import os
 import logging
+import re
 from typing import Dict, List, Set, Tuple, Optional, Any
 
 # Configure logging
@@ -247,17 +248,22 @@ class GitHubSQLFinder:
         
         return results
     
-    def _detect_dialect(self, file_path: str, content: str) -> str:
+    def _detect_dialect(self, file_path: str, content: str, connector_tech_stack: str = None) -> str:
         """
-        Detect SQL dialect from file path and content
+        Detect SQL dialect from file path, content, and connector settings
         
         Args:
             file_path: Path to the SQL file
             content: SQL file content
+            connector_tech_stack: Tech stack specified in the connector settings
             
         Returns:
             Detected dialect name
         """
+        # If the connector has a specified tech stack, use it as the primary dialect
+        if connector_tech_stack and connector_tech_stack in ['postgresql', 'mysql', 'snowflake', 'tsql', 'dbt']:
+            return connector_tech_stack
+        
         # Check file path for clues
         file_path_lower = file_path.lower()
         
@@ -305,4 +311,216 @@ class GitHubSQLFinder:
             return 'tsql'
             
         # Default to PostgreSQL
-        return 'postgresql' 
+        return 'postgresql'
+
+    def process_file(self, file_path: str, content: str, connector_tech_stack: str = None) -> Dict[str, Any]:
+        """
+        Process a SQL file to extract table references and structure.
+        
+        Args:
+            file_path: Path to the SQL file
+            content: SQL file content
+            connector_tech_stack: Tech stack specified in the connector
+            
+        Returns:
+            Dictionary with file information, table references, and structure
+        """
+        try:
+            # Check if this is a SQL file
+            if not self._is_sql_file(file_path):
+                return None
+            
+            # Detect SQL dialect
+            dialect = self._detect_dialect(file_path, content, connector_tech_stack)
+            logger.info(f"Detected dialect '{dialect}' for file '{file_path}' (connector_tech_stack={connector_tech_stack})")
+            
+            # Extract references and structure
+            references = self._extract_references(content, dialect)
+            structure = self._extract_structure(content, dialect)
+            
+            # Return the file info with dialect
+            return {
+                'file_path': file_path,
+                'dialect': dialect,
+                'references': references,
+                'structure': structure
+            }
+        except Exception as e:
+            logger.error(f"Error processing SQL file '{file_path}': {str(e)}")
+            return {
+                'file_path': file_path,
+                'dialect': connector_tech_stack or 'postgresql',
+                'references': [],
+                'structure': {}
+            }
+
+    def _is_sql_file(self, file_path: str) -> bool:
+        """
+        Check if a file is an SQL file based on its extension
+        
+        Args:
+            file_path: Path to the file
+            
+        Returns:
+            True if the file is an SQL file, False otherwise
+        """
+        # Check file extension
+        if file_path.lower().endswith('.sql'):
+            return True
+        
+        # Get the file extension
+        file_ext = file_path.split('.')[-1].lower() if '.' in file_path else ''
+        return file_ext == 'sql'
+
+    def _extract_references(self, content: str, dialect: str = 'postgresql') -> List[Dict[str, str]]:
+        """
+        Extract table references from SQL content
+        
+        Args:
+            content: SQL content
+            dialect: SQL dialect (postgresql, snowflake, etc.)
+            
+        Returns:
+            List of table references
+        """
+        references = []
+        
+        try:
+            # Special handling for dbt dialect
+            if dialect == 'dbt':
+                # Look for ref() function calls
+                ref_pattern = r'\{\{\s*ref\s*\(\s*[\'"](.*?)[\'"]\s*\)\s*\}\}'
+                ref_matches = re.findall(ref_pattern, content)
+                for ref in ref_matches:
+                    references.append({
+                        'table': ref,
+                        'type': 'dbt_ref',
+                        'schema': None
+                    })
+                    
+                # Look for source() function calls
+                source_pattern = r'\{\{\s*source\s*\(\s*[\'"](.*?)[\'"]\s*,\s*[\'"](.*?)[\'"]\s*\)\s*\}\}'
+                source_matches = re.findall(source_pattern, content)
+                for source in source_matches:
+                    references.append({
+                        'table': source[1],
+                        'type': 'dbt_source',
+                        'schema': source[0]  # source name is like a schema
+                    })
+                    
+                # Also try to extract standard SQL references
+                
+            # For standard SQL dialects
+            # (Keep existing code for non-dbt dialects)
+            
+            # Very simple regex pattern to find potential table references
+            # This is a naive approach and might miss complex cases
+            table_pattern = r'\bFROM\s+([a-zA-Z0-9_\.]+)|JOIN\s+([a-zA-Z0-9_\.]+)'
+            matches = re.finditer(table_pattern, content, re.IGNORECASE)
+            
+            for match in matches:
+                table_name = match.group(1) if match.group(1) else match.group(2)
+                if not table_name:
+                    continue
+                    
+                # Handle schema.table format
+                if '.' in table_name:
+                    schema, table = table_name.split('.', 1)
+                    references.append({
+                        'table': table,
+                        'type': 'table',
+                        'schema': schema
+                    })
+                else:
+                    references.append({
+                        'table': table_name,
+                        'type': 'table',
+                        'schema': None
+                    })
+        except Exception as e:
+            # Log error but continue
+            print(f"Error extracting references: {str(e)}")
+        
+        return references 
+
+    def _extract_structure(self, content: str, dialect: str = 'postgresql') -> Dict[str, Any]:
+        """
+        Extract table structure from SQL content
+        
+        Args:
+            content: SQL content
+            dialect: SQL dialect (postgresql, snowflake, etc.)
+            
+        Returns:
+            Dictionary with table structure information
+        """
+        structure = {
+            'columns': [],
+            'table_type': 'unknown',
+        }
+        
+        try:
+            # Extract column definitions
+            # For dbt, we need to handle differently
+            if dialect == 'dbt':
+                # For DBT models, extract columns from the SELECT statement
+                # This is a simplified approach
+                structure['table_type'] = 'dbt_model'
+                
+                # See if it's an incremental model
+                if '{{ config(' in content and 'incremental' in content:
+                    structure['table_type'] = 'dbt_incremental'
+                
+                # Match column definitions in SELECT clauses
+                # This regex tries to capture expressions with aliases
+                column_pattern = r'SELECT\s+.*?\s+as\s+([a-zA-Z0-9_]+)|,\s*.*?\s+as\s+([a-zA-Z0-9_]+)'
+                col_matches = re.finditer(column_pattern, content, re.IGNORECASE | re.DOTALL)
+                
+                for match in col_matches:
+                    col_name = match.group(1) if match.group(1) else match.group(2)
+                    if col_name:
+                        structure['columns'].append({
+                            'name': col_name,
+                            'data_type': 'unknown',  # Hard to determine type in dbt
+                            'description': ''
+                        })
+            else:
+                # For regular SQL, try to extract from CREATE TABLE or similar
+                if 'CREATE TABLE' in content.upper():
+                    structure['table_type'] = 'table'
+                elif 'CREATE VIEW' in content.upper():
+                    structure['table_type'] = 'view'
+                elif 'CREATE MATERIALIZED VIEW' in content.upper():
+                    structure['table_type'] = 'materialized_view'
+                
+                # Basic pattern to match column definitions in CREATE statements
+                # Note: This is a simplified approach and won't work for all SQL dialects
+                column_pattern = r'`?([a-zA-Z0-9_]+)`?\s+([a-zA-Z0-9_]+(?:\([^)]+\))?)'
+                col_matches = re.finditer(column_pattern, content)
+                
+                for match in col_matches:
+                    structure['columns'].append({
+                        'name': match.group(1),
+                        'data_type': match.group(2),
+                        'description': ''
+                    })
+                    
+                # If no columns found with the above pattern, try a more general approach
+                if not structure['columns']:
+                    # Try to extract from SELECT statements (for views and CTEs)
+                    column_pattern = r'SELECT\s+.*?\s+as\s+([a-zA-Z0-9_]+)|,\s*.*?\s+as\s+([a-zA-Z0-9_]+)'
+                    col_matches = re.finditer(column_pattern, content, re.IGNORECASE | re.DOTALL)
+                    
+                    for match in col_matches:
+                        col_name = match.group(1) if match.group(1) else match.group(2)
+                        if col_name:
+                            structure['columns'].append({
+                                'name': col_name,
+                                'data_type': 'unknown',
+                                'description': ''
+                            })
+        except Exception as e:
+            # Log error but continue
+            print(f"Error extracting structure: {str(e)}")
+        
+        return structure 

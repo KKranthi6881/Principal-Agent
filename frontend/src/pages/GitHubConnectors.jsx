@@ -94,6 +94,7 @@ import {
   IoCheckmark,
   IoClose
 } from 'react-icons/io5';
+import { FaDatabase } from 'react-icons/fa';
 
 const GitHubConnectors = () => {
   const [connectors, setConnectors] = useState([]);
@@ -118,7 +119,8 @@ const GitHubConnectors = () => {
     repositories: '',
     default_branch: 'main',
     active: true,
-    repo_url: ''
+    repo_url: '',
+    tech_stack: 'postgresql'
   });
   
   // Form errors
@@ -383,6 +385,11 @@ const GitHubConnectors = () => {
         repositories: form.repositories ? form.repositories.split(',').map(repo => repo.trim()) : null
       };
       
+      // Log the request body (but hide the token for security)
+      const sanitizedRequestBody = { ...requestBody };
+      sanitizedRequestBody.token = sanitizedRequestBody.token ? '***REDACTED***' : null;
+      console.log('Testing GitHub connection with:', sanitizedRequestBody);
+      
       const response = await fetch('/api/settings/github_connectors/test', {
         method: 'POST',
         headers: {
@@ -391,7 +398,10 @@ const GitHubConnectors = () => {
         body: JSON.stringify(requestBody)
       });
       
+      console.log('GitHub test response status:', response.status);
+      
       const data = await response.json();
+      console.log('GitHub test response data:', data);
       
       if (response.ok && data.success) {
         setTestStatus({
@@ -551,7 +561,8 @@ const GitHubConnectors = () => {
       repositories: '',
       default_branch: 'main',
       active: true,
-      repo_url: ''
+      repo_url: '',
+      tech_stack: 'postgresql'
     });
     setErrors({});
     setTestStatus(null);
@@ -574,7 +585,8 @@ const GitHubConnectors = () => {
       repositories: repoString,
       default_branch: connector.default_branch || 'main',
       active: connector.active,
-      repo_url: connector.repo_url || ''
+      repo_url: connector.repo_url || '',
+      tech_stack: connector.tech_stack || 'postgresql'
     });
     
     setSelectedConnector(connector);
@@ -1177,6 +1189,13 @@ const GitHubConnectors = () => {
                       </ListItem>
                       <ListItem>
                         <HStack>
+                          <Icon as={FaDatabase} color="gray.500" />
+                          <Text fontWeight="bold" mr={1}>Tech Stack:</Text>
+                          <Text>{connector.tech_stack || 'postgresql'}</Text>
+                        </HStack>
+                      </ListItem>
+                      <ListItem>
+                        <HStack>
                           <Icon as={IoLockClosed} color="gray.500" />
                           <Text fontWeight="bold" mr={1}>Token:</Text>
                           <Text>{connector.has_token ? '••••••••' : 'Not set'}</Text>
@@ -1527,53 +1546,72 @@ const GitHubConnectors = () => {
                             Default branch name (usually 'main' or 'master')
                           </Text>
                         </FormControl>
-                      </Box>
-                      
-                      <FormControl display="flex" alignItems="center" mt={4}>
-                        <FormLabel htmlFor="active" mb="0">
-                          Active
-                        </FormLabel>
-                        <Switch 
-                          id="active" 
-                          name="active"
-                          isChecked={form.active}
-                          onChange={handleChange}
-                          colorScheme="purple"
-                        />
-                      </FormControl>
-                      
-                      {renderTestResults()}
-                      
-                      <HStack spacing={4} justify="space-between">
-                        <Button
-                          leftIcon={<IoRefresh />}
-                          onClick={testConnection}
-                          colorScheme="blue"
-                          isLoading={isTestingConnection}
-                          loadingText="Testing"
-                        >
-                          Test Connection
-                        </Button>
                         
-                        <HStack>
-                          <Button
-                            onClick={resetForm}
-                            variant="outline"
+                        <FormControl mt={4}>
+                          <FormLabel>SQL Tech Stack</FormLabel>
+                          <Select
+                            name="tech_stack"
+                            value={form.tech_stack}
+                            onChange={handleChange}
+                            icon={<FaDatabase />}
                           >
-                            Cancel
+                            <option value="postgresql">PostgreSQL</option>
+                            <option value="mysql">MySQL</option>
+                            <option value="snowflake">Snowflake</option>
+                            <option value="tsql">T-SQL (SQL Server)</option>
+                            <option value="dbt">DBT</option>
+                          </Select>
+                          <Text fontSize="xs" color="gray.600" mt={1}>
+                            Select the SQL dialect used in this repository for optimal SQL parsing
+                          </Text>
+                        </FormControl>
+                        
+                        <FormControl display="flex" alignItems="center" mt={4}>
+                          <FormLabel htmlFor="active" mb="0">
+                            Active
+                          </FormLabel>
+                          <Switch 
+                            id="active" 
+                            name="active"
+                            isChecked={form.active}
+                            onChange={handleChange}
+                            colorScheme="purple"
+                          />
+                        </FormControl>
+                        
+                        {renderTestResults()}
+                        
+                        <HStack spacing={4} justify="space-between">
+                          <Button
+                            leftIcon={<IoRefresh />}
+                            onClick={testConnection}
+                            colorScheme="blue"
+                            isLoading={isTestingConnection}
+                            loadingText="Testing"
+                          >
+                            Test Connection
                           </Button>
                           
-                          <Button
-                            type="submit"
-                            colorScheme="purple"
-                            isLoading={isSubmitting}
-                            loadingText="Saving"
-                            rightIcon={<IoCheckmark />}
-                          >
-                            {selectedConnector ? 'Update Connector' : 'Save Connector'}
-                          </Button>
+                          <HStack>
+                            <Button
+                              onClick={resetForm}
+                              variant="outline"
+                            >
+                              Cancel
+                            </Button>
+                            
+                            <Button
+                              type="submit"
+                              colorScheme="purple"
+                              isLoading={isSubmitting}
+                              loadingText="Saving"
+                              rightIcon={<IoCheckmark />}
+                            >
+                              {selectedConnector ? 'Update Connector' : 'Save Connector'}
+                            </Button>
+                          </HStack>
                         </HStack>
-                      </HStack>
+                      </Box>
                     </VStack>
                   </form>
                 </CardBody>

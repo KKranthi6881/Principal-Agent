@@ -260,18 +260,22 @@ class SQLAnalysisAPI:
                 "file_path": file_path
             }
     
-    def analyze_repository(self, repo_url: str, dialect: Optional[str] = None) -> Dict[str, Any]:
+    def analyze_repository(self, repo_url: str, dialect: Optional[str] = None, tech_stack: Optional[str] = None) -> Dict[str, Any]:
         """
         Analyze SQL files in a GitHub repository
         
         Args:
             repo_url: GitHub repository URL
             dialect: SQL dialect to use (if None, will be auto-detected for each file)
+            tech_stack: Tech stack specified in connector settings
             
         Returns:
             Dictionary with analysis results
         """
         try:
+            # Use tech_stack if provided as the default dialect
+            default_dialect = tech_stack or dialect
+            
             # Search for SQL files in the repository
             sql_files = self.github_sql_finder.search_sql_files(f"repo:{repo_url} extension:sql", limit=100)
             
@@ -286,7 +290,8 @@ class SQLAnalysisAPI:
             for file_info in sql_files:
                 file_path = file_info.get("path")
                 file_content = file_info.get("content")
-                file_dialect = dialect or file_info.get("dialect") or self.detect_dialect(file_content, file_path)
+                # Use tech_stack as the primary dialect choice if available
+                file_dialect = default_dialect or file_info.get("dialect") or self.detect_dialect(file_content, file_path)
                 
                 # Extract dependencies and lineage
                 dependency_info = self.extract_dependencies(file_content, file_dialect, file_path)
@@ -303,12 +308,13 @@ class SQLAnalysisAPI:
             # Return combined results
             return {
                 "repo_url": repo_url,
+                "tech_stack": tech_stack,
                 "file_count": len(results),
                 "results": results
             }
             
         except Exception as e:
-            logger.error(f"Error analyzing repository {repo_url}: {str(e)}")
+            logger.error(f"Error analyzing repository: {str(e)}")
             return {
                 "error": f"Error analyzing repository: {str(e)}",
                 "repo_url": repo_url

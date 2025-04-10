@@ -23,8 +23,9 @@ import {
   AlertTitle,
   AlertDescription,
   useColorModeValue,
+  Select,
 } from '@chakra-ui/react';
-import { FaGithub, FaBuilding, FaGlobe } from 'react-icons/fa';
+import { FaGithub, FaBuilding, FaGlobe, FaDatabase } from 'react-icons/fa';
 
 const GitHubConnectorPage = () => {
   const [isEnterprise, setIsEnterprise] = useState(false);
@@ -33,6 +34,7 @@ const GitHubConnectorPage = () => {
     token: '',
     repoUrl: '',
     isPublic: false,
+    techStack: 'postgresql',
   });
   const [savedConfigs, setSavedConfigs] = useState([]);
   const toast = useToast();
@@ -180,6 +182,7 @@ const GitHubConnectorPage = () => {
         token: '',
         repoUrl: '',
         isPublic: false,
+        techStack: 'postgresql',
       });
     } catch (error) {
       console.error('Error saving configuration:', error);
@@ -343,6 +346,25 @@ const GitHubConnectorPage = () => {
                     </>
                   )}
                   
+                  <FormControl>
+                    <FormLabel>SQL Tech Stack</FormLabel>
+                    <Select
+                      name="techStack"
+                      value={config.techStack}
+                      onChange={handleInputChange}
+                      icon={<FaDatabase />}
+                    >
+                      <option value="postgresql">PostgreSQL</option>
+                      <option value="mysql">MySQL</option>
+                      <option value="snowflake">Snowflake</option>
+                      <option value="tsql">T-SQL (SQL Server)</option>
+                      <option value="dbt">DBT</option>
+                    </Select>
+                    <Text fontSize="xs" color="gray.500" mt={1}>
+                      Select the SQL dialect used in this repository for optimal SQL parsing
+                    </Text>
+                  </FormControl>
+                  
                   <Alert status="info" borderRadius="md">
                     <AlertIcon />
                     <Box fontSize="sm">
@@ -391,6 +413,13 @@ const GitHubConnectorPage = () => {
                             Username: {savedConfig.username}
                           </Text>
                         )}
+                        
+                        <HStack>
+                          <Icon as={FaDatabase} color="purple.500" />
+                          <Text fontSize="sm" color={textColor}>
+                            Tech Stack: {savedConfig.techStack || 'PostgreSQL'}
+                          </Text>
+                        </HStack>
                         
                         <HStack justify="space-between">
                           <Text fontSize="sm" color={textColor}>

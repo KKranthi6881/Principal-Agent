@@ -45,6 +45,7 @@ const githubConnectorApi = {
         repo_url: connectorData.repoUrl || connectorData.repo_url,
         is_public: connectorData.isPublic || connectorData.is_public,
         is_enterprise: connectorData.isEnterprise || connectorData.is_enterprise,
+        tech_stack: connectorData.techStack || connectorData.tech_stack || 'postgresql',
       };
       
       const response = await api.post('/api/settings/github_connectors', formattedData);
@@ -65,6 +66,7 @@ const githubConnectorApi = {
         repo_url: connectorData.repoUrl || connectorData.repo_url,
         is_public: connectorData.isPublic || connectorData.is_public,
         is_enterprise: connectorData.isEnterprise || connectorData.is_enterprise,
+        tech_stack: connectorData.techStack || connectorData.tech_stack,
       };
       
       // Remove undefined values
