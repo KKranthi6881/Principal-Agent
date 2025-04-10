@@ -9,7 +9,7 @@ from typing import Dict, List, Optional, Any
 from pydantic import BaseModel, Field
 import json
 
-from tools.sql_tools.api import sql_api
+from tools.sql.api import sql_api
 
 router = APIRouter(prefix="/api/sql", tags=["sql"])
 

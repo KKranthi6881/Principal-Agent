@@ -21,7 +21,7 @@ if str(backend_dir) not in sys.path:
 
 # Import the LLM interface
 try:
-    from tools.sql_tools.llm_interface import llm_interface
+    from tools.sql.llm_interface import llm_interface
     logger.info("Successfully imported LLM interface")
 except Exception as e:
     logger.error(f"Error importing LLM interface: {e}")
@@ -92,7 +92,7 @@ def compare_interface_with_direct():
     print("=" * 80)
     
     # Import the regular SQL API
-    from tools.sql_tools.api import sql_api
+    from tools.sql.api import sql_api
     
     table_name = "stg_tpch_orders"
     

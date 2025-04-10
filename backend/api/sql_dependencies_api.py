@@ -8,7 +8,7 @@ from typing import List, Dict, Any, Optional
 import logging
 import os
 
-from tools.sql_tools.dependency_analyzer import SQLDependencyTool
+from tools.sql.dependency_analyzer import SQLDependencyTool
 
 # Configure logging
 logger = logging.getLogger(__name__)

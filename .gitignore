@@ -6,3 +6,9 @@ backend/storage/repos/**/*
 **/.git/
 **/node_modules/ 
 Users/Kranthi_1/Principal-Agent/backend/vector_store/chromadb_github/
+backend/tools/sql_tools/__pycache__/*
+/Users/Kranthi_1/Principal-Agent/backend/vector_store/chromadb_document/*
+/Users/Kranthi_1/Principal-Agent/backend/vector_store/chromadb_github/*
+/Users/Kranthi_1/Principal-Agent/backend/vector_store/chromadb_summary/*
+/Users/Kranthi_1/Principal-Agent/backend/vector_store/__pycache__/*
+/Users/Kranthi_1/Principal-Agent/backend/tools/sql_tools/__pycache__/*

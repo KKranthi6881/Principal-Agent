@@ -6,7 +6,7 @@ Test script to directly test SQL dependency analysis
 import os
 import logging
 from pprint import pprint
-from tools.sql_tools.dependency_analyzer import SQLDependencyTool
+from tools.sql.dependency_analyzer import SQLDependencyTool
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(levelname)s:%(name)s:%(message)s')

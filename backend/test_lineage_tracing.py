@@ -21,7 +21,7 @@ if str(backend_dir) not in sys.path:
 
 # Import the SQL API
 try:
-    from tools.sql_tools.api import SQLAnalysisAPI, sql_api
+    from tools.sql.api import SQLAnalysisAPI, sql_api
     logger.info("Successfully imported SQL API")
 except Exception as e:
     logger.error(f"Error importing SQL API: {e}")
