@@ -5,3 +5,4 @@ backend/storage/repos/**/*
 # Prevent accidental inclusion of Git repositories
 **/.git/
 **/node_modules/ 
+Users/Kranthi_1/Principal-Agent/backend/vector_store/chromadb_github/
