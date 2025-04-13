@@ -67,30 +67,59 @@ def get_github_vector_store():
             logger.warning(f"Vector store directory {GITHUB_VECTOR_STORE_PATH} doesn't exist, creating it")
             os.makedirs(GITHUB_VECTOR_STORE_PATH, exist_ok=True)
         
-        # Initialize client
+        # Initialize client with reduced threads for compatibility
         try:
             logger.info(f"Creating ChromaDB client with path: {GITHUB_VECTOR_STORE_PATH}")
-            chroma_client = chromadb.PersistentClient(path=GITHUB_VECTOR_STORE_PATH)
+            # Configure client with reduced threads to avoid the threading error
+            chroma_client = chromadb.PersistentClient(
+                path=GITHUB_VECTOR_STORE_PATH,
+                settings=chromadb.Settings(
+                    anonymized_telemetry=False,
+                    allow_reset=True,
+                    is_persistent=True
+                )
+            )
             logger.info("ChromaDB client created successfully")
         except Exception as e:
             logger.error(f"Error creating ChromaDB client: {e}")
             logger.error(traceback.format_exc())
             return None
         
-        # Try to get existing collection, create if not found
+        # Try to get existing collection first
         try:
-            logger.info("Attempting to get existing collection 'github_code'")
-            collection = chroma_client.get_collection("github_code")
-            logger.info(f"Found existing GitHub vector store with {collection.count()} documents")
+            # Check if collection exists by listing collections
+            collection_names = [col.name for col in chroma_client.list_collections()]
+            logger.info(f"Available collections: {collection_names}")
+            
+            if "github_code" in collection_names:
+                logger.info("Found existing 'github_code' collection")
+                try:
+                    collection = chroma_client.get_collection(
+                        name="github_code",
+                        embedding_function=embedding_functions.DefaultEmbeddingFunction()
+                    )
+                    logger.info(f"Retrieved existing GitHub vector store with {collection.count()} documents")
+                except Exception as e:
+                    logger.error(f"Error getting existing collection: {e}")
+                    # Fallback to creating a new one with a different name
+                    logger.info("Creating alternative collection due to error")
+                    collection = chroma_client.create_collection(
+                        name="github_code_new",
+                        embedding_function=embedding_functions.DefaultEmbeddingFunction()
+                    )
+            else:
+                # Create new collection with default embedding function
+                logger.info("No existing 'github_code' collection found, creating it")
+                embedding_func = embedding_functions.DefaultEmbeddingFunction()
+                collection = chroma_client.create_collection(
+                    name="github_code",
+                    embedding_function=embedding_func
+                )
+                logger.info("Created new GitHub vector store collection")
         except Exception as e:
-            logger.info(f"Collection 'github_code' not found, creating it now: {e}")
-            # Create new collection with default embedding function
-            embedding_func = embedding_functions.DefaultEmbeddingFunction()
-            collection = chroma_client.create_collection(
-                name="github_code",
-                embedding_function=embedding_func
-            )
-            logger.info("Created new GitHub vector store collection")
+            logger.error(f"Error with collection operations: {e}")
+            logger.error(traceback.format_exc())
+            return None
         
         # Wrap the collection with our enhanced functionality
         return EnhancedGitHubVectorStore(collection)

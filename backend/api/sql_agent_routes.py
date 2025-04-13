@@ -10,10 +10,10 @@ import logging
 import os
 from datetime import datetime
 
-from ..agents.sql_supervisor import SQLSupervisorAgent
+from agents.sql_supervisor import SQLSupervisorAgent
 # Use the unified database interface instead of direct ConversationDB
-from ..database.database import db
-from ..tools.sql_tools.llm_interface import llm_interface as sql_tools
+from database.database import db
+from tools.sql_tools.llm_interface import llm_interface as sql_tools
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)

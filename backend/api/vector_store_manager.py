@@ -26,10 +26,29 @@ class VectorStoreManager:
         
         logger.info(f"Initialized vector store directories at {self.base_dir}")
         
+        # Common ChromaDB settings to avoid thread issues
+        self.chroma_settings = chromadb.Settings(
+            anonymized_telemetry=False,
+            allow_reset=True,
+            is_persistent=True
+        )
+        
         # Initialize ChromaDB clients for different collections
         try:
-            self.github_client = chromadb.PersistentClient(path=str(self.github_dir))
-            self.github_collection = self.github_client.get_or_create_collection("github_files")
+            self.github_client = chromadb.PersistentClient(
+                path=str(self.github_dir),
+                settings=self.chroma_settings
+            )
+            
+            # Check if collection exists by listing collections
+            collection_names = [col.name for col in self.github_client.list_collections()]
+            if "github_files" in collection_names:
+                # Get existing collection
+                self.github_collection = self.github_client.get_collection("github_files")
+            else:
+                # Create new collection
+                self.github_collection = self.github_client.create_collection("github_files")
+                
             logger.info(f"GitHub vector store initialized at {self.github_dir}")
         except Exception as e:
             logger.error(f"Error initializing GitHub vector store: {str(e)}")
@@ -37,8 +56,20 @@ class VectorStoreManager:
             self.github_collection = None
         
         try:
-            self.document_client = chromadb.PersistentClient(path=str(self.document_dir))
-            self.document_collection = self.document_client.get_or_create_collection("documents")
+            self.document_client = chromadb.PersistentClient(
+                path=str(self.document_dir),
+                settings=self.chroma_settings
+            )
+            
+            # Check if collection exists by listing collections
+            collection_names = [col.name for col in self.document_client.list_collections()]
+            if "documents" in collection_names:
+                # Get existing collection
+                self.document_collection = self.document_client.get_collection("documents")
+            else:
+                # Create new collection
+                self.document_collection = self.document_client.create_collection("documents")
+                
             logger.info(f"Document vector store initialized at {self.document_dir}")
         except Exception as e:
             logger.error(f"Error initializing document vector store: {str(e)}")
@@ -46,8 +77,20 @@ class VectorStoreManager:
             self.document_collection = None
         
         try:
-            self.summary_client = chromadb.PersistentClient(path=str(self.summary_dir))
-            self.summary_collection = self.summary_client.get_or_create_collection("conversation_summaries")
+            self.summary_client = chromadb.PersistentClient(
+                path=str(self.summary_dir),
+                settings=self.chroma_settings
+            )
+            
+            # Check if collection exists by listing collections
+            collection_names = [col.name for col in self.summary_client.list_collections()]
+            if "conversation_summaries" in collection_names:
+                # Get existing collection
+                self.summary_collection = self.summary_client.get_collection("conversation_summaries")
+            else:
+                # Create new collection
+                self.summary_collection = self.summary_client.create_collection("conversation_summaries")
+                
             logger.info(f"Summary vector store initialized at {self.summary_dir}")
         except Exception as e:
             logger.error(f"Error initializing summary vector store: {str(e)}")

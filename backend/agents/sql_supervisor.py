@@ -24,7 +24,7 @@ from .sql_agents.lineage_agent import LineageAgent
 from .sql_agents.dependency_agent import DependencyAgent
 from .sql_agents.code_summarizer import CodeSummarizerAgent
 from .sql_agents.description_summarizer import DescriptionSummarizerAgent
-from ..database.database import db
+from database.database import db
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
