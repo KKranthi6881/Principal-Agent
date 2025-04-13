@@ -37,27 +37,32 @@ def setup_conversations_db():
     )
     ''')
     
+    # Create unified agent_logs table that combines both implementations
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS agent_logs (
+        log_id TEXT PRIMARY KEY,
+        thread_id TEXT NOT NULL,
+        conversation_id TEXT NOT NULL,
+        user_id TEXT,
+        agent_name TEXT NOT NULL,
+        agent_type TEXT,  -- 'code_explainer', 'dependency_explainer', 'summarizer', etc.
+        action TEXT,
+        input_text TEXT,
+        output_text TEXT,
+        log_content TEXT,
+        tool_calls JSON,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (conversation_id) REFERENCES conversations(conversation_id),
+        FOREIGN KEY (thread_id) REFERENCES threads(thread_id)
+    )
+    ''')
+    
     conn.commit()
     conn.close()
 
 def setup_log_info_db():
     conn = sqlite3.connect(LOG_INFO_DB)
     cursor = conn.cursor()
-    
-    # Create agent_logs table
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS agent_logs (
-        log_id TEXT PRIMARY KEY,
-        thread_id TEXT NOT NULL,
-        conversation_id TEXT NOT NULL,
-        user_id TEXT NOT NULL,
-        agent_type TEXT NOT NULL,  -- 'code_explainer', 'dependency_explainer', 'summarizer'
-        input_text TEXT,
-        output_text TEXT,
-        tool_calls JSON,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )
-    ''')
     
     # Create tool_logs table
     cursor.execute('''
