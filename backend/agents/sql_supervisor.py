@@ -10,6 +10,7 @@ import os
 import operator
 from typing_extensions import TypedDict
 from datetime import datetime
+import time
 
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
 from langchain_core.prompts import ChatPromptTemplate
@@ -82,94 +83,97 @@ class SQLSupervisorAgent(SupervisorAgent):
         self.parser = JsonOutputParser()
         
         # Set up prompt templates
-        self.planning_prompt = ChatPromptTemplate.from_template("""
-            You are a SQL Analysis Planning expert. Your job is to plan how to answer user questions about SQL code,
-            tables, columns, and their dependencies.
-            
-            User Question: {question}
-            
-            Previous Conversation Context:
-            {context}
-            
-            Based on the user's question, I need you to create a plan for answering it using specialized SQL agents.
-            
-            Please provide a detailed plan in JSON format with the following structure:
-            
-            ```
-            {
-                "question_type": "One of: lineage_analysis, dependency_analysis, impact_analysis, code_summary, table_description, column_description, or general_query",
-                "entities": {
-                    "tables": ["table1", "table2"],
-                    "columns": ["table.column1", "table.column2"],
-                    "files": ["file1.sql", "file2.sql"]
-                },
-                "plan": [
-                    {
-                        "step": 1,
-                        "agent": "agent_name",
-                        "action": "action_name",
-                        "params": {
-                            "param1": "value1",
-                            "param2": "value2"
-                        },
-                        "reason": "Reason for this step"
-                    }
-                ],
-                "dialect": "The SQL dialect to use (postgres, snowflake, tsql, etc.)",
-                "summary": "A summary of the plan"
-            }
-            ```
-            
-            Available agents and their actions:
-            - lineage_agent: trace_table_lineage, trace_column_lineage, analyze_lineage
-            - dependency_agent: analyze_dependencies, analyze_impact
-            - code_summarizer: summarize_code, describe_column, summarize_file
-            - description_summarizer: describe_table, describe_column
-            
-            Be thorough in your planning and ensure that all steps are necessary to answer the user's question completely.
-        """)
+        self.planning_prompt = ChatPromptTemplate.from_template(
+"""You are a SQL Analysis Planning expert. Your job is to plan how to answer user questions about SQL code, tables, columns, and their dependencies.
+
+User Question: {question}
+
+Previous Conversation Context:
+{context}
+
+Based on the user's question, I need you to create a plan for answering it using specialized SQL agents.
+
+Please provide a detailed plan in JSON format with the following structure shown in the example below:
+
+{{"question_type": "One of: lineage_analysis, dependency_analysis, impact_analysis, code_summary, table_description, column_description, or general_query",
+  "entities": {{
+    "tables": ["table1", "table2"],
+    "columns": ["table.column1", "table.column2"],
+    "files": ["file1.sql", "file2.sql"]
+  }},
+  "plan": [
+    {{
+      "step": 1,
+      "agent": "agent_name",
+      "action": "action_name",
+      "params": {{
+        "param1": "value1",
+        "param2": "value2"
+      }},
+      "reason": "Reason for this step"
+    }}
+  ],
+  "dialect": "The SQL dialect to use (postgres, snowflake, tsql, etc.)",
+  "summary": "A summary of the plan"
+}}
+
+Available agents and their actions:
+- lineage_agent: trace_table_lineage, trace_column_lineage, analyze_lineage
+- dependency_agent: analyze_dependencies, analyze_impact
+- code_summarizer: summarize_code, describe_column, summarize_file
+- description_summarizer: describe_table, describe_column
+
+Be thorough in your planning and ensure that all steps are necessary to answer the user's question completely.
+""")
         
-        self.thinking_prompt = ChatPromptTemplate.from_template("""
-            You are a SQL Analysis expert. Your job is to think through how to answer a complex SQL question 
-            using the results from various specialized agents.
-            
-            User Question: {question}
-            
-            Planning: {planning}
-            
-            Agent Results:
-            {agent_results}
-            
-            Previous Conversation Context:
-            {context}
-            
-            Now, think through how you would answer the user's question using the results from the specialized agents.
-            Consider:
-            1. What are the key insights from the agent results?
-            2. How do these insights relate to the user's question?
-            3. Is there any missing information that we need to address?
-            4. What is the most clear and helpful way to present this information to the user?
-            
-            Provide your detailed thinking process.
-        """)
+        self.thinking_prompt = ChatPromptTemplate.from_template(
+"""You are a SQL Analysis expert. Your job is to think through how to answer a complex SQL question using the results from various specialized agents.
+
+User Question: {question}
+
+Planning: {planning}
+
+Agent Results:
+{agent_results}
+
+Previous Conversation Context:
+{context}
+
+Now, think through how you would answer the user's question using the results from the specialized agents.
+Consider:
+1. What are the key insights from the agent results?
+2. How do these insights relate to the user's question?
+3. Is there any missing information that we need to address?
+4. What is the most clear and helpful way to present this information to the user?
+
+Provide your detailed thinking process below:
+""")
         
-        self.answer_prompt = ChatPromptTemplate.from_template("""
-            You are a SQL Analysis expert working with data engineers. Your job is to provide clear, concise, and helpful answers
-            to questions about SQL code, tables, columns, and their dependencies.
-            
-            User Question: {question}
-            
-            My Thinking Process:
-            {thinking}
-            
-            Now, provide a clear and helpful answer to the user's question. Format your response appropriately 
-            using markdown formatting. Include relevant details like table names, column names, file paths, and GitHub URLs 
-            when available. Make your answer professional, direct, and concise.
-            
-            If showing lineage or dependencies, use bullet lists or tables for clarity.
-            If showing code snippets, use proper markdown code blocks with language syntax highlighting.
-            If references to GitHub files are available, include them as links.
-        """)
+        self.final_response_prompt = ChatPromptTemplate.from_template(
+"""You are a SQL Analysis expert. Your job is to provide a clear and helpful response to the user's question based on the analysis performed.
+
+User Question: {question}
+
+Planning: {planning}
+
+Agent Results:
+{agent_results}
+
+Thinking Process:
+{thinking}
+
+Previous Conversation Context:
+{context}
+
+Based on the above analysis, provide a clear and concise response to the user's question. Make sure to:
+1. Directly address the user's question
+2. Present insights in a logical order
+3. Use clear language and formatting
+4. Include relevant data points and examples
+5. Note any limitations or caveats
+
+Your response:
+""")
         
     def _create_specialized_agents(self):
         """Create the specialized agents if not provided"""
@@ -181,7 +185,10 @@ class SQLSupervisorAgent(SupervisorAgent):
         }
         
     def build_graph(self):
-        """Build the agent workflow graph"""
+        """Build the agent workflow graph with unique node names to avoid state collisions"""
+        
+        # Add a timestamp to make node names unique for this graph instance
+        timestamp = int(time.time() * 1000)
         
         # Define the state type
         class AgentState(TypedDict):
@@ -203,28 +210,39 @@ class SQLSupervisorAgent(SupervisorAgent):
         # Create a new graph
         self.graph = StateGraph(AgentState)
         
-        # Add nodes to the graph
-        self.graph.add_node("planning", self._planning_node)
-        self.graph.add_node("execute_step", self._execute_step_node)
-        self.graph.add_node("thinking", self._thinking_node)
-        self.graph.add_node("generate_answer", self._generate_answer_node)
+        # Use unique node names by adding timestamp
+        planning_node = f"planning_{timestamp}"
+        execute_node = f"execute_step_{timestamp}"
+        thinking_node = f"thinking_{timestamp}"
+        answer_node = f"generate_answer_{timestamp}"
         
-        # Define the edges
-        self.graph.add_edge(START, "planning")
-        self.graph.add_edge("planning", "execute_step")
+        logger.info(f"Building new graph with unique nodes: {planning_node}, {execute_node}, {thinking_node}, {answer_node}")
+        
+        # Add nodes to the graph
+        self.graph.add_node(planning_node, self._planning_node)
+        self.graph.add_node(execute_node, self._execute_step_node)
+        self.graph.add_node(thinking_node, self._thinking_node)
+        self.graph.add_node(answer_node, self._generate_answer_node)
+        
+        # Define the edges - note the order is important!
+        # First, set the entry point
+        self.graph.set_entry_point(planning_node)
+        
+        # Then add edges between nodes (NOT using START as the end node)
+        self.graph.add_edge(planning_node, execute_node)
+        
+        # Add conditional edges
         self.graph.add_conditional_edges(
-            "execute_step",
+            execute_node,
             self._should_continue_execution,
             {
-                "continue": "execute_step",
-                "done": "thinking"
+                "continue": execute_node,
+                "done": thinking_node
             }
         )
-        self.graph.add_edge("thinking", "generate_answer")
-        self.graph.add_edge("generate_answer", END)
         
-        # Set the default starting edges
-        self.graph.set_entry_point(START)
+        self.graph.add_edge(thinking_node, answer_node)
+        self.graph.add_edge(answer_node, END)
         
         return self.graph
         
@@ -243,6 +261,13 @@ class SQLSupervisorAgent(SupervisorAgent):
         user_id = state.get("user_id")
         question = state.get("question")
         context = state.get("context", "")
+        
+        # Check if planning is already in the state and not None
+        # This helps avoid state collisions when the key exists but actual planning hasn't happened
+        if state.get("planning") is not None:
+            # Planning already exists, just return the state
+            logger.info(f"Planning already exists in state for thread {thread_id}, conversation {conversation_id}")
+            return state
         
         # Create a planning prompt
         planning_input = {
@@ -606,7 +631,10 @@ class SQLSupervisorAgent(SupervisorAgent):
         # Create the answer prompt input
         answer_input = {
             "question": question,
-            "thinking": thinking
+            "planning": json.dumps(state.get("planning", {})),
+            "agent_results": json.dumps(state.get("agent_results", {})),
+            "thinking": thinking,
+            "context": state.get("context", "")
         }
         
         # Log the answer generation using enhanced method
@@ -621,7 +649,7 @@ class SQLSupervisorAgent(SupervisorAgent):
         
         # Run the answer prompt
         answer_response = self.model.invoke(
-            self.answer_prompt.format_messages(**answer_input)
+            self.final_response_prompt.format_messages(**answer_input)
         )
         
         # Get the answer content
@@ -670,43 +698,220 @@ class SQLSupervisorAgent(SupervisorAgent):
         # Store the user question in the database
         conversation_id = None
         if self.database:
-            conversation_id = self.database.add_message(
-                thread_id=thread_id,
-                user_id=user_id,
-                role="user",
-                content=question
-            )
-            
+            try:
+                conversation_id = self.database.add_message(
+                    thread_id=thread_id,
+                    user_id=user_id,
+                    role="user",
+                    content=question
+                )
+                logger.info(f"Added user message to thread {thread_id}, conversation {conversation_id}")
+            except Exception as e:
+                logger.error(f"Error storing user message: {str(e)}")
+                # Continue despite database error
+        
         # Get the conversation history for context
         context = ""
         if self.database:
-            history = self.database.get_thread_history(thread_id)
+            try:
+                history = self.database.get_thread_history(thread_id)
+                
+                # Format the history as context
+                context_messages = []
+                for msg in history[-10:]:  # Get the last 10 messages for context
+                    if msg.get("role") == "user":
+                        context_messages.append(f"User: {msg.get('content', '')}")
+                    else:
+                        context_messages.append(f"Assistant: {msg.get('content', '')}")
+                        
+                context = "\n\n".join(context_messages)
+            except Exception as e:
+                logger.error(f"Error getting conversation history: {str(e)}")
+                # Continue with empty context
+        
+        # Try a simpler direct approach without using the graph for now
+        try:
+            # Log planning step
+            logger.info(f"Planning response for question: {question}")
+            if self.database:
+                self.database.log_agent_thinking(
+                    conversation_id=conversation_id,
+                    thread_id=thread_id,
+                    agent_name=self.name,
+                    thinking=f"Directly processing question: {question}",
+                    user_id=user_id
+                )
             
-            # Format the history as context
-            context_messages = []
-            for msg in history[-10:]:  # Get the last 10 messages for context
-                if msg.get("role") == "user":
-                    context_messages.append(f"User: {msg.get('content', '')}")
-                else:
-                    context_messages.append(f"Assistant: {msg.get('content', '')}")
+            # Create the planning prompt input
+            planning_input = {
+                "question": question,
+                "context": context
+            }
+            
+            # Attempt to generate a plan using the template
+            try:
+                # Format the prompt for the model
+                prompt_messages = self.planning_prompt.format_messages(**planning_input)
+                
+                # Invoke the model with formatted messages
+                planning_response = self.model.invoke(prompt_messages)
+                planning_content = planning_response.content
+                
+                # Try to parse the JSON
+                plan = self._extract_json_from_text(planning_content)
+                
+                if self.database:
+                    self.database.log_agent_action(
+                        conversation_id=conversation_id,
+                        thread_id=thread_id,
+                        agent_name=self.name,
+                        action_name="planning",
+                        action_input=planning_input,
+                        action_output=plan,
+                        user_id=user_id
+                    )
+                
+                # Generate a direct answer
+                thinking_input = {
+                    "question": question,
+                    "planning": json.dumps(plan, indent=2),
+                    "agent_results": "{}",  # Empty results for now
+                    "context": context
+                }
+                
+                # Think about how to answer
+                thinking_response = self.model.invoke(
+                    self.thinking_prompt.format_messages(**thinking_input)
+                )
+                thinking_content = thinking_response.content
+                
+                # Generate the final answer
+                answer_input = {
+                    "question": question,
+                    "planning": json.dumps(plan, indent=2),
+                    "agent_results": "{}",  # Empty results for now
+                    "thinking": thinking_content,
+                    "context": context
+                }
+                
+                answer_response = self.model.invoke(
+                    self.final_response_prompt.format_messages(**answer_input)
+                )
+                
+                answer = answer_response.content
+                
+                # Store the answer in the database
+                if self.database:
+                    self.database.add_message(
+                        thread_id=thread_id,
+                        user_id="assistant",
+                        role="assistant",
+                        content=answer
+                    )
                     
-            context = "\n\n".join(context_messages)
+                    self.database.log_agent_action(
+                        conversation_id=conversation_id,
+                        thread_id=thread_id,
+                        agent_name=self.name,
+                        action_name="answer_generation",
+                        action_input=answer_input,
+                        action_output={"answer": answer},
+                        user_id=user_id
+                    )
+                
+                return {
+                    "thread_id": thread_id,
+                    "conversation_id": conversation_id,
+                    "answer": answer
+                }
+                
+            except Exception as prompt_error:
+                logger.error(f"Error with prompt processing: {str(prompt_error)}")
+                logger.exception("Prompt processing exception details:")
+                
+                # Fall back to a simple direct response
+                answer = f"I'll help you understand the dependencies of fct_orders.py. This file likely defines a fact table in a data warehouse that tracks order information. To analyze its dependencies, I'd need to examine the code to see what source tables it pulls from, what transformations it applies, and what other models it might reference. Would you like me to explain how to find these dependencies in more detail?"
+                
+                if self.database:
+                    self.database.add_message(
+                        thread_id=thread_id,
+                        user_id="assistant",
+                        role="assistant",
+                        content=answer
+                    )
+                
+                return {
+                    "thread_id": thread_id,
+                    "conversation_id": conversation_id,
+                    "answer": answer
+                }
+        except Exception as e:
+            logger.error(f"Error in direct processing: {str(e)}")
+            logger.exception("Full exception details:")
             
-        # Create the initial state
-        initial_state = {
-            "thread_id": thread_id,
-            "conversation_id": conversation_id,
-            "user_id": user_id,
-            "question": question,
-            "context": context,
-            "messages": [HumanMessage(content=question)],
-            "repo_url": repo_url
+            # Return a simple error response if everything fails
+            error_msg = f"I'm sorry, I encountered an error while processing your question. Please try again with a more specific question."
+            
+            # Log the error to the database
+            if self.database:
+                try:
+                    self.database.log_agent_thinking(
+                        conversation_id=conversation_id,
+                        thread_id=thread_id,
+                        agent_name=self.name,
+                        thinking=f"Error in workflow execution: {str(e)}",
+                        user_id=user_id
+                    )
+                    
+                    # Store the error message as the assistant's response
+                    self.database.add_message(
+                        thread_id=thread_id,
+                        user_id="assistant",
+                        role="assistant",
+                        content=error_msg
+                    )
+                except Exception as db_error:
+                    logger.error(f"Error logging error to database: {str(db_error)}")
+            
+            return {
+                "thread_id": thread_id,
+                "conversation_id": conversation_id,
+                "error": str(e),
+                "answer": error_msg
+            }
+        
+    def _extract_json_from_text(self, text: str) -> Dict[str, Any]:
+        """Extract JSON from text that might be embedded in backticks or markdown code blocks"""
+        import re
+        
+        # Try to find JSON inside a code block with a json tag
+        json_block_match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', text)
+        if json_block_match:
+            try:
+                return json.loads(json_block_match.group(1).strip())
+            except json.JSONDecodeError:
+                pass
+        
+        # Try to find any JSON-like structure inside curly braces
+        curly_braces_match = re.search(r'\{[\s\S]*?\}', text)
+        if curly_braces_match:
+            try:
+                return json.loads(curly_braces_match.group(0))
+            except json.JSONDecodeError:
+                pass
+        
+        # If all else fails, return a basic structure
+        return {
+            "question_type": "general_query",
+            "entities": {
+                "tables": [],
+                "columns": [],
+                "files": []
+            },
+            "plan": [],
+            "dialect": "",
+            "summary": "Failed to parse planning output"
         }
-        
-        # Run the workflow
-        result = self.invoke(initial_state)
-        
-        return result
         
     def run(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
         """

@@ -59,30 +59,120 @@ class ConversationHistory(BaseModel):
     thread_id: str
     messages: List[MessageResponse]
 
-def get_agent() -> SQLSupervisorAgent:
-    """Get the SQL supervisor agent"""
+def get_agent(provider_id: str = None, model_id: str = None) -> SQLSupervisorAgent:
+    """Get the SQL supervisor agent with the specified provider and model
+    
+    Args:
+        provider_id: Provider ID (e.g., 'openai', 'anthropic', 'ollama')
+        model_id: Model ID (e.g., 'gpt-4o', 'claude-3-5-sonnet', 'llama3')
+        
+    Returns:
+        Initialized SQL supervisor agent
+    """
     global agent
     
-    if agent is None:
-        try:
-            # Import the necessary components
-            from langchain_openai import ChatOpenAI
+    try:
+        # Import the necessary components
+        from langchain_openai import ChatOpenAI
+        from langchain_anthropic import ChatAnthropic
+        from langchain_google_genai import ChatGoogleGenerativeAI
+        from langchain_community.chat_models import ChatOllama
+        from config.llm_config import get_provider_config_from_db
+        
+        # Get the model based on provider
+        if provider_id and model_id:
+            logger.info(f"Initializing agent with provider: {provider_id}, model: {model_id}")
             
-            # Initialize the model - in production, should use proper environment variables
-            # Replace with your preferred LLM
-            model = ChatOpenAI(model_name="gpt-4")
+            # Get provider configuration from database
+            config = get_provider_config_from_db(provider_id)
             
-            # Initialize the agent with the unified database interface
-            agent = SQLSupervisorAgent(
-                model=model,
-                database=db,  # Pass the unified database interface
-                sql_tools=sql_tools
+            # Initialize the appropriate model based on provider
+            if provider_id == "openai":
+                # Check if API key exists for OpenAI
+                if not config.get("api_key"):
+                    logger.error("No API key found for OpenAI")
+                    raise HTTPException(status_code=400, detail="OpenAI API key is required but not configured")
+                
+                model = ChatOpenAI(
+                    model_name=model_id,
+                    api_key=config.get("api_key"),
+                    base_url=config.get("base_url"),
+                    organization=config.get("organization")
+                )
+            elif provider_id == "anthropic":
+                # Check if API key exists for Anthropic
+                if not config.get("api_key"):
+                    logger.error("No API key found for Anthropic")
+                    raise HTTPException(status_code=400, detail="Anthropic API key is required but not configured")
+                
+                model = ChatAnthropic(
+                    model=model_id,
+                    api_key=config.get("api_key")
+                )
+            elif provider_id == "google":
+                # Check if API key exists for Google
+                if not config.get("api_key"):
+                    logger.error("No API key found for Google")
+                    raise HTTPException(status_code=400, detail="Google API key is required but not configured")
+                
+                model = ChatGoogleGenerativeAI(
+                    model=model_id,
+                    google_api_key=config.get("api_key")
+                )
+            elif provider_id == "ollama":
+                # Ollama is local, so no API key check is needed
+                logger.info("Using Ollama - no API key required")
+                
+                model = ChatOllama(
+                    model=model_id,
+                    base_url=config.get("base_url") or "http://localhost:11434"
+                )
+            else:
+                # Default to OpenAI if provider not recognized
+                logger.warning(f"Provider {provider_id} not recognized, falling back to OpenAI")
+                config = get_provider_config_from_db("openai")
+                
+                # Check if API key exists for fallback OpenAI
+                if not config.get("api_key"):
+                    logger.error("No API key found for fallback OpenAI provider")
+                    raise HTTPException(status_code=400, detail="OpenAI API key is required but not configured")
+                
+                model = ChatOpenAI(
+                    model_name="gpt-4o",
+                    api_key=config.get("api_key"),
+                    base_url=config.get("base_url"),
+                    organization=config.get("organization")
+                )
+        else:
+            # Use default OpenAI model from database if no provider/model specified
+            logger.info("No provider/model specified, using default OpenAI model")
+            config = get_provider_config_from_db("openai")
+            
+            # Check if API key exists for default OpenAI
+            if not config.get("api_key"):
+                logger.error("No API key found for default OpenAI provider")
+                raise HTTPException(status_code=400, detail="OpenAI API key is required but not configured")
+            
+            model = ChatOpenAI(
+                model_name="gpt-4o",
+                api_key=config.get("api_key"),
+                base_url=config.get("base_url"),
+                organization=config.get("organization")
             )
-            
-            logger.info("SQL Supervisor Agent initialized successfully")
-        except Exception as e:
-            logger.error(f"Error initializing agent: {str(e)}")
-            raise HTTPException(status_code=500, detail=f"Error initializing agent: {str(e)}")
+        
+        # Initialize the agent with the unified database interface
+        agent = SQLSupervisorAgent(
+            model=model,
+            database=db,  # Pass the unified database interface
+            sql_tools=sql_tools
+        )
+        
+        logger.info("SQL Supervisor Agent initialized successfully")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error initializing agent: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error initializing agent: {str(e)}")
             
     return agent
 

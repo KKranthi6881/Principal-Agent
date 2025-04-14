@@ -104,6 +104,7 @@ import { vscDarkPlus, oneDark } from 'react-syntax-highlighter/dist/cjs/styles/p
 import SyntaxHighlighter from 'react-syntax-highlighter';
 import { v4 as uuidv4 } from 'uuid';
 import { LineageVisualizer } from '../components/LineageVisualizer';
+import chatApi from '../api/chatApi';
 
 // Error boundary component to catch rendering errors
 class ErrorBoundary extends Component {
@@ -2432,56 +2433,96 @@ const ChatPage = () => {
   useEffect(() => {
     const fetchModels = async () => {
       try {
-        console.log("Fetching models from backend...");
+        console.log("Fetching active models from backend...");
         
-        // Change the URL from /models/models to just /models
-        const response = await fetch('/models');
+        // Fetch models from the active models API with correct path
+        const response = await fetch('/models/active');
         
         if (!response.ok) {
+          // If we get a 404, try the corrected endpoint URL
+          if (response.status === 404) {
+            console.log("First endpoint returned 404, trying alternative path...");
+            
+            const altResponse = await fetch('/api/models/active');
+            
+            if (!altResponse.ok) {
+              throw new Error(`API returned ${altResponse.status}: ${altResponse.statusText}`);
+            }
+            
+            const data = await altResponse.json();
+            console.log("Active models data received from alternative path:", data);
+            
+            // Set all models
+            setAllModels(data.models || []);
+            
+            // Set providers directly from the response
+            const providersList = data.providers || [];
+            console.log("Setting providers state with:", providersList);
+            setProviders(providersList);
+            
+            // Handle provider/model selection as before
+            processModelData(data, providersList);
+            return;
+          }
+          
           throw new Error(`API returned ${response.status}: ${response.statusText}`);
         }
         
         const data = await response.json();
-        console.log("Models data received:", data);
-        setAllModels(data);
+        console.log("Active models data received:", data);
         
-        // Group models by provider
-        const providerMap = {};
-        data.forEach(model => {
-          if (!providerMap[model.provider_id]) {
-            providerMap[model.provider_id] = {
-              id: model.provider_id,
-              name: model.provider_name,
-              models: []
-            };
-          }
-          providerMap[model.provider_id].models.push(model);
-        });
+        // Set all models
+        setAllModels(data.models || []);
         
-        console.log("Provider map:", providerMap);
-        const providersList = Object.values(providerMap);
+        // Set providers directly from the response
+        const providersList = data.providers || [];
         console.log("Setting providers state with:", providersList);
         setProviders(providersList);
         
-        // Set default models for OpenAI provider or use the first provider if OpenAI isn't available
-        const openAIModels = data.filter(model => model.provider_id === 'openai');
-        console.log("OpenAI models:", openAIModels);
-        
-        if (openAIModels.length > 0) {
-          console.log("Setting OpenAI as default provider");
-          setModelsForProvider(openAIModels);
-          setSelectedModel(openAIModels[0].model_id);
-        } else if (data.length > 0) {
-          const firstProviderId = data[0].provider_id;
-          console.log("Using first available provider:", firstProviderId);
-          const firstProviderModels = data.filter(model => model.provider_id === firstProviderId);
-          console.log("First provider models:", firstProviderModels);
-          setSelectedProvider(firstProviderId);
-          setModelsForProvider(firstProviderModels);
-          setSelectedModel(firstProviderModels[0].model_id);
-        }
+        // Process the model data and set default selections
+        processModelData(data, providersList);
       } catch (error) {
         console.error('Error fetching models:', error);
+        toast({
+          title: "Error loading models",
+          description: error.message,
+          status: "error",
+          duration: 5000,
+          isClosable: true,
+        });
+      }
+    };
+    
+    // Helper function to process model data and set default selections
+    const processModelData = (data, providersList) => {
+      // Check if OpenAI is available and active
+      const openaiProvider = providersList.find(p => p.id === 'openai');
+      if (openaiProvider && openaiProvider.models.length > 0) {
+        console.log("Setting OpenAI as default provider");
+        setSelectedProvider('openai');
+        setModelsForProvider(openaiProvider.models);
+        
+        // Find the gpt-4o model or use the first available model
+        const gpt4o = openaiProvider.models.find(m => m.model_id === 'gpt-4o');
+        setSelectedModel(gpt4o ? gpt4o.model_id : openaiProvider.models[0].model_id);
+      } 
+      // Otherwise, use the first available provider
+      else if (providersList.length > 0) {
+        const firstProvider = providersList[0];
+        console.log("Using first available provider:", firstProvider.id);
+        setSelectedProvider(firstProvider.id);
+        setModelsForProvider(firstProvider.models);
+        setSelectedModel(firstProvider.models[0].model_id);
+      } else {
+        console.warn("No active providers found");
+        // Show a toast notification to let the user know they need to configure a provider
+        toast({
+          title: "No active LLM providers",
+          description: "Please configure an LLM provider in the API Keys section",
+          status: "warning",
+          duration: 5000,
+          isClosable: true,
+        });
       }
     };
     
@@ -2491,21 +2532,26 @@ const ChatPage = () => {
   // Add this effect to update available models when the provider changes
   useEffect(() => {
     console.log("Provider changed to:", selectedProvider);
-    console.log("All models:", allModels);
     
-    const models = allModels.filter(model => model.provider_id === selectedProvider);
-    console.log("Filtered models for provider:", models);
+    // Find the selected provider in the providers state
+    const selectedProviderObj = providers.find(p => p.id === selectedProvider);
     
-    setModelsForProvider(models);
-    
-    // If there are models for the selected provider, select the first one
-    if (models.length > 0) {
-      console.log("Setting selected model to:", models[0].model_id);
-      setSelectedModel(models[0].model_id);
+    if (selectedProviderObj) {
+      console.log("Selected provider models:", selectedProviderObj.models);
+      setModelsForProvider(selectedProviderObj.models);
+      
+      // If there are models for the selected provider, select the first one
+      if (selectedProviderObj.models.length > 0) {
+        console.log("Setting selected model to:", selectedProviderObj.models[0].model_id);
+        setSelectedModel(selectedProviderObj.models[0].model_id);
+      } else {
+        console.log("No models available for this provider");
+      }
     } else {
-      console.log("No models available for this provider");
+      console.log("Selected provider not found");
+      setModelsForProvider([]);
     }
-  }, [selectedProvider, allModels]);
+  }, [selectedProvider, providers]);
 
   // Send message and get response from data architect
   const handleSubmit = async (e) => {
@@ -2532,26 +2578,15 @@ const ChatPage = () => {
       console.log("Sending request to backend with input:", input);
       console.log("Using provider:", selectedProvider, "and model:", selectedModel);
       
-      // Use the Data Architect agent endpoint
-      const response = await fetch('/api/architect/analyze/', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({ 
-          query: input,
-          conversation_id: currentConversationId,
-          thread_id: currentConversationId,
-          provider: selectedProvider,
-          model: selectedModel
-        })
+      // Use the analyzeWithArchitect function from chatApi.js
+      const data = await chatApi.analyzeWithArchitect({
+        query: input,
+        conversation_id: currentConversationId,
+        thread_id: currentConversationId,
+        provider: selectedProvider,
+        model: selectedModel
       });
       
-      if (!response.ok) {
-        throw new Error(`API error: ${response.status}`);
-      }
-      
-      const data = await response.json();
       console.log("Data Architect response received:", data);
       
       // Create a conversation ID if needed

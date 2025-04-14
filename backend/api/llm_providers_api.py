@@ -8,35 +8,15 @@ from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel, Field
 from typing import List, Dict, Any, Optional, Union
 import sqlite3
-from cryptography.fernet import Fernet
-import base64
-from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
-from config.llm_config import get_provider_config
+from config.llm_config import (
+    get_db_connection, encrypt_api_key, decrypt_api_key, get_provider_config
+)
 
 router = APIRouter(prefix="/api/llm", tags=["llm"])
 
 # Path to metadata database
 METADATA_DB = os.path.join('database', 'metadata.db')
-
-# Encryption key generation (in production, this should be properly secured)
-def get_encryption_key():
-    # Use environment variable or a fixed salt (not ideal for production)
-    salt = os.environ.get("API_KEY_SALT", "data_architect_salt").encode()
-    kdf = PBKDF2HMAC(
-        algorithm=hashes.SHA256(),
-        length=32,
-        salt=salt,
-        iterations=100000,
-    )
-    key = base64.urlsafe_b64encode(kdf.derive(os.environ.get("API_KEY_SECRET", "data_architect_secret").encode()))
-    return key
-
-# Create Fernet cipher using the key
-def get_cipher():
-    key = get_encryption_key()
-    return Fernet(key)
 
 # Models for request/response
 class ProviderInfo(BaseModel):
@@ -84,27 +64,6 @@ class GetProvidersResponse(BaseModel):
     """Get providers response model"""
     providers: List[ProviderInfo]
     configs: List[ProviderConfigResponse]
-
-# Helper functions
-def get_db_connection():
-    """Get a connection to the metadata database"""
-    conn = sqlite3.connect(METADATA_DB)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-def encrypt_api_key(api_key: str) -> str:
-    """Encrypt an API key"""
-    if not api_key:
-        return None
-    cipher = get_cipher()
-    return cipher.encrypt(api_key.encode()).decode()
-
-def decrypt_api_key(encrypted_api_key: str) -> str:
-    """Decrypt an API key"""
-    if not encrypted_api_key:
-        return None
-    cipher = get_cipher()
-    return cipher.decrypt(encrypted_api_key.encode()).decode()
 
 # API endpoints
 @router.get("/providers", response_model=GetProvidersResponse)

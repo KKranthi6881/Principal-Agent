@@ -10,6 +10,7 @@ from langchain_core.messages import BaseMessage
 from langgraph.graph import StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import Checkpointer
+from datetime import datetime
 
 from .agent import Agent
 
@@ -71,9 +72,20 @@ class SupervisorAgent(Agent):
         Compile the agent workflow graph
         """
         if not self.graph:
+            logger.info(f"Building new workflow graph for {self.name}")
             self.build_graph()
+            
+        logger.info(f"Compiling workflow graph for {self.name}")
         self.compiled_graph = self.graph.compile(checkpointer=self.checkpointer)
         return self.compiled_graph
+        
+    def reset_graph(self):
+        """
+        Reset the graph and compiled_graph attributes
+        """
+        logger.info(f"Resetting workflow graph for {self.name}")
+        self.graph = None
+        self.compiled_graph = None
         
     async def ainvoke(self, input_data: Dict[str, Any], **kwargs):
         """
@@ -86,12 +98,31 @@ class SupervisorAgent(Agent):
         Returns:
             Response from the agent workflow
         """
-        if not self.compiled_graph:
-            self.compile_graph()
+        conversation_id = input_data.get("conversation_id", "unknown")
+        thread_id = input_data.get("thread_id", "unknown")
+        
+        # Ensure we have a fresh graph
+        logger.info(f"Ensuring fresh graph for thread {thread_id}, conversation {conversation_id}")
+        
+        # Add some entropy to each invocation to avoid state collisions
+        input_data["_invoke_id"] = f"{conversation_id}_{thread_id}_{int(datetime.now().timestamp()*1000)}"
+        
+        # Create a new compiled graph for each invocation
+        try:
+            if self.compiled_graph is None:
+                logger.info(f"Compiling graph for {self.name} with fresh state")
+                self.compile_graph()
             
-        response = await self.compiled_graph.ainvoke(input_data, **kwargs)
-        self.response = response
-        return response
+            # Execute the workflow asynchronously
+            logger.info(f"Asynchronously invoking {self.name} workflow")
+            response = await self.compiled_graph.ainvoke(input_data, **kwargs)
+            self.response = response
+            logger.info(f"Async workflow execution completed successfully")
+            return response
+        except Exception as e:
+            logger.error(f"Error in ainvoke: {str(e)}")
+            logger.exception("Ainvoke exception details:")
+            raise
         
     def invoke(self, input_data: Dict[str, Any], **kwargs):
         """
@@ -104,12 +135,31 @@ class SupervisorAgent(Agent):
         Returns:
             Response from the agent workflow
         """
-        if not self.compiled_graph:
-            self.compile_graph()
+        conversation_id = input_data.get("conversation_id", "unknown")
+        thread_id = input_data.get("thread_id", "unknown")
+        
+        # Ensure we have a fresh graph
+        logger.info(f"Ensuring fresh graph for thread {thread_id}, conversation {conversation_id}")
+        
+        # Add some entropy to each invocation to avoid state collisions
+        input_data["_invoke_id"] = f"{conversation_id}_{thread_id}_{int(datetime.now().timestamp()*1000)}"
+        
+        # Create a new compiled graph for each invocation
+        try:
+            if self.compiled_graph is None:
+                logger.info(f"Compiling graph for {self.name} with fresh state")
+                self.compile_graph()
             
-        response = self.compiled_graph.invoke(input_data, **kwargs)
-        self.response = response
-        return response
+            # Execute the workflow
+            logger.info(f"Invoking {self.name} workflow")
+            response = self.compiled_graph.invoke(input_data, **kwargs)
+            self.response = response
+            logger.info(f"Workflow execution completed successfully")
+            return response
+        except Exception as e:
+            logger.error(f"Error in invoke: {str(e)}")
+            logger.exception("Invoke exception details:")
+            raise
         
     def run(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
         """
