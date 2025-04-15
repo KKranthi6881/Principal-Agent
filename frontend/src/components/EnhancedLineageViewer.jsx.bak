@@ -1,0 +1,450 @@
+import React, { useState, useEffect, useRef } from 'react';
+import {
+  Box,
+  HStack,
+  IconButton,
+  Tooltip,
+  Slider,
+  SliderTrack,
+  SliderFilledTrack,
+  SliderThumb,
+  Text,
+  Badge,
+  Flex,
+  useColorModeValue
+} from '@chakra-ui/react';
+import { 
+  IoExpand, 
+  IoContract, 
+  IoResize, 
+  IoRefresh,
+  IoArrowsMaximize,
+  IoArrowsHorizontal,
+  IoArrowsVertical,
+  IoDownload
+} from 'react-icons/io5';
+import { 
+  TbZoomIn, 
+  TbZoomOut, 
+  TbMapPin, 
+  TbArrowsMaximize 
+} from 'react-icons/tb';
+import { LineageGraph } from './LineageGraph';
+
+// Simple error boundary for rendering LineageGraph
+export class LineageErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+
+  static getDerivedStateFromError(error) {
+    return { hasError: true, error };
+  }
+
+  componentDidCatch(error, errorInfo) {
+    console.error("Lineage graph rendering error:", error, errorInfo);
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <Box padding={4} textAlign="center">
+          <Text color="red.500">Error rendering lineage graph.</Text>
+          <Text fontSize="sm" color="gray.500" mt={2}>
+            {this.state.error?.message || "Please try again later."}
+          </Text>
+        </Box>
+      );
+    }
+
+    return this.props.children;
+  }
+}
+
+const EnhancedLineageViewer = ({ data, isMaximized = false, onMaximizeToggle }) => {
+  // Safety check to ensure data exists
+  if (!data || !data.models || !data.edges) {
+    return (
+      <Box 
+        height="100%" 
+        width="100%" 
+        display="flex" 
+        alignItems="center" 
+        justifyContent="center"
+        bg="gray.50"
+      >
+        <Text color="gray.500">No lineage data available to display</Text>
+      </Box>
+    );
+  }
+
+  const [scale, setScale] = useState(1);
+  const [offset, setOffset] = useState({ x: 0, y: 0 });
+  const [isPanningMode, setIsPanningMode] = useState(false);
+  const [isMouseDown, setIsMouseDown] = useState(false);
+  const [lastMousePosition, setLastMousePosition] = useState({ x: 0, y: 0 });
+  const [horizontalSliderValue, setHorizontalSliderValue] = useState(0);
+  const [verticalSliderValue, setVerticalSliderValue] = useState(0);
+  const containerRef = useRef(null);
+  
+  // Add info about model counts - with safety checks
+  const modelCounts = {
+    total: data?.models?.length || 0,
+    byType: data?.models?.reduce((acc, model) => {
+      if (model && model.type) {
+        acc[model.type] = (acc[model.type] || 0) + 1;
+      }
+      return acc;
+    }, {}) || {}
+  };
+  
+  // Reset view when data changes
+  useEffect(() => {
+    if (data) {
+      resetView();
+    }
+  }, [data]);
+  
+  // Reset view on manual request
+  const resetView = () => {
+    setScale(1);
+    setOffset({ x: 0, y: 0 });
+    setHorizontalSliderValue(0);
+    setVerticalSliderValue(0);
+  };
+  
+  // Handle zoom in
+  const handleZoomIn = () => {
+    setScale(prevScale => Math.min(prevScale * 1.2, 3));
+  };
+  
+  // Handle zoom out
+  const handleZoomOut = () => {
+    setScale(prevScale => Math.max(prevScale / 1.2, 0.4));
+  };
+  
+  // Toggle panning mode
+  const togglePanningMode = () => {
+    setIsPanningMode(!isPanningMode);
+  };
+  
+  // Handle graph panning with mouse
+  const handleGraphPanning = (e) => {
+    if (!isPanningMode) return;
+    
+    e.preventDefault();
+    setIsMouseDown(true);
+    setLastMousePosition({
+      x: e.clientX,
+      y: e.clientY
+    });
+    
+    const handleMouseMove = (moveEvent) => {
+      if (!isMouseDown) return;
+      
+      const dx = moveEvent.clientX - lastMousePosition.x;
+      const dy = moveEvent.clientY - lastMousePosition.y;
+      
+      setOffset(prev => ({
+        x: prev.x + dx,
+        y: prev.y + dy
+      }));
+      
+      setLastMousePosition({
+        x: moveEvent.clientX,
+        y: moveEvent.clientY
+      });
+    };
+    
+    const handleMouseUp = () => {
+      setIsMouseDown(false);
+      
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+    };
+    
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', handleMouseUp);
+  };
+  
+  // Handle horizontal scroll with slider
+  const handleHorizontalScroll = (val) => {
+    const delta = val - horizontalSliderValue;
+    setOffset(prev => ({ 
+      x: prev.x + delta * 5, 
+      y: prev.y 
+    }));
+    setHorizontalSliderValue(val);
+  };
+  
+  // Handle vertical scroll with slider
+  const handleVerticalScroll = (val) => {
+    const delta = val - verticalSliderValue;
+    setOffset(prev => ({ 
+      x: prev.x, 
+      y: prev.y + delta * 5
+    }));
+    setVerticalSliderValue(val);
+  };
+  
+  // Function to reset sliders after they're released
+  const resetSliders = () => {
+    setHorizontalSliderValue(0);
+    setVerticalSliderValue(0);
+  };
+  
+  // Function to export lineage as PNG
+  const exportAsPNG = () => {
+    if (!containerRef.current) return;
+    
+    try {
+      // Find SVG element in the container
+      const svgElement = containerRef.current.querySelector('svg');
+      if (!svgElement) {
+        console.error('No SVG element found for export');
+        return;
+      }
+      
+      // Create a canvas
+      const canvas = document.createElement('canvas');
+      const ctx = canvas.getContext('2d');
+      
+      // Set dimensions based on the SVG
+      const svgRect = svgElement.getBoundingClientRect();
+      canvas.width = svgRect.width;
+      canvas.height = svgRect.height;
+      
+      // Draw white background
+      ctx.fillStyle = 'white';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      
+      // Convert SVG to data URL
+      const svgData = new XMLSerializer().serializeToString(svgElement);
+      const img = new Image();
+      
+      img.onload = () => {
+        ctx.drawImage(img, 0, 0);
+        
+        // Create download link
+        const a = document.createElement('a');
+        a.download = 'data-lineage.png';
+        a.href = canvas.toDataURL('image/png');
+        a.click();
+      };
+      
+      // Handle SVG image source
+      const encodedSvgData = encodeURIComponent(svgData);
+      img.src = `data:image/svg+xml;charset=utf-8,${encodedSvgData}`;
+      
+    } catch (error) {
+      console.error('Error exporting lineage as PNG:', error);
+    }
+  };
+  
+  // Background color based on color mode
+  const bgColor = useColorModeValue('white', 'gray.800');
+  const borderColor = useColorModeValue('gray.200', 'gray.700');
+  
+  return (
+    <Box position="relative" height="100%" width="100%">
+      {/* Controls overlay */}
+      <Flex 
+        position="absolute" 
+        top={2} 
+        left={2} 
+        zIndex={10} 
+        direction="column"
+        bg={bgColor}
+        borderWidth="1px"
+        borderColor={borderColor}
+        rounded="md"
+        shadow="md"
+        p={2}
+        opacity={0.9}
+        _hover={{ opacity: 1 }}
+        maxWidth="200px"
+      >
+        {/* Row 1: Zoom and Pan */}
+        <HStack spacing={1} mb={2}>
+          <Tooltip label="Zoom Out" placement="top">
+            <IconButton
+              size="sm"
+              icon={<TbZoomOut />}
+              onClick={handleZoomOut}
+              aria-label="Zoom Out"
+              variant="ghost"
+            />
+          </Tooltip>
+          
+          <Badge colorScheme="blue" variant="subtle" px={2}>
+            {Math.round(scale * 100)}%
+          </Badge>
+          
+          <Tooltip label="Zoom In" placement="top">
+            <IconButton
+              size="sm"
+              icon={<TbZoomIn />}
+              onClick={handleZoomIn}
+              aria-label="Zoom In"
+              variant="ghost"
+            />
+          </Tooltip>
+          
+          <Tooltip label={isPanningMode ? "Exit Pan Mode" : "Enter Pan Mode"} placement="top">
+            <IconButton
+              size="sm"
+              icon={<TbMapPin />}
+              onClick={togglePanningMode}
+              aria-label="Pan Mode"
+              colorScheme={isPanningMode ? "purple" : "gray"}
+              variant={isPanningMode ? "solid" : "ghost"}
+            />
+          </Tooltip>
+        </HStack>
+        
+        {/* Row 2: View Controls */}
+        <HStack spacing={1} mb={3}>
+          <Tooltip label="Reset View" placement="top">
+            <IconButton
+              size="sm"
+              icon={<IoRefresh />}
+              onClick={resetView}
+              aria-label="Reset View"
+              variant="ghost"
+            />
+          </Tooltip>
+          
+          <Tooltip label="Fit to View" placement="top">
+            <IconButton
+              size="sm"
+              icon={<TbArrowsMaximize />}
+              onClick={resetView}
+              aria-label="Fit to View"
+              variant="ghost"
+            />
+          </Tooltip>
+          
+          <Tooltip label="Export as PNG" placement="top">
+            <IconButton
+              size="sm"
+              icon={<IoDownload />}
+              onClick={exportAsPNG}
+              aria-label="Export"
+              variant="ghost"
+            />
+          </Tooltip>
+          
+          <Tooltip label={isMaximized ? "Minimize" : "Maximize"} placement="top">
+            <IconButton
+              size="sm"
+              icon={isMaximized ? <IoContract /> : <IoExpand />}
+              onClick={onMaximizeToggle}
+              aria-label={isMaximized ? "Minimize" : "Maximize"}
+              variant="ghost"
+            />
+          </Tooltip>
+        </HStack>
+        
+        {/* Row 3: Horizontal Scroll Slider */}
+        <Box mb={2}>
+          <Text fontSize="xs" mb={1}>Horizontal Position</Text>
+          <Slider 
+            min={-100} 
+            max={100} 
+            step={5}
+            value={horizontalSliderValue}
+            onChange={handleHorizontalScroll}
+            onChangeEnd={resetSliders}
+            colorScheme="blue"
+            size="sm"
+          >
+            <SliderTrack>
+              <SliderFilledTrack />
+            </SliderTrack>
+            <SliderThumb boxSize={3} />
+          </Slider>
+        </Box>
+        
+        {/* Row 4: Vertical Scroll Slider */}
+        <Box>
+          <Text fontSize="xs" mb={1}>Vertical Position</Text>
+          <Slider 
+            min={-100} 
+            max={100} 
+            step={5}
+            value={verticalSliderValue}
+            onChange={handleVerticalScroll}
+            onChangeEnd={resetSliders}
+            colorScheme="blue"
+            size="sm"
+          >
+            <SliderTrack>
+              <SliderFilledTrack />
+            </SliderTrack>
+            <SliderThumb boxSize={3} />
+          </Slider>
+        </Box>
+        
+        {/* Stats */}
+        <Box mt={2} fontSize="xs">
+          <HStack>
+            <Text fontWeight="bold">Models:</Text>
+            <Badge colorScheme="blue">{modelCounts.total}</Badge>
+          </HStack>
+          <HStack mt={1} flexWrap="wrap">
+            {Object.entries(modelCounts.byType).map(([type, count]) => (
+              <Badge 
+                key={type} 
+                variant="outline" 
+                colorScheme={
+                  type === 'staging' ? 'blue' : 
+                  type === 'intermediate' ? 'purple' : 
+                  type === 'mart' ? 'green' : 
+                  type === 'source' ? 'orange' : 'gray'
+                }
+                size="sm"
+              >
+                {type}: {count}
+              </Badge>
+            ))}
+          </HStack>
+        </Box>
+      </Flex>
+    
+      {/* Lineage container with pan and zoom support */}
+      <Box 
+        ref={containerRef}
+        position="relative"
+        height="100%"
+        width="100%"
+        overflow="hidden"
+        onMouseDown={isPanningMode ? handleGraphPanning : undefined}
+        cursor={isPanningMode ? (isMouseDown ? "grabbing" : "grab") : "default"}
+      >
+        <Box
+          position="absolute"
+          top="0"
+          left="0"
+          width="100%"
+          height="100%"
+          style={{
+            transform: `translate(${offset.x}px, ${offset.y}px) scale(${scale})`,
+            transformOrigin: '50% 50%',
+            transition: isMouseDown ? 'none' : 'transform 0.2s ease'
+          }}
+        >
+          {data && (
+            <React.Suspense fallback={<Text>Loading lineage diagram...</Text>}>
+              <LineageErrorBoundary>
+                <LineageGraph data={data} />
+              </LineageErrorBoundary>
+            </React.Suspense>
+          )}
+        </Box>
+      </Box>
+    </Box>
+  );
+};
+
+export default EnhancedLineageViewer; 

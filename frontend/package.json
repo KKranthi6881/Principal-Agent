@@ -15,6 +15,9 @@
     "@emotion/react": "^11.11.3",
     "@emotion/styled": "^11.11.0",
     "axios": "^1.8.1",
+    "cytoscape": "^3.31.2",
+    "cytoscape-dagre": "^2.5.0",
+    "cytoscape-popper": "^4.0.1",
     "d3": "^7.9.0",
     "diff": "^7.0.0",
     "framer-motion": "^11.0.5",
@@ -26,6 +29,7 @@
     "react-syntax-highlighter": "^15.5.0",
     "remark-gfm": "^4.0.1",
     "styled-components": "^6.1.16",
+    "tippy.js": "^6.3.7",
     "uuid": "^9.0.1"
   },
   "devDependencies": {

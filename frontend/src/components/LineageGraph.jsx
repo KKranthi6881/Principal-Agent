@@ -51,7 +51,7 @@ import { MdKeyboardArrowDown, MdKeyboardArrowRight } from 'react-icons/md';
 import { TbArrowsRightLeft, TbArrowsHorizontal, TbArrowsVertical, TbZoomIn, TbZoomOut, TbArrowBack, TbArrowsMaximize, TbTable, TbMapPin, TbMaximize, TbMinimize } from 'react-icons/tb';
 import { FiArrowLeft, FiArrowRight } from 'react-icons/fi';
 
-export const LineageGraph = ({ data }) => {
+export const LineageGraph = ({ data, width, height }) => {
   // Add error boundary state
   const [hasError, setHasError] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
@@ -1679,8 +1679,8 @@ export const LineageGraph = ({ data }) => {
       <Box 
         ref={containerRef}
         position="relative"
-        width="100%"
-        height={isFullscreen ? "calc(100vh - 120px)" : "400px"}
+        width={width || "100%"}
+        height={height || (isFullscreen ? "calc(100vh - 120px)" : "400px")}
         borderWidth={isFullscreen ? "0" : "1px"}
         borderRadius={isFullscreen ? "0" : "md"}
         borderColor="gray.200"
@@ -2363,5 +2363,31 @@ export const LineageGraph = ({ data }) => {
   
   // Normal inline rendering
   return renderLineageContent();
+};
+
+// Create an enhanced lineage viewer component that wraps LineageGraph
+export const EnhancedLineageViewer = ({ data, isMaximized }) => {
+  // Basic validation logic
+  if (!data) {
+    return <Box>No lineage data provided</Box>;
+  }
+
+  // Calculate dimensions based on maximize state
+  const height = isMaximized ? "calc(100vh - 100px)" : "600px";
+  
+  return (
+    <Box
+      width="100%" 
+      height={height}
+      position="relative"
+      overflow="hidden"
+    >
+      <LineageGraph
+        data={data}
+        width="100%"
+        height={height}
+      />
+    </Box>
+  );
 };
 

@@ -723,7 +723,7 @@ class LineageAgent(Agent):
                     vis_data = self.adapter.convert_column_lineage(lineage_result)
                 else:
                     vis_data = self.convert_column_lineage(lineage_result)
-                
+                    
                 lineage_result["visualization"] = vis_data
             
             # Organize column lineage for better presentation

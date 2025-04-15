@@ -105,6 +105,8 @@ import SyntaxHighlighter from 'react-syntax-highlighter';
 import { v4 as uuidv4 } from 'uuid';
 import { LineageVisualizer } from '../components/LineageVisualizer';
 import chatApi from '../api/chatApi';
+import { FiMinimize2, FiMaximize2 } from 'react-icons/fi';
+import { CloseIcon } from "@chakra-ui/icons";
 
 // Error boundary component to catch rendering errors
 class ErrorBoundary extends Component {
@@ -1932,65 +1934,13 @@ const MessageComponent = React.memo(({ message }) => {
             <Text>{message.content}</Text>
           ) : (
             <FormattedMessage content={message.content} />
-        )}
-      </Box>
-      
-        {/* Lineage visualization if available */}
-        {message.hasLineage && message.lineageData && (
-          <ErrorBoundary>
-            <Box 
-              mt={4} 
-              p={4} 
-          borderWidth="1px" 
-              borderColor="purple.200" 
-          borderRadius="md" 
-              bg="white"
-              width="100%"
-            >
-              <Text fontWeight="bold" mb={3} fontSize="lg">Data Lineage Visualization</Text>
-              <Box height="500px">
-                <LineageGraph data={message.lineageData} />
-          </Box>
-                  </Box>
-          </ErrorBoundary>
-        )}
-        
-        {/* Collapsible JSON Data - Hidden by default */}
-        {message.hasLineage && message.lineageData && (
-          <Box mt={3} width="100%">
-            <Button 
-              size="sm" 
-              width="100%" 
-              onClick={() => setShowRawJson(!showRawJson)}
-              variant="outline"
-              leftIcon={showRawJson ? <IoChevronUp /> : <IoChevronDown />}
-              justifyContent="space-between"
-              colorScheme="gray"
-            >
-              <Text>Lineage JSON</Text>
-            </Button>
-            
-            {showRawJson && (
-              <Box 
-                mt={2} 
-                p={3} 
-          borderWidth="1px" 
-                borderColor="gray.200" 
-          borderRadius="md" 
-                bg="gray.50"
-                maxHeight="400px"
-                overflowY="auto"
-                width="100%"
-              >
-                <Code p={3} width="100%" display="block" whiteSpace="pre" overflowX="auto" fontSize="sm">
-                  {JSON.stringify(message.lineageData, null, 2)}
-                      </Code>
-                    </Box>
-                  )}
-                    </Box>
-                  )}
-                </VStack>
+          )}
         </Box>
+        
+        {/* Remove the Collapsible JSON Data section that shows up in the message */}
+        {/* No need for this since we have the dedicated lineage button */}
+      </VStack>
+    </Box>
   );
 });
 
@@ -2020,6 +1970,14 @@ const ChatPage = () => {
   const [selectedModel, setSelectedModel] = useState('gpt-4o');
   const [modelsForProvider, setModelsForProvider] = useState([]);
   const [allModels, setAllModels] = useState([]);
+
+  // New state variables for panels
+  const [isLineagePanelOpen, setIsLineagePanelOpen] = useState(false);
+  const [isCodePanelOpen, setIsCodePanelOpen] = useState(false);
+  const [selectedLineageData, setSelectedLineageData] = useState(null);
+  const [selectedCodeSnippets, setSelectedCodeSnippets] = useState([]);
+  const [isLineageMaximized, setIsLineageMaximized] = useState(false);
+  const [isLineageDrawerOpen, setIsLineageDrawerOpen] = useState(false);
 
   // Initialize conversation or load from ID - only runs when conversationId changes
   useEffect(() => {
@@ -2741,12 +2699,12 @@ const ChatPage = () => {
             )}
           </Box>
           
-          {/* Lineage visualization if available */}
-          {message.hasLineage && (
+          {/* Lineage visualization if available - REMOVING THIS SECTION */}
+          {/* {message.hasLineage && (
             <Box mt={4}>
               <LineageVisualizer data={message.lineageData} />
             </Box>
-          )}
+          )} */}
           
           {/* Message details */}
           <HStack mt={2} spacing={2} justify="flex-end">
@@ -2826,8 +2784,105 @@ const ChatPage = () => {
       .replace(/'/g, '&#039;');
   };
 
+  // Extract code snippets from all messages
+  const extractAllCodeSnippets = () => {
+    const snippets = [];
+    
+    messages.forEach(message => {
+      if (message.role === 'assistant') {
+        // Extract code blocks using regex
+        const codeBlockRegex = /```([\w]*)\n([\s\S]*?)```/g;
+        let match;
+        
+        while ((match = codeBlockRegex.exec(message.content)) !== null) {
+          snippets.push({
+            id: `${message.id}-${snippets.length}`,
+            language: match[1] || 'text',
+            code: match[2],
+            messageId: message.id,
+            timestamp: message.timestamp
+          });
+        }
+      }
+    });
+    
+    return snippets;
+  };
+
+  // Extract the latest lineage data
+  const getLatestLineageData = () => {
+    try {
+      // Iterate through messages in reverse to find the most recent lineage data
+      for (let i = messages.length - 1; i >= 0; i--) {
+        if (messages[i] && messages[i].hasLineage && messages[i].lineageData) {
+          const lineageData = messages[i].lineageData;
+          
+          // Validate the lineage data structure
+          if (lineageData && 
+              lineageData.models && Array.isArray(lineageData.models) && 
+              lineageData.edges && Array.isArray(lineageData.edges)) {
+            console.log("Found valid lineage data:", 
+              `${lineageData.models.length} models, ${lineageData.edges.length} edges`);
+            return lineageData;
+          } else {
+            console.warn("Found lineage data but structure is invalid:", lineageData);
+          }
+        }
+      }
+    } catch (err) {
+      console.error("Error extracting lineage data:", err);
+    }
+    return null;
+  };
+
+  // Handle opening lineage panel
+  const handleOpenLineagePanel = () => {
+    const lineageData = getLatestLineageData();
+    if (lineageData) {
+      setSelectedLineageData(lineageData);
+      setIsLineagePanelOpen(true);
+      setIsCodePanelOpen(false); // Close code panel if open
+    } else {
+      toast({
+        title: "No lineage data",
+        description: "There's no lineage data available in this conversation",
+        status: "info",
+        duration: 3000,
+        isClosable: true,
+      });
+    }
+  };
+
+  // Handle opening code panel
+  const handleOpenCodePanel = () => {
+    const snippets = extractAllCodeSnippets();
+    if (snippets.length > 0) {
+      setSelectedCodeSnippets(snippets);
+      setIsCodePanelOpen(true);
+      setIsLineagePanelOpen(false); // Close lineage panel if open
+    } else {
+      toast({
+        title: "No code snippets",
+        description: "There are no code snippets in this conversation",
+        status: "info",
+        duration: 3000,
+        isClosable: true,
+      });
+    }
+  };
+
+  // Toggle lineage maximized view
+  const toggleLineageMaximized = () => {
+    setIsLineageMaximized(!isLineageMaximized);
+  };
+
+  // Close lineage drawer
+  const closeLineageDrawer = () => {
+    setIsLineageDrawerOpen(false);
+  };
+
   return (
-    <Container maxW="90%" py={4}>
+    <Container maxW="70%" py={4}> {/* Reduced width from 90% to 70% */}
       <Box 
         h="calc(100vh - 120px)" 
         display="flex" 
@@ -2835,6 +2890,7 @@ const ChatPage = () => {
         borderRadius="lg"
         overflow="hidden"
         boxShadow="sm"
+        position="relative"
       >
         {/* Top bar with controls and model selection */}
         <Box 
@@ -3031,7 +3087,7 @@ const ChatPage = () => {
           )}
         </Box>
         
-        {/* Input area */}
+        {/* Input area with new action buttons */}
         <Box 
           as="form" 
           onSubmit={handleSubmit}
@@ -3040,6 +3096,27 @@ const ChatPage = () => {
           borderTop="1px solid"
           borderColor="gray.200"
         >
+          <HStack spacing={4} mb={2}>
+            <IconButton
+              icon={<Icon as={IoGitBranch} />}
+              aria-label="View Lineage"
+              size="md"
+              colorScheme="purple"
+              variant="outline"
+              onClick={handleOpenLineagePanel}
+              title="View Data Lineage"
+            />
+            <IconButton
+              icon={<Icon as={IoCodeSlash} />}
+              aria-label="View Code"
+              size="md"
+              colorScheme="blue"
+              variant="outline"
+              onClick={handleOpenCodePanel}
+              title="View Code Snippets"
+            />
+          </HStack>
+          
           <InputGroup size="lg">
             <Textarea
               placeholder="Ask about data models, lineage, or SQL..."
@@ -3080,6 +3157,69 @@ const ChatPage = () => {
           </InputGroup>
         </Box>
       </Box>
+
+      {/* Lineage Panel Drawer */}
+      <Drawer
+        isOpen={isLineagePanelOpen}
+        placement="right"
+        onClose={() => setIsLineagePanelOpen(false)}
+        size={isLineageMaximized ? "full" : "lg"}
+      >
+        <DrawerOverlay />
+        <DrawerContent>
+          <DrawerCloseButton />
+          <DrawerHeader borderBottomWidth="1px" bg="purple.50">
+            <HStack justifyContent="space-between">
+              <Text>Data Lineage Visualization</Text>
+              <IconButton
+                icon={isLineageMaximized ? <IoContract /> : <IoExpand />}
+                aria-label={isLineageMaximized ? "Minimize" : "Maximize"}
+                size="sm"
+                variant="ghost"
+                onClick={toggleLineageMaximized}
+                colorScheme="purple"
+              />
+            </HStack>
+          </DrawerHeader>
+          <DrawerBody p={0} bg="white">
+            {selectedLineageData ? (
+              <ErrorBoundary>
+                <Box 
+                  height="100%"
+                  width="100%"
+                  overflow="hidden"
+                  position="relative"
+                >
+                  {/* Replace EnhancedLineageViewer with LineageGraph and LineageVisualizer */}
+                  <VStack spacing={0} height="100%" width="100%">
+                    <Box width="100%" flex="1" overflow="auto">
+                      <LineageGraph 
+                        data={selectedLineageData} 
+                        width="100%" 
+                        height={isLineageMaximized ? "calc(100vh - 200px)" : "600px"} 
+                      />
+                    </Box>
+                    <Box width="100%" p={4} borderTopWidth="1px" borderColor="gray.200">
+                      <LineageVisualizer data={selectedLineageData} />
+                    </Box>
+                  </VStack>
+                </Box>
+              </ErrorBoundary>
+            ) : (
+              <Box 
+                height="100%" 
+                width="100%" 
+                display="flex" 
+                alignItems="center" 
+                justifyContent="center"
+                bg="gray.50"
+              >
+                <Text color="gray.500">No lineage data available to display</Text>
+              </Box>
+            )}
+          </DrawerBody>
+        </DrawerContent>
+      </Drawer>
     </Container>
   );
 };
