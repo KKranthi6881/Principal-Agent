@@ -28,6 +28,21 @@ class SQLLLMInterface:
     def __init__(self):
         """Initialize the LLM interface"""
         self.sql_api = sql_api
+        self.github_wrapper = None
+        self.vector_store_path = None
+    
+    def initialize_with_github(self, github_wrapper):
+        """
+        Initialize the interface with a GitHub wrapper
+        
+        Args:
+            github_wrapper: Initialized GitHubAPIWrapper instance
+        """
+        self.github_wrapper = github_wrapper
+        # Initialize SQL API with GitHub wrapper
+        if hasattr(self.sql_api, 'initialize_with_github'):
+            self.sql_api.initialize_with_github(github_wrapper)
+        logger.info("Initialized SQL LLM Interface with GitHub wrapper")
     
     def get_table_lineage(self, table_name: str, direction: str = "upstream", 
                           max_depth: int = 5, dialect: Optional[str] = None,
@@ -59,32 +74,91 @@ class SQLLLMInterface:
                 "direction": direction,
                 "dialect_used": result.get("dialect_used", "unknown"),
                 "summary": result.get("summary", ""),
-                "levels": {}
+                "total_files": result.get("total_files", 0),
+                "max_depth_reached": result.get("max_depth_reached", 0),
+                "levels": {},
+                "source_files": []  # Add source files list
             }
             
-            # Process dependencies by level
-            for level, deps in result.get("dependencies_by_level", {}).items():
-                level_tables = []
+            # Process files by level
+            for level, files in result.get("files_by_level", {}).items():
+                level_info = []
                 
-                for dep in deps:
-                    table_info = {
-                        "name": dep.get("table", ""),
-                        "file_path": dep.get("file_path", ""),
-                        "dependencies": dep.get("dependencies", []),
-                        "used_by": dep.get("used_by", "")
+                for file_info in files:
+                    info = {
+                        "file_path": file_info.get("file_path", ""),
+                        "url": file_info.get("url", ""),
+                        "github_repo": file_info.get("github_repo", ""),
+                        "dialect": file_info.get("dialect", "unknown"),
+                        "target_table": file_info.get("target_table", ""),
+                        "source_tables": file_info.get("source_tables", [])
                     }
                     
-                    # Only include file URL if available
-                    if "file_url" in dep and dep["file_url"]:
-                        table_info["file_url"] = dep["file_url"]
+                    # Add content snippet if available
+                    if "content" in file_info:
+                        content = file_info["content"]
+                        info["content_snippet"] = content[:500] + "..." if len(content) > 500 else content
                     
-                    level_tables.append(table_info)
+                    # Add column dependencies if available
+                    if "column_dependencies" in file_info:
+                        info["column_dependencies"] = file_info["column_dependencies"]
+                    
+                    level_info.append(info)
                 
-                llm_result["levels"][level] = level_tables
+                llm_result["levels"][level] = level_info
             
-            # Add column information if available
-            if "column_lineage" in result:
-                llm_result["columns"] = result["column_lineage"]
+            # Add original source files from the dependency analysis for context
+            if "source_files" in result:
+                llm_result["source_files"] = result["source_files"]
+            
+            # Add dependency chain for easy visualization
+            dependency_chain = []
+            tables_by_level = {}
+            
+            for level, files in result.get("files_by_level", {}).items():
+                tables_at_level = set()
+                for file_info in files:
+                    tables_at_level.add(file_info.get("target_table", ""))
+                    tables_at_level.update(file_info.get("source_tables", []))
+                tables_by_level[level] = list(tables_at_level)
+            
+            # Build the chain from target to sources
+            current_table = table_name
+            current_level = 0
+            while current_level in tables_by_level:
+                tables = tables_by_level[current_level]
+                if tables:
+                    dependency_chain.append({
+                        "level": current_level,
+                        "tables": tables
+                    })
+                current_level += 1
+            
+            llm_result["dependency_chain"] = dependency_chain
+            
+            # Add a natural language summary
+            summary_lines = []
+            summary_lines.append(f"Analysis of {table_name} {direction} dependencies:")
+            summary_lines.append(f"- Found {llm_result['total_files']} relevant SQL files")
+            summary_lines.append(f"- Traced dependencies across {llm_result['max_depth_reached']} levels")
+            
+            if dependency_chain:
+                summary_lines.append("\nDependency chain:")
+                for level in dependency_chain:
+                    tables = level["tables"]
+                    summary_lines.append(f"Level {level['level']}: {', '.join(tables)}")
+            
+            # Add description of available sources
+            if llm_result["source_files"]:
+                source_count = len(llm_result["source_files"])
+                summary_lines.append(f"\nSource information:")
+                summary_lines.append(f"- {source_count} source files containing the table or its dependencies")
+                for i, src in enumerate(llm_result["source_files"][:3]):  # Show first 3
+                    summary_lines.append(f"  - {src.get('path', 'unknown')} ({src.get('dialect', 'sql')})")
+                if source_count > 3:
+                    summary_lines.append(f"  - Plus {source_count - 3} more files")
+            
+            llm_result["natural_language_summary"] = "\n".join(summary_lines)
             
             return llm_result
             
@@ -391,6 +465,91 @@ class SQLLLMInterface:
             return file_path.split('/')[-1].split('.')[0]
                 
         return None
+
+    def search_for_table(self, table_name: str, limit: int = 5) -> Dict[str, Any]:
+        """
+        Search for SQL files containing the specified table
+        
+        Args:
+            table_name: Name of the table to search for
+            limit: Maximum number of results to return
+            
+        Returns:
+            Dictionary containing search results with file paths and content
+        """
+        try:
+            # First try using the SQL API if available
+            if self.sql_api:
+                return self.sql_api.search_for_table(table_name, limit)
+                
+            # Fallback to direct search if no API
+            if self.github_wrapper:
+                # Search for SQL files containing the table name
+                query = f"SELECT * FROM {table_name}"
+                results = self.github_wrapper.search_code(query, file_extensions=[".sql"])
+                
+                if not results:
+                    # Try alternative patterns
+                    patterns = [
+                        f"CREATE TABLE.*{table_name}",
+                        f"INSERT INTO.*{table_name}",
+                        f"UPDATE.*{table_name}",
+                        f"DELETE FROM.*{table_name}",
+                        f"MERGE INTO.*{table_name}"
+                    ]
+                    
+                    for pattern in patterns:
+                        results = self.github_wrapper.search_code(pattern, file_extensions=[".sql"])
+                        if results:
+                            break
+                
+                # Format the results
+                formatted_results = []
+                for result in results[:limit]:
+                    try:
+                        content = self.github_wrapper.get_file_content(result["path"])
+                        formatted_results.append({
+                            "file_path": result["path"],
+                            "url": result.get("url", ""),
+                            "repo": result.get("repository", {}).get("full_name", ""),
+                            "content": content,
+                            "content_summary": self._extract_relevant_sql(content, table_name)
+                        })
+                    except Exception as e:
+                        logger.error(f"Error getting content for file {result['path']}: {str(e)}")
+                        continue
+                
+                return {
+                    "files_found": len(formatted_results),
+                    "results": formatted_results
+                }
+            
+            return {"files_found": 0, "results": []}
+            
+        except Exception as e:
+            logger.error(f"Error searching for table {table_name}: {str(e)}")
+            return {"error": str(e)}
+            
+    def _extract_relevant_sql(self, content: str, table_name: str) -> str:
+        """Extract relevant SQL statements containing the table name"""
+        if not content:
+            return ""
+            
+        # Split into statements
+        statements = content.split(";")
+        
+        # Find statements containing the table name
+        relevant = []
+        for stmt in statements:
+            if table_name.lower() in stmt.lower():
+                relevant.append(stmt.strip())
+                
+        # Return the most relevant statements
+        if relevant:
+            return ";\n".join(relevant[:3]) + ";"  # Return top 3 most relevant statements
+            
+        # If no exact matches, return the first part of the file
+        return content[:500] + "..." if len(content) > 500 else content
 
 # Create a singleton instance
 llm_interface = SQLLLMInterface() 

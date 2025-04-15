@@ -8,7 +8,11 @@ from typing import List, Dict, Any, Optional
 import logging
 import os
 
-from tools.sql_tools.dependency_analyzer import SQLDependencyTool
+# Try to import tools using both potential import paths
+try:
+    from tools.sql_tools.dependency_analyzer import SQLDependencyTool
+except ImportError:
+    from backend.tools.sql_tools.dependency_analyzer import SQLDependencyTool
 
 # Configure logging
 logger = logging.getLogger(__name__)

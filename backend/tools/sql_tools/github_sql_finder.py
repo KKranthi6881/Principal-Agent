@@ -65,12 +65,16 @@ class GitHubSQLFinder:
         # Make sure vector store is initialized
         if not self.vector_store:
             if not self.initialize():
+                logger.error("Failed to initialize GitHub vector store for search")
                 return []
         
         try:
             # Add SQL file filter to query if not already present
             if 'extension:' not in query and '.sql' not in query:
                 query = f"{query} extension:sql"
+            
+            # Log the query being used
+            logger.info(f"Searching vector store with query: '{query}'")
             
             # Search the vector store
             results = self.vector_store.query(query, n_results=limit)
@@ -80,17 +84,23 @@ class GitHubSQLFinder:
             
             # Check the structure of results and handle it appropriately
             if not results:
+                logger.warning("Vector store returned empty results")
                 return []
+            
+            logger.info(f"Vector store returned results with keys: {results.keys() if isinstance(results, dict) else 'not a dict'}")
                 
             # Check if 'metadatas' is a list of dictionaries or a list of lists
             if 'metadatas' in results:
                 metadatas = results['metadatas']
                 documents = results.get('documents', [])
                 
+                logger.info(f"Found {len(metadatas)} metadata items and {len(documents)} document items")
+                
                 # Handle case where metadatas is a list of lists
                 if metadatas and isinstance(metadatas, list):
                     if metadatas and isinstance(metadatas[0], list):
                         # It's a list of lists (older ChromaDB format)
+                        logger.info("Detected older ChromaDB format (list of lists)")
                         metadatas = metadatas[0] if metadatas else []
                         documents = documents[0] if documents and isinstance(documents, list) and documents and isinstance(documents[0], list) else []
                 
@@ -111,6 +121,9 @@ class GitHubSQLFinder:
                     
                     # Get repository URL properly
                     repo_url = metadata.get('repo_url', '')
+                    if not repo_url:
+                        # Try alternative field names
+                        repo_url = metadata.get('github_repo', metadata.get('repository_url', ''))
                     
                     # Build proper URL with file path
                     url = f"{repo_url}/blob/main/{file_path}" if repo_url else None
@@ -126,15 +139,49 @@ class GitHubSQLFinder:
                     }
                     
                     formatted_results.append(formatted_result)
+            # Alternative structure handling
+            elif isinstance(results, list):
+                logger.info("Vector store returned list format")
+                # Assume direct list of results
+                for result in results:
+                    if isinstance(result, dict):
+                        file_path = result.get('file_path', result.get('path', ''))
+                        
+                        # Skip non-SQL files
+                        if not file_path.lower().endswith('.sql'):
+                            continue
+                        
+                        content = result.get('content', result.get('text', ''))
+                        
+                        # Create formatted result
+                        formatted_result = {
+                            'file_path': file_path,
+                            'content': content,
+                            'url': result.get('url', ''),
+                            'github_repo': result.get('repo_url', result.get('github_repo', '')),
+                            'path': file_path,
+                            'dialect': self._detect_dialect(file_path, content)
+                        }
+                        
+                        formatted_results.append(formatted_result)
             
             logger.info(f"Found {len(formatted_results)} SQL files in search results")
+            
+            # If we found no results, return a helpful error 
+            if not formatted_results:
+                logger.warning(f"No SQL files found matching query: {query}")
+                return [{
+                    "error": f"No SQL files found matching query: {query}", 
+                    "suggestion": "Try a more general query or check if the SQL files exist in the repository"
+                }]
+                
             return formatted_results
             
         except Exception as e:
             logger.error(f"Error searching for SQL files: {str(e)}")
             import traceback
             logger.error(traceback.format_exc())
-            return []
+            return [{"error": f"Error searching for SQL files: {str(e)}"}]
     
     def search_for_table(self, table_name: str, limit: int = 20) -> List[Dict[str, Any]]:
         """

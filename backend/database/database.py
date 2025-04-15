@@ -106,5 +106,26 @@ class DatabaseInterface:
             tool_calls={"action_name": action_name, "input": action_input}
         )
 
+    def save_message(self, conversation_id: str, thread_id: str, message: str, sender: str, user_id: str) -> str:
+        """
+        Save a message (using add_message behind the scenes for backward compatibility)
+        
+        Args:
+            conversation_id: Conversation ID
+            thread_id: Thread ID
+            message: Message content
+            sender: Sender role ('user' or 'assistant')
+            user_id: User ID
+            
+        Returns:
+            Conversation ID
+        """
+        # Map parameters to add_message format
+        role = "assistant" if sender == "assistant" else "user"
+        content = message
+        
+        # Add the message using the existing method
+        return self.add_message(thread_id, user_id, role, content)
+
 # Create singleton instance
 db = DatabaseInterface() 

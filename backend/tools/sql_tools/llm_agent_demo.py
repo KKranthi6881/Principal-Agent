@@ -393,26 +393,60 @@ class LLMAgentDemo:
         level_0 = lineage_result.get("levels", {}).get("0", [])
         level_1 = lineage_result.get("levels", {}).get("1", [])
         
-        if not level_1:
+        if not level_1 and "source_files" in lineage_result and lineage_result["source_files"]:
+            # If we have source files but no structured dependencies
+            source_files = lineage_result["source_files"]
+            response += f"is defined in {len(source_files)} source files, but no clear dependencies were detected. The source files are:\n\n"
+            
+            for i, src in enumerate(source_files[:5]):
+                file_path = src.get("path", "unknown")
+                response += f"- {file_path}\n"
+                
+                # Add URL if available
+                if "url" in src and src["url"]:
+                    response += f"  URL: {src['url']}\n"
+                    
+            if len(source_files) > 5:
+                response += f"\n...and {len(source_files) - 5} more files."
+                
+            return response
+            
+        elif not level_1:
             return f"{response}doesn't seem to have any upstream dependencies. It might be a source table."
         
-        # Format response
+        # Format response with dependencies from level 1
         response += f"is defined using data from the following tables:\n\n"
         
         for dep in level_1:
-            src_table = dep.get("name", "")
-            file_path = dep.get("file_path", "")
+            src_tables = dep.get("source_tables", [])
             
-            if src_table and file_path:
-                response += f"- {src_table} (defined in {file_path})\n"
-            elif src_table:
-                response += f"- {src_table}\n"
+            for src_table in src_tables:
+                if src_table and src_table != table_name:  # Skip self-references
+                    response += f"- {src_table}"
+                    
+                    # Add file path if available
+                    file_path = dep.get("file_path", "")
+                    if file_path:
+                        response += f" (defined in {file_path})"
+                    
+                    response += "\n"
         
         # Add file information for the main table
         if level_0:
-            main_file = level_0[0].get("file_path", "")
-            if main_file:
-                response += f"\nThe table '{table_name}' is defined in {main_file}."
+            main_files = []
+            for file_info in level_0:
+                file_path = file_info.get("file_path", "")
+                if file_path and file_path not in main_files:
+                    main_files.append(file_path)
+            
+            if main_files:
+                response += f"\nThe table '{table_name}' is defined in:"
+                for file_path in main_files:
+                    response += f"\n- {file_path}"
+        
+        # Add natural language summary if available
+        if "natural_language_summary" in lineage_result:
+            response += f"\n\nSummary of dependencies:\n{lineage_result['natural_language_summary']}"
         
         return response
     
@@ -468,14 +502,23 @@ class LLMAgentDemo:
     
     def _generate_search_response(self, search_result: Dict[str, Any], query: str) -> str:
         """Generate response for general search query"""
+        if "error" in search_result:
+            return f"Error searching for '{query}': {search_result['error']}"
+            
         files_found = search_result.get("files_found", 0)
         
         if files_found == 0:
             return f"I couldn't find any SQL files matching '{query}'."
         
-        response = f"I found {files_found} SQL files that match your query. Here are the most relevant ones:\n\n"
+        response = f"I found {files_found} SQL files that match your query '{query}'. Here are the most relevant ones:\n\n"
         
         for i, result in enumerate(search_result["results"], 1):
+            if isinstance(result, dict) and "error" in result:
+                response += f"Note: {result['error']}\n"
+                if "suggestion" in result:
+                    response += f"Suggestion: {result['suggestion']}\n"
+                continue
+                
             file_path = result.get("file_path", "")
             dialect = result.get("dialect", "unknown")
             url = result.get("url", "")
@@ -483,12 +526,25 @@ class LLMAgentDemo:
             response += f"{i}. {file_path} ({dialect} dialect)"
             if url:
                 response += f"\n   URL: {url}"
+                
+            # Add a snippet of content if available
+            content_summary = result.get("content_summary", "")
+            if content_summary and len(content_summary) > 0:
+                snippet = content_summary[:200] + "..." if len(content_summary) > 200 else content_summary
+                response += f"\n   Snippet: {snippet}"
+                
             response += "\n\n"
         
         return response
     
     def _generate_column_location_response_from_search(self, column_name, search_result):
         """Generate response for column location questions using search_columns result"""
+        if "error" in search_result:
+            return f"Error searching for column '{column_name}': {search_result['error']}"
+            
+        if search_result.get("files_found", 0) == 0:
+            return f"I couldn't find any files containing column '{column_name}' in the codebase."
+        
         response = f"The column '{column_name}' appears to be present in the following table(s):\n\n"
         
         # Group results by likely table
@@ -508,19 +564,22 @@ class LLMAgentDemo:
         for table_name, files in tables_info.items():
             response += f"- Table: {table_name}\n"
             
-            # Show the first file for each table
-            if files:
-                file = files[0]
-                response += f"  File: {file['file_path']}\n"
+            # Show file details for this table
+            for i, file in enumerate(files[:3]):
+                response += f"  File {i+1}: {file['file_path']}\n"
                 if file.get("url"):
                     response += f"  URL: {file['url']}\n"
             
+            if len(files) > 3:
+                response += f"  ... and {len(files) - 3} more files.\n"
+                
             response += "\n"
         
         # Store the first table for context in future questions
         likely_tables = search_result.get("likely_tables", [])
         if likely_tables:
             self.memory["current_table"] = likely_tables[0]
+            response += f"I'll remember that you're asking about table '{likely_tables[0]}' for further questions.\n\n"
         
         # Include a relevant code snippet if available
         if search_result.get("results") and search_result["results"][0].get("content_summary"):
@@ -563,19 +622,32 @@ def main():
     """Main function to run the agent demo"""
     agent = LLMAgentDemo()
     
-    # Sample questions to demonstrate
+    # Sample questions to demonstrate our fixed implementation
     questions = [
-        #"Where does the table fct_order_items come from?",
-        #"Can you show me the SQL for stg_tpch_orders?",
-        "can you help me where is the orders.clerk_name ?"
-       # "Find SQL files with JOIN operations"
+        "Where does the table fct_orders come from?",
+        "Show me the SQL for stg_tpch_orders",
+        "Help me find column order_id",
+        "What tables depend on staging_orders?",
+        "Trace the lineage of customer_name column in customers table",
+        "Find SQL files with JOIN operations",
+        "What are the upstream dependencies for sales_data?"
     ]
     
     # Process each question
     for question in questions:
+        print("\n" + "=" * 80)
+        print(f"\nTESTING QUERY: {question}")
+        
+        # Add debug info for vector search
+        print("\n[DEBUG] About to execute search, vector store available:", 
+              agent.interface.sql_api.github_sql_finder.vector_store is not None)
+        
         response = agent.answer_question(question)
+        
         print("\n[AGENT RESPONSE]:")
         print(response)
+        
+        # Print a separator line
         print("\n" + "=" * 80)
 
 

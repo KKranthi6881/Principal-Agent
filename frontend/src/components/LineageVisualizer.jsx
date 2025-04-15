@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import * as d3 from 'd3';
 import {
   Box,
@@ -16,7 +16,17 @@ import { IoExpand, IoContract, IoDownload, IoInformation } from 'react-icons/io5
 export const LineageVisualizer = ({ data }) => {
   const svgRef = useRef(null);
   const containerRef = useRef(null);
-  const [expanded, setExpanded] = React.useState(false);
+  const [expanded, setExpanded] = useState(false);
+  
+  // Define color schemes at the component level, not inside useEffect
+  const nodeColors = {
+    table: useColorModeValue("#805AD5", "#D6BCFA"),      // purple
+    view: useColorModeValue("#3182CE", "#90CDF4"),       // blue
+    source: useColorModeValue("#38A169", "#9AE6B4"),     // green
+    transformation: useColorModeValue("#DD6B20", "#FBD38D"), // orange
+    model: useColorModeValue("#805AD5", "#D6BCFA"),      // purple
+    default: useColorModeValue("#718096", "#A0AEC0")     // gray
+  };
   
   // Check if we have valid data to render
   if (!data || !data.models || !data.edges || data.models.length === 0) {
@@ -76,16 +86,6 @@ export const LineageVisualizer = ({ data }) => {
       target: edge.target,
       type: edge.type || 'depends_on'
     }));
-    
-    // Define color schemes
-    const nodeColors = {
-      table: useColorModeValue("#805AD5", "#D6BCFA"),      // purple
-      view: useColorModeValue("#3182CE", "#90CDF4"),       // blue
-      source: useColorModeValue("#38A169", "#9AE6B4"),     // green
-      transformation: useColorModeValue("#DD6B20", "#FBD38D"), // orange
-      model: useColorModeValue("#805AD5", "#D6BCFA"),      // purple
-      default: useColorModeValue("#718096", "#A0AEC0")     // gray
-    };
     
     // Create links
     const link = svg.append("g")
@@ -183,7 +183,7 @@ export const LineageVisualizer = ({ data }) => {
         .attr("transform", d => `translate(${d.x - 50},${d.y - 20})`);
     }
     
-  }, [data, expanded]);
+  }, [data, expanded, nodeColors]);
   
   // Download SVG as PNG
   const downloadAsPNG = () => {
