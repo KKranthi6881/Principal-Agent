@@ -133,12 +133,12 @@ Please provide a detailed plan in JSON format with the following structure shown
 
 Available agents and their actions with required parameters:
 - lineage_agent:
-  - analyze_lineage(table_name: str, direction: str = "upstream", max_depth: int = 5)
-  - trace_table_lineage(table_name: str)
-  - trace_column_lineage(table_name: str, column_name: str)
+  - trace_table_lineage(table_name: str, direction: str = "upstream", max_depth: int = 5)
+  - trace_column_lineage(table_name: str, column_name: str, direction: str = "upstream", max_depth: int = 5)
+  - analyze_lineage(sql_code: str, task: str = "Analyze the SQL code") - Use this when you have SQL code to analyze
 - dependency_agent:
   - analyze_dependencies(table_name: str, include_columns: bool = True)
-  - analyze_impact(table_name: str)
+  - analyze_impact(table_name: str, column_name: str = None)
 - code_summarizer:
   - summarize_file(file_path: str)
   - describe_column(table_name: str, column_name: str)
@@ -149,9 +149,12 @@ Available agents and their actions with required parameters:
 IMPORTANT: Make sure to use the correct parameter names as specified above. For example:
 - Use 'table_name' instead of 'table' or 'file'
 - Use 'file_path' instead of 'file' for summarize_file
+- For analyze_lineage, you MUST provide 'sql_code' parameter (the system will try to find it if not provided but it's better to specify it)
 - Include all required parameters for each action
 
 Be thorough in your planning and ensure that all steps are necessary to answer the user's question completely.
+
+If the question is about table or column dependencies, it's usually best to use trace_table_lineage or trace_column_lineage rather than analyze_lineage, unless you specifically have SQL code to analyze.
 """)
         
         self.thinking_prompt = ChatPromptTemplate.from_template(
@@ -212,14 +215,28 @@ Your response:
             
         # Initialize SQL tools with GitHub wrapper
         if self.sql_tools:
-            self.sql_tools.initialize_with_github(github_wrapper)
+            logger.info("Initializing SQL tools with GitHub wrapper")
             
+            # Make sure the sql_tools have the initialize_with_github method
+            if hasattr(self.sql_tools, 'initialize_with_github'):
+                try:
+                    self.sql_tools.initialize_with_github(github_wrapper)
+                    logger.info("SQL tools initialized successfully with GitHub wrapper")
+                except Exception as e:
+                    logger.error(f"Error initializing SQL tools with GitHub wrapper: {str(e)}")
+            else:
+                logger.warning("SQL tools do not have initialize_with_github method")
+            
+        # Create specialized agents
         self.agents = {
             "lineage_agent": LineageAgent(model=self.model, sql_tools=self.sql_tools),
             "dependency_agent": DependencyAgent(model=self.model, sql_tools=self.sql_tools, github_tools=self.github_tools),
             "code_summarizer": CodeSummarizerAgent(model=self.model, sql_tools=self.sql_tools),
             "description_summarizer": DescriptionSummarizerAgent(model=self.model, sql_tools=self.sql_tools)
         }
+        
+        # Log the created agents
+        logger.info(f"Created specialized agents: {list(self.agents.keys())}")
         
     def build_graph(self):
         """Build the agent workflow graph with unique node names to avoid state collisions"""
@@ -398,142 +415,169 @@ Your response:
         conversation_id = state.get("conversation_id")
         user_id = state.get("user_id")
         dialect = state.get("dialect", "")
-        repo_url = state.get("repo_url")
+        
+        # Get planning information
+        planning = state.get("planning", {})
+        
+        # Initialize current/max steps if not already in state
+        current_step = state.get("current_step", 0)
+        plan = planning.get("plan", [])
+        max_steps = len(plan)
+        
+        # Initialize agent_results if not already in state
+        agent_results = state.get("agent_results", {})
+        
+        # Check if we have steps to execute
+        if not plan or current_step >= max_steps:
+            logger.info(f"No more steps to execute for thread {thread_id}, conversation {conversation_id}")
+            return {
+                **state,
+                "current_step": current_step,
+                "max_steps": max_steps,
+                "agent_results": agent_results
+            }
+        
+        # Get the current step
+        step = plan[current_step]
+        agent_name = step.get("agent")
+        action = step.get("action")
+        params = step.get("params", {})
+        reason = step.get("reason", "")
+        
+        # Add dialect from planning if not in params
+        if "dialect" not in params and dialect:
+            params["dialect"] = dialect
+        
+        # Add repo_url from state if available
+        if "repo_url" not in params and state.get("repo_url"):
+            params["repo_url"] = state.get("repo_url")
+        
+        logger.info(f"Executing step {current_step + 1}/{max_steps}: {agent_name}.{action}")
+        
+        # Log the step execution
+        if self.database:
+            self.database.log_agent_thinking(
+                conversation_id=conversation_id,
+                thread_id=thread_id,
+                agent_name=self.name,
+                thinking=f"Executing step {current_step + 1}/{max_steps}: {agent_name}.{action}({params})\nReason: {reason}",
+                user_id=user_id
+            )
+        
+        # Extract needed parameters up front to avoid reference errors
+        table_name = params.get("table_name", "")
+        column_name = params.get("column_name", "")
+        
+        # Prepare input for the agent
+        input_data = {
+            "action": action,
+            "params": params
+        }
         
         try:
-            # Get the current step from the plan
-            current_step = state.get("current_step", 0)
-            plan = state.get("planning", {}).get("plan", [])
-            
-            if current_step >= len(plan):
-                return state
-            
-            step = plan[current_step]
-            agent_name = step.get("agent")
-            action_name = step.get("action")
-            params = step.get("params", {})
-            
-            # Add dialect and repo_url to params if available
-            if dialect and "dialect" not in params:
-                params["dialect"] = dialect
-            if repo_url and "repo_url" not in params:
-                params["repo_url"] = repo_url
+            # Get the agent and run the action
+            if agent_name in self.agents:
+                agent = self.agents[agent_name]
                 
-            # For lineage actions, make sure to include visualization data
-            if agent_name == "lineage_agent" and action_name in ["trace_table_lineage", "trace_column_lineage"]:
-                params["include_visualization"] = True
-            
-            # Get the agent
-            agent = self.agents.get(agent_name)
-            if not agent:
-                logger.error(f"Agent {agent_name} not found")
-                # Add error to agent_results
-                agent_results = state.get("agent_results", {})
-                step_key = f"step_{current_step}"
-                agent_results[step_key] = {
-                    "agent": agent_name,
-                    "action": action_name,
-                    "error": f"Agent {agent_name} not found",
-                    "params": params
-                }
-                
-                # Log the error
-                if self.database:
-                    self.database.log_agent_thinking(
-                        conversation_id=conversation_id,
-                        thread_id=thread_id,
-                        agent_name=self.name,
-                        thinking=f"Error in step {current_step}: Agent {agent_name} not found",
-                        user_id=user_id
-                    )
-                
-                # Continue to the next step
-                return {
-                    **state,
-                    "current_step": current_step + 1,
-                    "agent_results": agent_results
-                }
-            
-            # Prepare the input data for the agent
-            input_data = {
-                "action": action_name,
-                "params": params
-            }
-            
-            # Log the agent action
-            if self.database:
-                self.database.log_agent_thinking(
-                    conversation_id=conversation_id,
-                    thread_id=thread_id,
-                    agent_name=self.name,
-                    thinking=f"Executing step {current_step}: {agent_name}.{action_name}({params})",
-                    user_id=user_id
-                )
-            
-            try:
-                # Run the agent
-                result = agent.run(input_data)
-                
-                # Check for errors in the result
-                if "error" in result:
-                    logger.error(f"Error in agent {agent_name} action {action_name}: {result['error']}")
+                # Special case for SQL search & dependency analysis
+                if action in ['search_for_table', 'search_for_column'] and self.sql_tools:
+                    # Directly use our SQL tools interface
+                    limit = params.get("limit", 10)
                     
-                    # Try a recovery strategy
-                    if "No SQL files found" in result["error"] and agent_name == "lineage_agent":
-                        # Try with a lower max_depth or different search strategy
-                        fallback_params = params.copy()
-                        if "max_depth" in fallback_params:
-                            fallback_params["max_depth"] = min(3, fallback_params["max_depth"])
+                    logger.info(f"Using SQL tools for search: table={table_name}, column={column_name}")
+                    
+                    if action == 'search_for_table' and table_name:
+                        result = self.sql_tools.search_tables(table_name, limit)
+                    elif action == 'search_for_column' and column_name:
+                        result = self.sql_tools.search_columns(column_name, limit)
+                    else:
+                        # Generic SQL search
+                        query = table_name or column_name or params.get("query", "")
+                        result = self.sql_tools.search_sql(query, limit)
                         
-                        logger.info(f"Trying fallback with params: {fallback_params}")
-                        fallback_input = {
-                            "action": action_name,
-                            "params": fallback_params
-                        }
+                # Special case for lineage tracing
+                elif action in ['trace_table_lineage', 'trace_column_lineage'] and self.sql_tools:
+                    # Run the agent first
+                    agent_result = agent.run(input_data)
+                    
+                    # Add source files context if available but missing
+                    if agent_result and 'source_files' not in agent_result and table_name:
+                        # Search for the table files specifically
+                        search_result = self.sql_tools.search_tables(table_name, 5)
                         
-                        # Try the fallback
-                        result = agent.run(fallback_input)
-                    
-                # Process visualization data for lineage results
-                if agent_name == "lineage_agent" and "visualization" in result:
-                    # Ensure the visualization data is properly formatted
-                    visualization = result["visualization"]
-                    visualization_data = self._ensure_visualization_format(visualization)
-                    
-                    # Store visualization separately to avoid duplicate data
-                    result["visualization_data"] = visualization_data
+                        if search_result and search_result.get("results"):
+                            agent_result["source_files"] = search_result.get("results")
+                            
+                    result = agent_result
                 
-                # Log the result using enhanced method
+                # Special case for analyze_lineage
+                elif action == 'analyze_lineage' and agent_name == 'lineage_agent':
+                    # Ensure we have sql_code parameter for analyze_lineage
+                    if 'sql_code' not in params:
+                        # Try to retrieve SQL code for the table
+                        if table_name and self.sql_tools:
+                            search_result = self.sql_tools.search_tables(table_name, 1)
+                            if search_result and search_result.get("results") and len(search_result["results"]) > 0:
+                                first_result = search_result["results"][0]
+                                sql_code = first_result.get("content", "")
+                                if sql_code:
+                                    # Update params with the SQL code
+                                    params["sql_code"] = sql_code
+                                    input_data["params"] = params
+                                    logger.info(f"Retrieved SQL code for table {table_name}")
+                        
+                    # Run the agent with updated params
+                    result = agent.run(input_data)
+                
+                # Normal case - run through the agent
+                else:
+                    result = agent.run(input_data)
+                    
+                # Store the result
+                step_key = f"step_{current_step}_{agent_name}_{action}"
+                agent_results[step_key] = result
+                
+                # Log the action result
                 if self.database:
                     self.database.log_agent_action(
                         conversation_id=conversation_id,
                         thread_id=thread_id,
                         agent_name=agent_name,
-                        action_name=action_name,
+                        action_name=action,
                         action_input=input_data,
                         action_output=result,
                         user_id=user_id
                     )
-                
-                # Update the agent_results
-                agent_results = state.get("agent_results", {})
-                step_key = f"step_{current_step}"
-                agent_results[step_key] = {
-                    "agent": agent_name,
-                    "action": action_name,
-                    "result": result,
-                    "params": params
-                }
-                
-                # Update the state
+                    
+                # Check for errors in the result
+                if result and isinstance(result, dict) and "error" in result:
+                    error_message = result.get("error", "Unknown error")
+                    logger.error(f"Error in step {current_step + 1}: {error_message}")
+                    
+                    # Log the error using enhanced method
+                    if self.database:
+                        self.database.log_agent_thinking(
+                            conversation_id=conversation_id,
+                            thread_id=thread_id,
+                            agent_name=self.name,
+                            thinking=f"Error in step {current_step + 1}: {error_message}",
+                            user_id=user_id
+                        )
+                        
+                # Continue to the next step
                 return {
                     **state,
                     "current_step": current_step + 1,
+                    "max_steps": max_steps,
                     "agent_results": agent_results
                 }
+            else:
+                error_message = f"Agent '{agent_name}' not found"
+                logger.error(error_message)
                 
-            except Exception as e:
-                logger.error(f"Error executing agent {agent_name} action {action_name}: {str(e)}")
+                # Store the error
+                step_key = f"step_{current_step}_{agent_name}_{action}"
+                agent_results[step_key] = {"error": error_message}
                 
                 # Log the error using enhanced method
                 if self.database:
@@ -541,51 +585,40 @@ Your response:
                         conversation_id=conversation_id,
                         thread_id=thread_id,
                         agent_name=self.name,
-                        thinking=f"Error in step {current_step}: {agent_name}.{action_name} - {str(e)}",
+                        thinking=f"Error in step {current_step + 1}: {error_message}",
                         user_id=user_id
                     )
-                
-                # Update the agent_results with the error
-                agent_results = state.get("agent_results", {})
-                step_key = f"step_{current_step}"
-                agent_results[step_key] = {
-                    "agent": agent_name,
-                    "action": action_name,
-                    "error": str(e),
-                    "params": params
-                }
-                
-                # Continue to the next step
+                    
+                # Continue to the next step despite error
                 return {
                     **state,
-                    "current_step": current_step + 1,
+                    "current_step": current_step + 1, 
+                    "max_steps": max_steps,
                     "agent_results": agent_results
                 }
-                
         except Exception as e:
-            logger.error(f"Error in execute_step_node: {str(e)}")
+            error_message = f"Error executing step {current_step + 1}: {str(e)}"
+            logger.error(error_message)
             
-            # Log the error
+            # Store the error
+            step_key = f"step_{current_step}_{agent_name}_{action}"
+            agent_results[step_key] = {"error": error_message}
+            
+            # Log the error using enhanced method
             if self.database:
                 self.database.log_agent_thinking(
                     conversation_id=conversation_id,
                     thread_id=thread_id,
                     agent_name=self.name,
-                    thinking=f"Error executing step: {str(e)}",
+                    thinking=error_message,
                     user_id=user_id
                 )
-            
-            # Simply move to the next step on error
-            current_step = state.get("current_step", 0)
-            agent_results = state.get("agent_results", {})
-            step_key = f"step_{current_step}"
-            agent_results[step_key] = {
-                "error": f"Error executing step: {str(e)}"
-            }
-            
+                
+            # Continue to the next step despite error
             return {
                 **state,
                 "current_step": current_step + 1,
+                "max_steps": max_steps,
                 "agent_results": agent_results
             }
         
@@ -687,6 +720,10 @@ Your response:
         question = state.get("question")
         thinking = state.get("thinking", "")
         
+        # Extract lineage and dependency information for clear presentation
+        lineage_info = self._extract_lineage_info(state.get("agent_results", {}))
+        dependency_info = self._extract_dependency_info(state.get("agent_results", {}))
+        
         # Create the answer prompt input
         answer_input = {
             "question": question,
@@ -695,6 +732,12 @@ Your response:
             "thinking": thinking,
             "context": state.get("context", "")
         }
+        
+        # Add lineage and dependency info to the prompt if available
+        if lineage_info:
+            answer_input["lineage_info"] = lineage_info
+        if dependency_info:
+            answer_input["dependency_info"] = dependency_info
         
         # Log the answer generation using enhanced method
         if self.database:
@@ -706,10 +749,69 @@ Your response:
                 user_id=user_id
             )
         
-        # Run the answer prompt
-        answer_response = self.model.invoke(
-            self.final_response_prompt.format_messages(**answer_input)
-        )
+        # Create an enhanced prompt if lineage paths are available
+        try:
+            if lineage_info or dependency_info:
+                # Get the template string from the messages
+                if hasattr(self.final_response_prompt, 'messages') and self.final_response_prompt.messages:
+                    # Extract the template string - handle different prompt formats
+                    template_str = ""
+                    if hasattr(self.final_response_prompt.messages[0], 'content'):
+                        template_str = self.final_response_prompt.messages[0].content
+                    elif hasattr(self.final_response_prompt.messages[0], 'prompt') and hasattr(self.final_response_prompt.messages[0].prompt, 'template'):
+                        template_str = self.final_response_prompt.messages[0].prompt.template
+                    else:
+                        # Fall back to string representation if content not directly accessible
+                        template_str = str(self.final_response_prompt.messages[0])
+                        # Clean up template string
+                        template_str = template_str.replace("HumanMessagePromptTemplate(prompt=PromptTemplate(", "")
+                        template_str = template_str.replace("input_variables=", "")
+                        template_str = template_str.replace(", template=", "")
+                        # Extract just the template string
+                        import re
+                        match = re.search(r'"([^"]*)"', template_str)
+                        if match:
+                            template_str = match.group(1)
+                
+                # Add lineage info to the template
+                enhanced_prompt = template_str
+                
+                # Add lineage info to the prompt
+                if lineage_info:
+                    enhanced_prompt += "\n\nLineage Information (Source to Target):\n"
+                    enhanced_prompt += lineage_info
+                    
+                # Add dependency info to the prompt
+                if dependency_info:
+                    enhanced_prompt += "\n\nDependency Information (Tables and Files):\n"
+                    enhanced_prompt += dependency_info
+                    
+                # Create new prompt template
+                prompt_template = ChatPromptTemplate.from_template(enhanced_prompt)
+                answer_response = self.model.invoke(
+                    prompt_template.format_messages(**answer_input)
+                )
+            else:
+                # Use the standard prompt
+                answer_response = self.model.invoke(
+                    self.final_response_prompt.format_messages(**answer_input)
+                )
+        except Exception as e:
+            logger.error(f"Error generating answer: {str(e)}")
+            # Fallback to a simple prompt template
+            fallback_prompt = ChatPromptTemplate.from_template(
+                """You are a SQL Analysis expert. Please answer this question as best you can:
+
+Question: {question}
+
+Your analysis and thinking:
+{thinking}
+
+Your response:"""
+            )
+            answer_response = self.model.invoke(
+                fallback_prompt.format_messages(**answer_input)
+            )
         
         # Get the answer content
         answer = answer_response.content
@@ -740,6 +842,138 @@ Your response:
             "answer": answer,
             "messages": state.get("messages", []) + [AIMessage(content=answer)]
         }
+        
+    def _extract_lineage_info(self, agent_results: Dict[str, Any]) -> str:
+        """
+        Extract lineage information from agent results to provide a clear source-to-target path
+        
+        Args:
+            agent_results: Results from specialized agents
+            
+        Returns:
+            Formatted lineage information
+        """
+        lineage_info = ""
+        
+        # Look for table lineage results
+        for step_key, result in agent_results.items():
+            if not result or not isinstance(result, dict):
+                continue
+                
+            # Check for table lineage
+            lineage_paths = result.get("lineage_paths", [])
+            if lineage_paths:
+                lineage_info += "Table Lineage Paths:\n"
+                for i, path in enumerate(lineage_paths[:5], 1):  # Limit to 5 paths
+                    lineage_info += f"{i}. {path.get('path', '')}\n"
+                
+                # Add a note if more paths were found
+                if len(lineage_paths) > 5:
+                    lineage_info += f"   ...and {len(lineage_paths) - 5} more paths\n"
+                    
+                lineage_info += "\n"
+            
+            # Check for column lineage
+            column_paths = result.get("column_lineage_paths", [])
+            if column_paths:
+                lineage_info += "Column Lineage Paths:\n"
+                for i, path in enumerate(column_paths[:5], 1):  # Limit to 5 paths
+                    lineage_info += f"{i}. {path.get('path_text', '')}\n"
+                    
+                    # Add transformation information if available
+                    for file in path.get("files", []):
+                        transformation = file.get("transformation")
+                        if transformation:
+                            lineage_info += f"   - Transformation: {transformation}\n"
+                
+                # Add a note if more paths were found
+                if len(column_paths) > 5:
+                    lineage_info += f"   ...and {len(column_paths) - 5} more paths\n"
+                    
+                lineage_info += "\n"
+                
+            # Check for summary information
+            summary = result.get("summary", {})
+            if summary:
+                if "target_table" in summary:
+                    lineage_info += f"Target Table: {summary.get('target_table')}\n"
+                    lineage_info += f"Direction: {summary.get('direction', 'upstream')}\n"
+                    lineage_info += f"Source Tables: {', '.join(summary.get('source_tables', []))}\n"
+                    lineage_info += f"Total Paths: {summary.get('lineage_path_count', 0)}\n"
+                    lineage_info += f"Total Files: {summary.get('github_file_count', 0)}\n"
+                    
+                elif "target_column" in summary:
+                    lineage_info += f"Target Column: {summary.get('target_column')}\n"
+                    lineage_info += f"Direction: {summary.get('direction', 'upstream')}\n"
+                    lineage_info += f"Source Columns: {', '.join(summary.get('source_columns', []))}\n"
+                    lineage_info += f"Total Paths: {summary.get('lineage_path_count', 0)}\n"
+                    lineage_info += f"Total Files: {summary.get('github_file_count', 0)}\n"
+                    
+                lineage_info += "\n"
+                
+        return lineage_info
+        
+    def _extract_dependency_info(self, agent_results: Dict[str, Any]) -> str:
+        """
+        Extract dependency information including GitHub URLs from agent results
+        
+        Args:
+            agent_results: Results from specialized agents
+            
+        Returns:
+            Formatted dependency information
+        """
+        dependency_info = ""
+        
+        # Look for GitHub files information
+        for step_key, result in agent_results.items():
+            if not result or not isinstance(result, dict):
+                continue
+                
+            # Check for GitHub files
+            github_files = result.get("github_files", [])
+            if github_files:
+                dependency_info += "GitHub Files (Implementations):\n"
+                for i, file in enumerate(github_files[:10], 1):  # Limit to 10 files
+                    file_path = file.get("file_path", "")
+                    url = file.get("url", "")
+                    
+                    if file_path and url:
+                        dependency_info += f"{i}. {file_path}\n   URL: {url}\n"
+                        
+                        # Add related tables or columns if available
+                        if "tables" in file:
+                            tables = file.get("tables", [])
+                            if tables:
+                                dependency_info += f"   Tables: {', '.join(tables)}\n"
+                                
+                        if "columns" in file:
+                            columns = file.get("columns", [])
+                            if columns:
+                                dependency_info += f"   Columns: {', '.join(columns)}\n"
+                
+                # Add a note if more files were found
+                if len(github_files) > 10:
+                    dependency_info += f"   ...and {len(github_files) - 10} more files\n"
+                
+            # Check for source files (when GitHub files aren't available)
+            source_files = result.get("source_files", [])
+            if not github_files and source_files:
+                dependency_info += "Source Files:\n"
+                for i, file in enumerate(source_files[:10], 1):  # Limit to 10 files
+                    file_path = file.get("file_path", "")
+                    url = file.get("url", "")
+                    
+                    if file_path:
+                        dependency_info += f"{i}. {file_path}\n"
+                        if url:
+                            dependency_info += f"   URL: {url}\n"
+                
+                # Add a note if more files were found
+                if len(source_files) > 10:
+                    dependency_info += f"   ...and {len(source_files) - 10} more files\n"
+                    
+        return dependency_info
         
     def process_question(self, thread_id: str, user_id: str, question: str, repo_url: Optional[str] = None) -> Dict[str, Any]:
         """
@@ -878,12 +1112,30 @@ Your response:
             }
             
     def _update_agent_tools(self):
-        """Update all agents with the current SQL and GitHub tools"""
+        """Update the tools for all agents"""
         for agent_name, agent in self.agents.items():
             if hasattr(agent, 'sql_tools'):
                 agent.sql_tools = self.sql_tools
             if hasattr(agent, 'github_tools'):
                 agent.github_tools = self.github_tools
+                
+        # Re-initialize SQL tools with GitHub wrapper if both are available
+        if self.sql_tools and self.github_tools:
+            github_wrapper = self.github_tools.get_github_wrapper()
+            
+            if github_wrapper and hasattr(self.sql_tools, 'initialize_with_github'):
+                try:
+                    logger.info("Re-initializing SQL tools with updated GitHub wrapper")
+                    self.sql_tools.initialize_with_github(github_wrapper)
+                    
+                    # Check if vector_store is initialized
+                    if hasattr(self.sql_tools, 'github_sql_finder') and self.sql_tools.github_sql_finder:
+                        if not self.sql_tools.github_sql_finder.vector_store:
+                            # Initialize vector store 
+                            logger.info("Initializing vector store for GitHub SQL finder")
+                            self.sql_tools.github_sql_finder.initialize()
+                except Exception as e:
+                    logger.error(f"Error updating SQL tools with GitHub wrapper: {str(e)}")
         
     def _find_or_create_conversation(self, thread_id: str, user_id: str) -> str:
         """Find or create a conversation ID for the given thread and user"""

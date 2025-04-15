@@ -255,11 +255,23 @@ class SQLAnalysisAPI:
         """
         try:
             # Use dependency tool if available
-            if self.dependency_tool:
+            if self.dependency_tool and hasattr(self.dependency_tool, 'search_for_table'):
+                logger.info(f"Using dependency_tool to search for table: {table_name}")
                 return self.dependency_tool.search_for_table(table_name, limit)
                 
+            # Fallback to GitHub SQL finder if available
+            if self.github_sql_finder and hasattr(self.github_sql_finder, 'search_for_table'):
+                logger.info(f"Using github_sql_finder to search for table: {table_name}")
+                results = self.github_sql_finder.search_for_table(table_name, limit)
+                
+                # Format results to match expected output format if needed
+                if isinstance(results, list):
+                    return {"files_found": len(results), "results": results}
+                return results
+            
             # Fallback to direct GitHub search if available
             if self.github_wrapper:
+                logger.info(f"Using github_wrapper to search for table: {table_name}")
                 # Search for SQL files containing the table name
                 query = f"SELECT * FROM {table_name}"
                 results = self.github_wrapper.search_code(query, file_extensions=[".sql"])
@@ -300,12 +312,61 @@ class SQLAnalysisAPI:
                     "results": formatted_results
                 }
             
-            return {"files_found": 0, "results": []}
+            # No search method available
+            return {"error": "No table search method available", "files_found": 0, "results": []}
             
         except Exception as e:
             logger.error(f"Error searching for table {table_name}: {str(e)}")
-            return {"error": str(e)}
+            return {"error": str(e), "files_found": 0, "results": []}
+    
+    def search_for_column(self, table_name: str, column_name: str, limit: int = 20) -> Dict[str, Any]:
+        """
+        Search for SQL files that reference a specific column in a table
+        
+        Args:
+            table_name: Table name
+            column_name: Column name
+            limit: Maximum number of results
             
+        Returns:
+            List of matching SQL files with metadata
+        """
+        try:
+            # Use dependency tool if available
+            if self.dependency_tool and hasattr(self.dependency_tool, 'search_for_column'):
+                logger.info(f"Using dependency_tool to search for column: {column_name} in table: {table_name}")
+                return self.dependency_tool.search_for_column(table_name, column_name, limit)
+            
+            # Use github_sql_finder if available
+            if self.github_sql_finder and hasattr(self.github_sql_finder, 'search_for_column'):
+                logger.info(f"Using github_sql_finder to search for column: {column_name}")
+                results = self.github_sql_finder.search_for_column(table_name, column_name, limit)
+                
+                # Format results to match expected output format if needed
+                if isinstance(results, list):
+                    return {"files_found": len(results), "results": results}
+                return results
+            
+            # Fallback to general search
+            if self.github_sql_finder and hasattr(self.github_sql_finder, 'search_sql_files'):
+                query = f"{column_name}"
+                if table_name:
+                    query = f"{table_name}.{column_name}"
+                    
+                results = self.github_sql_finder.search_sql_files(query, limit)
+                
+                # Format results if needed
+                if isinstance(results, list):
+                    return {"files_found": len(results), "results": results}
+                return results
+            
+            # No search method available
+            return {"error": "No column search method available", "files_found": 0, "results": []}
+            
+        except Exception as e:
+            logger.error(f"Error searching for column {table_name}.{column_name}: {str(e)}")
+            return {"error": str(e), "files_found": 0, "results": []}
+    
     def _extract_relevant_sql(self, content: str, table_name: str) -> str:
         """Extract relevant SQL statements containing the table name"""
         if not content:
@@ -326,20 +387,6 @@ class SQLAnalysisAPI:
             
         # If no exact matches, return the first part of the file
         return content[:500] + "..." if len(content) > 500 else content
-    
-    def search_for_column(self, table_name: str, column_name: str, limit: int = 20) -> List[Dict[str, Any]]:
-        """
-        Search for SQL files that reference a specific column in a table
-        
-        Args:
-            table_name: Table name
-            column_name: Column name
-            limit: Maximum number of results
-            
-        Returns:
-            List of matching SQL files with metadata
-        """
-        return self.github_sql_finder.search_for_column(table_name, column_name, limit)
     
     def process_file(self, file_path: str, dialect: Optional[str] = None) -> Dict[str, Any]:
         """

@@ -246,16 +246,48 @@ class SQLLLMInterface:
             Simplified search results
         """
         try:
-            results = self.sql_api.search_for_table(table_name, limit)
+            # Check if we have a proper SQL API
+            if not self.sql_api:
+                return {"error": "SQL API not initialized", "files_found": 0, "results": []}
             
+            # First try to use the API's search_for_table method
+            if hasattr(self.sql_api, 'search_for_table'):
+                results = self.sql_api.search_for_table(table_name, limit)
+            # Then try dependency_tool's search_for_table if available
+            elif hasattr(self.sql_api, 'dependency_tool') and hasattr(self.sql_api.dependency_tool, 'search_for_table'):
+                results = self.sql_api.dependency_tool.search_for_table(table_name, limit)
+            # Otherwise, fall back to general SQL search
+            elif hasattr(self.sql_api, 'search_for_sql_files'):
+                results = self.sql_api.search_for_sql_files(f"SELECT * FROM {table_name}", limit)
+            elif hasattr(self.sql_api, 'github_sql_finder') and hasattr(self.sql_api.github_sql_finder, 'search_sql_files'):
+                results = self.sql_api.github_sql_finder.search_sql_files(f"SELECT * FROM {table_name}", limit)
+            else:
+                return {"error": "No table search method available", "files_found": 0, "results": []}
+            
+            # Handle case where results is a string (error message)
+            if isinstance(results, str):
+                return {"error": results, "files_found": 0, "results": []}
+                
+            # Handle case where results is a dictionary with error
+            if isinstance(results, dict) and "error" in results:
+                return {"error": results["error"], "files_found": 0, "results": []}
+                
             # Create simplified result for LLM consumption
             llm_result = {
                 "table": table_name,
-                "files_found": len(results),
+                "files_found": len(results) if isinstance(results, list) else 0,
                 "results": []
             }
             
-            for result in results:
+            # Properly handle both list and dictionary result formats
+            result_list = []
+            if isinstance(results, list):
+                result_list = results
+            elif isinstance(results, dict) and "results" in results:
+                result_list = results.get("results", [])
+                llm_result["files_found"] = results.get("files_found", len(result_list))
+            
+            for result in result_list:
                 file_info = {
                     "file_path": result.get("file_path", ""),
                     "dialect": result.get("dialect", "unknown"),
@@ -277,7 +309,7 @@ class SQLLLMInterface:
             
         except Exception as e:
             logger.error(f"Error in search_tables: {str(e)}")
-            return {"error": str(e)}
+            return {"error": str(e), "files_found": 0, "results": []}
     
     def search_sql(self, query: str, limit: int = 5) -> Dict[str, Any]:
         """
@@ -356,20 +388,52 @@ class SQLLLMInterface:
             Simplified search results
         """
         try:
-            # Use column search with empty table name for global search
-            results = self.sql_api.search_for_column("", column_name, limit)
+            # Check if we have a proper SQL API
+            if not self.sql_api:
+                return {"error": "SQL API not initialized", "files_found": 0, "results": []}
+            
+            # First try to use the SQL API methods
+            if hasattr(self.sql_api, 'search_for_column'):
+                results = self.sql_api.search_for_column("", column_name, limit)
+            # Then try github_sql_finder if available
+            elif hasattr(self.sql_api, 'github_sql_finder') and hasattr(self.sql_api.github_sql_finder, 'search_for_column'):
+                results = self.sql_api.github_sql_finder.search_for_column("", column_name, limit)
+            # Otherwise, fall back to general SQL search with column-focused query
+            elif hasattr(self.sql_api, 'search_for_sql_files'):
+                results = self.sql_api.search_for_sql_files(f"SELECT {column_name} FROM", limit)
+            elif hasattr(self.sql_api, 'github_sql_finder') and hasattr(self.sql_api.github_sql_finder, 'search_sql_files'):
+                results = self.sql_api.github_sql_finder.search_sql_files(f"SELECT {column_name} FROM", limit)
+            else:
+                return {"error": "No column search method available", "files_found": 0, "results": []}
+                
+            # Handle case where results is a string (error message)
+            if isinstance(results, str):
+                return {"error": results, "files_found": 0, "results": []}
+                
+            # Handle case where results is a dictionary with error
+            if isinstance(results, dict) and "error" in results:
+                return {"error": results["error"], "files_found": 0, "results": []}
             
             # Create simplified result for LLM consumption
             llm_result = {
                 "column": column_name,
-                "files_found": len(results),
-                "results": []
+                "files_found": len(results) if isinstance(results, list) else 0,
+                "results": [],
+                "likely_tables": []
             }
+            
+            # Properly handle both list and dictionary result formats
+            result_list = []
+            if isinstance(results, list):
+                result_list = results
+            elif isinstance(results, dict) and "results" in results:
+                result_list = results.get("results", [])
+                llm_result["files_found"] = results.get("files_found", len(result_list))
             
             # Extract likely tables containing this column
             tables_containing_column = set()
             
-            for result in results:
+            for result in result_list:
                 file_info = {
                     "file_path": result.get("file_path", ""),
                     "dialect": result.get("dialect", "unknown"),
@@ -400,7 +464,7 @@ class SQLLLMInterface:
             
         except Exception as e:
             logger.error(f"Error in search_columns: {str(e)}")
-            return {"error": str(e)}
+            return {"error": str(e), "files_found": 0, "results": []}
     
     def _extract_table_for_column(self, content: str, column_name: str, file_path: str = "") -> Optional[str]:
         """

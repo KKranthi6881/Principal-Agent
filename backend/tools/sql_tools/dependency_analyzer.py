@@ -12,6 +12,9 @@ from typing import Dict, List, Any, Optional
 import os
 import networkx as nx
 from pathlib import Path
+import re
+from urllib.parse import urlparse
+import uuid
 
 from .sql_dependency_analyzer import SQLDependencyAnalyzer
 from .github_sql_finder import GitHubSQLFinder
@@ -195,7 +198,7 @@ class SQLDependencyTool:
                     file_info = file_info_map[file_path]
                     
                     # Create base file info
-                    file_detail = self._create_file_detail(file_info, file_path, url_extractor_available)
+                    file_detail = self._create_file_detail(file_path, file_info.get("content"))
                     
                     # Cache and add
                     self.file_cache[file_path] = file_detail
@@ -205,7 +208,7 @@ class SQLDependencyTool:
                     match_found = False
                     for file_info in validated_sql_files:
                         if file_info.get("path") == file_path:
-                            file_detail = self._create_file_detail(file_info, file_path, url_extractor_available)
+                            file_detail = self._create_file_detail(file_path, file_info.get("content"))
                             self.file_cache[file_path] = file_detail
                             file_details.append(file_detail)
                             match_found = True
@@ -229,7 +232,7 @@ class SQLDependencyTool:
                 for add_file in additional_files:
                     # Check if already included
                     if not any(f.get("path") == add_file.get("path") for f in file_details):
-                        add_file_detail = self._create_file_detail(add_file, add_file.get("path", ""), url_extractor_available)
+                        add_file_detail = self._create_file_detail(add_file.get("path", ""), add_file.get("content"))
                         add_file_detail["is_additional"] = True
                         file_details.append(add_file_detail)
                         
@@ -248,7 +251,7 @@ class SQLDependencyTool:
         for file_info in validated_sql_files:
             file_path = file_info.get("path", "")
             if file_path and file_path not in all_files_used:
-                file_detail = self._create_file_detail(file_info, file_path, url_extractor_available)
+                file_detail = self._create_file_detail(file_path, file_info.get("content"))
                 self._ensure_github_url(file_detail)
                 remaining_files.append(file_detail)
                 all_files_used.add(file_path)
@@ -306,108 +309,135 @@ class SQLDependencyTool:
         
         return upstream_info
     
-    def _create_file_detail(self, file_info: Dict[str, Any], file_path: str, url_extractor_available: bool) -> Dict[str, Any]:
-        """Create a file detail dictionary with GitHub URL information"""
-        # Base file detail
+    def _create_file_detail(self, file_path: str, content: str) -> Dict[str, Any]:
+        """
+        Create a file detail dictionary for a file.
+        
+        Args:
+            file_path: Path to the file
+            content: Content of the file
+            
+        Returns:
+            Dictionary with file details
+        """
         file_detail = {
+            "id": str(uuid.uuid4()),
+            "name": Path(file_path).name,
             "path": file_path,
-            "file_name": os.path.basename(file_path),
-            "dialect": file_info.get("dialect", "sql")
+            "content": content,
+            "source": "github",
+            "size": len(content),
+            "score": 0,
+            "last_modified": None,
+            "created_at": None,
+            "dependencies": [],
+            "dependency_types": []
         }
         
-        # Add existing fields
-        for field in ["url", "github_repo", "last_commit"]:
-            if field in file_info:
-                file_detail[field] = file_info[field]
+        # Ensure that github_url is added to the file detail if applicable
+        return self._ensure_github_url(file_detail)
+    
+    def _ensure_github_url(self, file_detail: Dict[str, Any], github_url: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Ensure that a file detail has a GitHub URL.
         
-        # Handle GitHub URL info
-        if url_extractor_available:
+        Args:
+            file_detail: File detail to ensure has a GitHub URL
+            github_url: GitHub URL to use (optional)
+        
+        Returns:
+            Updated file detail
+        """
+        # Make a copy of the file detail to avoid modifying the original
+        file_detail = dict(file_detail)
+        
+        # If no github_url is provided, use the one from the file detail
+        if not github_url and "github_url" in file_detail:
+            github_url = file_detail.get("github_url", "")
+        
+        # If we have a GitHub URL, ensure it's clean
+        if github_url:
             try:
                 from .github_url_extractor import GitHubURLExtractor
+                # Use the GitHubURLExtractor to clean the URL
+                github_url = GitHubURLExtractor._ensure_clean_github_url(github_url)
+                # Update the file detail with the clean GitHub URL
+                file_detail["github_url"] = github_url
                 
-                # Get GitHub URL
-                github_url = file_info.get("url", "")
-                if github_url:
-                    github_info = GitHubURLExtractor.extract_github_info(github_url)
-                    file_detail.update({
-                        "github_url": github_url,
-                        "raw_url": github_info["raw_url"],
-                        "repo_owner": github_info["owner"],
-                        "repo_name": github_info["repo"],
-                        "branch": github_info["branch"]
-                    })
-            except:
-                pass
-        
-        # Basic URL handling if extractor failed or unavailable
-        if "github_url" not in file_detail and "url" in file_info:
-            file_detail["github_url"] = file_info["url"]
-            
-            # Generate raw URL
-            if "github.com" in file_info["url"]:
-                raw_url = file_info["url"].replace("github.com", "raw.githubusercontent.com")
-                if "/blob/" in raw_url:
-                    raw_url = raw_url.replace("/blob/", "/")
-                file_detail["raw_url"] = raw_url
+                # Use GitHubURLExtractor to extract repository information
+                repo_info = GitHubURLExtractor.extract_github_info(github_url)
+                
+                # Update file detail with repository information
+                if repo_info:
+                    file_detail["repo_owner"] = repo_info.get("owner", "")
+                    file_detail["repo_name"] = repo_info.get("repo", "")
+                    file_detail["repo_branch"] = repo_info.get("branch", "")
+                    file_detail["file_path"] = repo_info.get("path", "")
+                    
+                    # If raw_url is available in repo_info, use it
+                    if repo_info.get("raw_url"):
+                        file_detail["raw_content_url"] = repo_info["raw_url"]
+                    # Otherwise generate raw content URL if all necessary details are available
+                    elif all([file_detail.get("repo_owner"), file_detail.get("repo_name"), 
+                            file_detail.get("repo_branch"), file_detail.get("file_path")]):
+                        raw_url_template = "https://raw.githubusercontent.com/{owner}/{name}/{branch}/{path}"
+                        file_detail["raw_content_url"] = raw_url_template.format(
+                            owner=file_detail["repo_owner"],
+                            name=file_detail["repo_name"],
+                            branch=file_detail["repo_branch"],
+                            path=file_detail["file_path"]
+                        )
+            except (ImportError, Exception) as e:
+                # Fallback URL cleaning if GitHubURLExtractor fails
+                if github_url.endswith(".git"):
+                    github_url = github_url[:-4]
+                # Handle .git in the middle of URLs
+                import re
+                github_url = re.sub(r'(https://[^/]+/[^/]+/[^/]+)\.git(/.*)', r'\1\2', github_url)
+                # Update the file detail with the clean GitHub URL
+                file_detail["github_url"] = github_url
         
         return file_detail
     
-    def _ensure_github_url(self, file_detail: Dict[str, Any]) -> None:
-        """Ensure a file detail has a GitHub URL"""
-        # Skip if already has GitHub URL
-        if "github_url" in file_detail:
-            return
-            
-        # Try to use the url field
-        if "url" in file_detail:
-            file_detail["github_url"] = file_detail["url"]
-            
-            # Generate raw URL if it's a GitHub URL
-            if "github.com" in file_detail["url"]:
-                raw_url = file_detail["url"].replace("github.com", "raw.githubusercontent.com")
-                if "/blob/" in raw_url:
-                    raw_url = raw_url.replace("/blob/", "/")
-                file_detail["raw_url"] = raw_url
-            return
-            
-        # Generate a synthetic URL if we have repo and path
-        if "github_repo" in file_detail and "path" in file_detail:
-            repo = file_detail["github_repo"]
-            path = file_detail["path"]
-            
-            # Make sure repo has owner/name format
-            if "/" in repo:
-                file_detail["github_url"] = f"https://github.com/{repo}/blob/main/{path}"
-                file_detail["raw_url"] = f"https://raw.githubusercontent.com/{repo}/main/{path}"
-                return
-                
-        # Last resort: create a placeholder URL with the path
-        if "path" in file_detail:
-            path = file_detail["path"]
-            file_detail["github_url"] = f"https://github.com/unknown/repo/blob/main/{path}"
-            file_detail["raw_url"] = f"https://raw.githubusercontent.com/unknown/repo/main/{path}"
-    
     def _get_raw_content_url(self, github_url: str) -> str:
         """
-        Convert GitHub UI URL to raw content URL
+        Convert a GitHub URL to a raw content URL.
         
         Args:
-            github_url: GitHub URL from UI
+            github_url: URL to a GitHub file, e.g., https://github.com/owner/repo/blob/branch/path/to/file
             
         Returns:
-            URL for raw content
+            Raw content URL for accessing the file content directly
         """
-        if not github_url or not github_url.startswith("https://github.com"):
-            return ""
-            
-        # Examples:
-        # https://github.com/user/repo/blob/branch/path/to/file.sql -> https://raw.githubusercontent.com/user/repo/branch/path/to/file.sql
         try:
-            # Replace 'github.com' with 'raw.githubusercontent.com' and remove '/blob'
-            raw_url = github_url.replace("github.com", "raw.githubusercontent.com").replace("/blob/", "/")
-            return raw_url
+            # Try to use GitHubURLExtractor for more robust handling
+            from .github_url_extractor import GitHubURLExtractor
+            github_info = GitHubURLExtractor.extract_github_info(github_url)
+            if github_info.get("raw_url"):
+                return github_info["raw_url"]
+            
+            # Fall back to direct conversion if raw_url wasn't generated
+            parsed = urlparse(github_url)
+            if parsed.netloc == "github.com" and "/blob/" in github_url:
+                return github_url.replace("github.com", "raw.githubusercontent.com").replace("/blob/", "/")
+            elif "github" in parsed.netloc and "/blob/" in github_url:
+                # Enterprise GitHub
+                hostname = parsed.netloc
+                path = parsed.path.replace("/blob/", "/")
+                path_parts = path.split("/")
+                if len(path_parts) >= 3:
+                    owner = path_parts[1]
+                    repo = path_parts[2]
+                    rest_path = "/".join(path_parts[3:])
+                    return f"https://{hostname}/raw/{owner}/{repo}/{rest_path}"
+                
+            return github_url
+            
         except Exception:
-            return ""
+            # Simple fallback conversion
+            if "github.com" in github_url and "/blob/" in github_url:
+                return github_url.replace("github.com", "raw.githubusercontent.com").replace("/blob/", "/")
+            return github_url
     
     def _find_additional_files_for_dependency(self, source_table: str, target_table: str) -> List[Dict[str, Any]]:
         """
@@ -442,6 +472,13 @@ class SQLDependencyTool:
         """
         urls_by_table = {}
         
+        # Try to import GitHubURLExtractor for URL cleaning
+        try:
+            from .github_url_extractor import GitHubURLExtractor
+            url_extractor_available = True
+        except ImportError:
+            url_extractor_available = False
+        
         # Process all dependencies
         for dep in dependencies:
             source = dep.get("source", "")
@@ -459,6 +496,18 @@ class SQLDependencyTool:
             for file_detail in dep.get("file_details", []):
                 url = file_detail.get("github_url", "")
                 if url:
+                    # Clean URL to ensure consistency
+                    if url_extractor_available:
+                        # Use the GitHubURLExtractor to clean the URL
+                        url = GitHubURLExtractor._ensure_clean_github_url(url)
+                    else:
+                        # Fallback URL cleaning
+                        if url.endswith(".git"):
+                            url = url[:-4]
+                        # Handle .git in the middle of URLs
+                        import re
+                        url = re.sub(r'(https://[^/]+/[^/]+/[^/]+)\.git(/.*)', r'\1\2', url)
+                    
                     # Add URL to source table
                     if source and url not in urls_by_table[source]:
                         urls_by_table[source].append(url)
@@ -546,7 +595,7 @@ class SQLDependencyTool:
                         file_info = file_info_map[file_path]
                         
                         # Create file detail
-                        file_detail = self._create_file_detail(file_info, file_path, url_extractor_available)
+                        file_detail = self._create_file_detail(file_path, file_info.get("content"))
                         
                         # Add to cache and result
                         self.file_cache[file_path] = file_detail
@@ -556,7 +605,7 @@ class SQLDependencyTool:
                         match_found = False
                         for file_info in sql_files:
                             if file_info.get("path") == file_path:
-                                file_detail = self._create_file_detail(file_info, file_path, url_extractor_available)
+                                file_detail = self._create_file_detail(file_path, file_info.get("content"))
                                 self.file_cache[file_path] = file_detail
                                 file_details.append(file_detail)
                                 match_found = True
@@ -598,7 +647,7 @@ class SQLDependencyTool:
                 file_path = file_info.get("path", "")
                 if file_path:
                     # Create file detail
-                    file_detail = self._create_file_detail(file_info, file_path, url_extractor_available)
+                    file_detail = self._create_file_detail(file_path, file_info.get("content"))
                     
                     # Ensure it has GitHub URL
                     self._ensure_github_url(file_detail)
@@ -853,4 +902,98 @@ class SQLDependencyTool:
             return {
                 "error": f"Error saving dependency graph: {str(e)}",
                 "file_path": file_path
-            } 
+            }
+    
+    def search_for_table(self, table_name: str, limit: int = 5) -> Dict[str, Any]:
+        """
+        Search for SQL files containing the specified table
+        
+        Args:
+            table_name: Name of the table to search for
+            limit: Maximum number of results to return
+            
+        Returns:
+            Dictionary containing search results with file paths and content
+        """
+        try:
+            if not self.sql_finder:
+                # Initialize SQL finder if not already done
+                self.initialize()
+                if not self.sql_finder:
+                    return {"error": "Failed to initialize SQL finder", "files_found": 0, "results": []}
+                
+            # Search for the table using the SQL finder
+            sql_files = self.sql_finder.search_for_table(table_name, limit)
+            
+            # Format the results
+            if not sql_files:
+                return {"files_found": 0, "results": []}
+                
+            # Handle error case
+            if isinstance(sql_files, dict) and "error" in sql_files:
+                return sql_files  # Pass through the error
+                
+            # Convert to standard format
+            results = []
+            for file in sql_files:
+                if isinstance(file, dict):
+                    results.append(file)
+                    
+            return {
+                "files_found": len(results),
+                "results": results
+            }
+        except Exception as e:
+            logger.error(f"Error searching for table {table_name}: {str(e)}")
+            return {"error": f"Error searching for table: {str(e)}", "files_found": 0, "results": []}
+    
+    def search_for_column(self, table_name: str, column_name: str, limit: int = 5) -> Dict[str, Any]:
+        """
+        Search for SQL files that reference a specific column in a table
+        
+        Args:
+            table_name: Table name (optional, can be empty string)
+            column_name: Column name to search for
+            limit: Maximum number of results
+            
+        Returns:
+            Dictionary containing search results
+        """
+        try:
+            if not self.sql_finder:
+                # Initialize SQL finder if not already done
+                self.initialize()
+                if not self.sql_finder:
+                    return {"error": "Failed to initialize SQL finder", "files_found": 0, "results": []}
+                
+            # Search for the column using the SQL finder
+            if hasattr(self.sql_finder, 'search_for_column'):
+                sql_files = self.sql_finder.search_for_column(table_name, column_name, limit)
+            else:
+                # Fall back to general search if specific method not available
+                query = f"{column_name}"
+                if table_name:
+                    query = f"{table_name}.{column_name}"
+                sql_files = self.sql_finder.search_sql_files(query, limit)
+            
+            # Format the results
+            if not sql_files:
+                return {"files_found": 0, "results": []}
+                
+            # Handle error case
+            if isinstance(sql_files, dict) and "error" in sql_files:
+                return sql_files  # Pass through the error
+                
+            # Convert to standard format
+            results = []
+            for file in sql_files:
+                if isinstance(file, dict):
+                    results.append(file)
+                    
+            return {
+                "files_found": len(results),
+                "results": results
+            }
+        except Exception as e:
+            logger.error(f"Error searching for column {column_name}: {str(e)}")
+            return {"error": f"Error searching for column: {str(e)}", "files_found": 0, "results": []} 
