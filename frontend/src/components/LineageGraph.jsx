@@ -57,7 +57,7 @@ export const LineageGraph = ({ data, width, height }) => {
   const [errorMessage, setErrorMessage] = useState("");
   
   // Add state for panning mode
-  const [isPanningMode, setIsPanningMode] = useState(false);
+  const [isPanningMode, setIsPanningMode] = useState(true); // Default to panning mode
   const [isMouseDown, setIsMouseDown] = useState(false);
   const [lastMousePosition, setLastMousePosition] = useState({ x: 0, y: 0 });
   
@@ -981,7 +981,10 @@ export const LineageGraph = ({ data, width, height }) => {
     // Calculate required scale to fit
     const scaleX = containerWidth / (maxX - minX);
     const scaleY = containerHeight / (maxY - minY);
-    const newScale = Math.min(scaleX, scaleY, 1); // Limit max scale to 1
+    let newScale = Math.min(scaleX, scaleY, 1); // Limit max scale to 1
+    
+    // Ensure a minimum 60% zoom level for readability
+    newScale = Math.max(newScale, 0.6);
     
     // Calculate center point of models
     const centerX = (minX + maxX) / 2;
@@ -1009,8 +1012,7 @@ export const LineageGraph = ({ data, width, height }) => {
     return () => clearTimeout(timer);
   }, [layout, layoutMode]);
   
-  // Remove the automatic fitToView on expandedModels changes to preserve zoom levels
-  // Only fit view on first mount
+  // Fit view on first mount and when lineage panel is opened
   useEffect(() => {
     const timer = setTimeout(() => {
       fitToView();
@@ -1116,8 +1118,6 @@ export const LineageGraph = ({ data, width, height }) => {
   
   // Add new panning handler for the entire graph
   const handleGraphPanning = (e) => {
-    if (!isPanningMode) return;
-    
     e.preventDefault();
     setIsMouseDown(true);
     setLastMousePosition({
@@ -1151,11 +1151,6 @@ export const LineageGraph = ({ data, width, height }) => {
     
     document.addEventListener('mousemove', handleMouseMove);
     document.addEventListener('mouseup', handleMouseUp);
-  };
-  
-  // Add function to toggle panning mode
-  const togglePanningMode = () => {
-    setIsPanningMode(!isPanningMode);
   };
   
   // Add a function to highlight connected columns
@@ -1687,11 +1682,9 @@ export const LineageGraph = ({ data, width, height }) => {
         overflow="hidden"
         boxShadow={isFullscreen ? "none" : "sm"}
         bg="white"
-        onMouseDown={isPanningMode ? handleGraphPanning : undefined}
+        onMouseDown={handleGraphPanning}
         style={{
-          cursor: isPanningMode 
-            ? (isMouseDown ? "grabbing" : "grab") 
-            : "default",
+          cursor: isMouseDown ? "grabbing" : "grab",
           transition: "height 0.3s ease"
         }}
       >
@@ -1840,19 +1833,19 @@ export const LineageGraph = ({ data, width, height }) => {
               </Tooltip>
             </HStack>
             
-            {/* Compact Controls Row 2 - Zoom and Navigation */}
+            {/* Compact Controls Row 2 - Zoom controls */}
             <HStack spacing={1}>
               <Tooltip label="Zoom Out" placement="bottom">
                 <IconButton
                   size="sm"
                   icon={<Icon as={TbZoomOut} />}
-                  onClick={() => setScale(prev => Math.max(prev / 1.2, 0.5))}
+                  onClick={() => setScale(prev => Math.max(0.1, prev - 0.1))}
                   aria-label="Zoom Out"
                   variant="outline"
                 />
               </Tooltip>
               
-              <Text fontSize="xs" fontWeight="medium" width="40px" textAlign="center">
+              <Text fontSize="xs" width="40px" textAlign="center">
                 {Math.round(scale * 100)}%
               </Text>
               
@@ -1860,80 +1853,12 @@ export const LineageGraph = ({ data, width, height }) => {
                 <IconButton
                   size="sm"
                   icon={<Icon as={TbZoomIn} />}
-                  onClick={() => setScale(prev => Math.min(prev * 1.2, 2))}
+                  onClick={() => setScale(prev => Math.min(2, prev + 0.1))}
                   aria-label="Zoom In"
                   variant="outline"
                 />
               </Tooltip>
-              
-              <Tooltip label={isPanningMode ? "Exit Pan Mode" : "Pan Mode"} placement="bottom">
-                <IconButton
-                  size="sm"
-                  icon={<Icon as={TbMapPin} />}
-                  onClick={togglePanningMode}
-                  aria-label="Pan Mode"
-                  colorScheme={isPanningMode ? "purple" : "gray"}
-                  variant={isPanningMode ? "solid" : "outline"}
-                />
-              </Tooltip>
             </HStack>
-            
-            {/* Scrolling Controls - Replacing the arrow buttons */}
-            <Box px={1} pt={2} width="100%">
-              {/* Horizontal scroll label */}
-              <Flex justify="space-between" mb={1}>
-                <Text fontSize="xs" fontWeight="medium" color="gray.600">Horizontal Scroll</Text>
-                <Tooltip label="Center View" placement="top">
-                  <IconButton
-                    size="xs"
-                    icon={<Icon as={TbArrowsMaximize} />}
-                    onClick={fitToView}
-                    aria-label="Center View"
-                    variant="ghost"
-                  />
-                </Tooltip>
-              </Flex>
-
-              {/* Horizontal scroll slider */}
-              <Slider 
-                min={-100} 
-                max={100} 
-                step={5}
-                value={horizontalSliderValue}
-                onChange={handleHorizontalScroll}
-                onChangeEnd={resetSliders}
-                mb={3}
-                colorScheme="blue"
-              >
-                <SliderTrack bg="gray.100">
-                  <SliderFilledTrack />
-                </SliderTrack>
-                <SliderThumb boxSize={4}>
-                  <Box color="blue.500" as={IoResize} transform="rotate(90deg)" />
-                </SliderThumb>
-              </Slider>
-
-              {/* Vertical scroll label */}
-              <Text fontSize="xs" fontWeight="medium" color="gray.600" mb={1}>Vertical Scroll</Text>
-              
-              {/* Vertical scroll slider */}
-              <Slider 
-                min={-100} 
-                max={100} 
-                step={5}
-                value={verticalSliderValue}
-                onChange={handleVerticalScroll}
-                onChangeEnd={resetSliders}
-                colorScheme="blue"
-              >
-                <SliderTrack bg="gray.100">
-                  <SliderFilledTrack />
-                </SliderTrack>
-                <SliderThumb boxSize={4}>
-                  <Box color="blue.500" as={IoResize} />
-                </SliderThumb>
-              </Slider>
-            </Box>
           </Box>
         </Box>
 

@@ -103,7 +103,7 @@ import remarkGfm from 'remark-gfm';
 import { vscDarkPlus, oneDark } from 'react-syntax-highlighter/dist/cjs/styles/prism';
 import SyntaxHighlighter from 'react-syntax-highlighter';
 import { v4 as uuidv4 } from 'uuid';
-import { LineageVisualizer } from '../components/LineageVisualizer';
+
 import chatApi from '../api/chatApi';
 import { FiMinimize2, FiMaximize2 } from 'react-icons/fi';
 import { CloseIcon } from "@chakra-ui/icons";
@@ -2842,6 +2842,12 @@ const ChatPage = () => {
       setSelectedLineageData(lineageData);
       setIsLineagePanelOpen(true);
       setIsCodePanelOpen(false); // Close code panel if open
+      
+      // Give time for the drawer to open before fitting the view
+      setTimeout(() => {
+        // The LineageGraph component will auto-fit to all tables
+        // with our enhanced fitToView function
+      }, 100);
     } else {
       toast({
         title: "No lineage data",
@@ -3193,15 +3199,13 @@ const ChatPage = () => {
                   {/* Replace EnhancedLineageViewer with LineageGraph and LineageVisualizer */}
                   <VStack spacing={0} height="100%" width="100%">
                     <Box width="100%" flex="1" overflow="auto">
-                      <LineageGraph 
+                     <LineageGraph 
                         data={selectedLineageData} 
                         width="100%" 
-                        height={isLineageMaximized ? "calc(100vh - 200px)" : "600px"} 
+                        height="100%" 
                       />
                     </Box>
-                    <Box width="100%" p={4} borderTopWidth="1px" borderColor="gray.200">
-                      <LineageVisualizer data={selectedLineageData} />
-                    </Box>
+
                   </VStack>
                 </Box>
               </ErrorBoundary>
