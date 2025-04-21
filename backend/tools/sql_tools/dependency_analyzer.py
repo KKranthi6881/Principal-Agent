@@ -28,12 +28,13 @@ class SQLDependencyTool:
     Main tool for analyzing SQL dependencies from GitHub repositories
     """
     
-    def __init__(self, vector_store_path: str = None):
+    def __init__(self, vector_store_path: str = None, github_wrapper = None):
         """
         Initialize the SQL Dependency Tool
         
         Args:
             vector_store_path: Path to the ChromaDB vector store
+            github_wrapper: GitHub API wrapper instance (optional)
         """
         # If path is None, use default
         if vector_store_path is None:
@@ -43,8 +44,11 @@ class SQLDependencyTool:
             
         logger.info(f"SQLDependencyTool initializing with vector_store_path: {vector_store_path}")
         
-        # Initialize SQL finder with direct ChromaDB access
-        self.sql_finder = GitHubSQLFinder(vector_store_path)
+        # Initialize SQL finder with direct ChromaDB access and github wrapper if provided
+        self.sql_finder = GitHubSQLFinder(vector_store_path, github_wrapper=github_wrapper)
+        
+        # Store the github wrapper
+        self.github_wrapper = github_wrapper
         
         # Initialize dependency analyzer with default dialect
         self.dependency_analyzer = SQLDependencyAnalyzer(dialect="dbt")

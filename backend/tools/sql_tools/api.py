@@ -9,6 +9,7 @@ import os
 import logging
 import json
 from typing import Dict, List, Set, Tuple, Optional, Any
+import re
 
 # Import dialect and lineage modules
 from .dialects import get_dialect_parser, get_available_dialects
@@ -506,125 +507,237 @@ class SQLAnalysisAPI:
             Dictionary with column lineage information
         """
         try:
-            # Search for SQL files that reference this column
-            sql_files = self.github_sql_finder.search_for_column(table_name, column_name)
+            if not self.dependency_tool:
+                # Try to get dependency tool as fallback
+                if not hasattr(self, 'github_sql_finder') or not self.github_sql_finder:
+                    logger.info("Using dependency_tool to search for column: %s in table: %s", column_name, table_name)
+                    # This is the alternate GitHub search path
+                    return self._search_column_fallback(table_name, column_name)
+                else:
+                    logger.error("No dependency tool available for column lineage tracing")
+                    return {"error": "No dependency tool available for column lineage"}
             
-            if not sql_files or len(sql_files) == 0:
-                return {
-                    "error": f"No SQL files found referencing column {column_name} in table {table_name}",
-                    "table_name": table_name,
-                    "column_name": column_name
-                }
+            lineage_result = self.dependency_tool.get_column_lineage(
+                target_table=table_name or "",
+                column_name=column_name,
+                depth=5
+            )
             
-            # Extract lineage from each file
-            lineage_results = []
-            for file_info in sql_files:
-                file_path = file_info.get("path")
-                file_content = file_info.get("content")
-                file_dialect = file_info.get("dialect") or self.detect_dialect(file_content, file_path)
+            logger.info("Received column lineage result with keys: %s", lineage_result.keys() if isinstance(lineage_result, dict) else "Not a dict")
+            
+            if not lineage_result or (isinstance(lineage_result, dict) and "error" in lineage_result):
+                logger.info("Trying fallback search for column '%s'", column_name)
+                return self._search_column_fallback(table_name, column_name)
                 
-                lineage_info = self.extract_lineage(file_content, file_dialect, file_path)
-                
-                # Check if this column is in the lineage
-                if lineage_info.get("target_table") == table_name:
-                    column_mappings = lineage_info.get("column_level_lineage", {})
-                    if column_name in column_mappings:
-                        lineage_results.append({
-                            "file_path": file_path,
-                            "file_url": file_info.get("url"),
-                            "target_table": table_name,
-                            "target_column": column_name,
-                            "sources": column_mappings[column_name]
-                        })
-            
-            return {
-                "table_name": table_name,
-                "column_name": column_name,
-                "lineage_count": len(lineage_results),
-                "lineage": lineage_results
-            }
+            return lineage_result
             
         except Exception as e:
-            logger.error(f"Error tracing column lineage for {table_name}.{column_name}: {str(e)}")
+            logger.error("Error in column lineage tracing: %s", str(e))
+            # Try fallback search method if lineage fails
+            logger.info("Trying fallback search for column '%s'", column_name)
+            return self._search_column_fallback(table_name, column_name)
+            
+    def _search_column_fallback(self, table_name: str, column_name: str):
+        """
+        Fallback search method for column when lineage tracing fails
+        
+        Args:
+            table_name: Table name (can be empty)
+            column_name: Column name to search for
+            
+        Returns:
+            Search results dictionary
+        """
+        logger.info("Using dependency_tool to search for column: %s in table: %s", column_name, table_name)
+        
+        # Build advanced search query for column
+        search_query = self._build_column_search_query(column_name)
+        
+        # Execute search
+        if self.github_sql_finder:
+            results = self.github_sql_finder.search_sql_files(search_query)
+            
+            # Filter results to prioritize relevant matches
+            if results:
+                # Try to find files where the column appears in meaningful context
+                filtered_results = []
+                for file in results:
+                    if isinstance(file, dict) and "content" in file:
+                        content = file["content"]
+                        # Check for patterns that suggest column definition or usage
+                        if self._is_column_relevant(content, column_name):
+                            filtered_results.append(file)
+                
+                if filtered_results:
+                    return {
+                        "search_results": filtered_results,
+                        "column_name": column_name,
+                        "table_name": table_name or "unknown",
+                        "search_method": "vector_search"
+                    }
+            
             return {
-                "error": f"Error tracing column lineage: {str(e)}",
-                "table_name": table_name,
-                "column_name": column_name
+                "search_results": results,
+                "column_name": column_name,
+                "table_name": table_name or "unknown",
+                "search_method": "vector_search"
             }
-
-    def detect_dialect_from_repo_url(self, repo_url: str) -> str:
-        """
-        Detect the appropriate SQL dialect based on repository URL patterns
-        
-        Args:
-            repo_url: GitHub repository URL
-            
-        Returns:
-            Detected dialect name (postgresql, snowflake, dbt, etc.)
-        """
-        if not repo_url:
-            return "postgresql"  # Default dialect
-            
-        repo_url = repo_url.lower()
-        
-        # Check for DBT repositories
-        if any(pattern in repo_url for pattern in ['/dbt-', '/dbt_', '/dbt/', 'dbt-labs', 'jaffle_shop']):
-            # Use minimal logging for LLM-friendly output
-            return "dbt"
-        
-        # Check for Snowflake repositories
-        if any(pattern in repo_url for pattern in ['/snowflake-', '/snowflake_', '/snowflake/']):
-            return "snowflake"
-        
-        # Check for PostgreSQL repositories
-        if any(pattern in repo_url for pattern in ['/postgres-', '/postgres_', '/postgresql']):
-            return "postgresql"
-        
-        # Check for MySQL repositories
-        if any(pattern in repo_url for pattern in ['/mysql-', '/mysql_', '/mysql']):
-            return "mysql"
-        
-        # Check for SQL Server repositories
-        if any(pattern in repo_url for pattern in ['/sqlserver', '/tsql', '/mssql']):
-            return "tsql"
-            
-        # Default to PostgreSQL
-        return "postgresql"
+        else:
+            return {"error": "GitHub SQL finder not initialized", "column_name": column_name}
     
-    def detect_dialect_from_file_path(self, file_path: str) -> str:
+    def _build_column_search_query(self, column_name: str) -> str:
         """
-        Detect the appropriate SQL dialect based on file path patterns
+        Build a comprehensive search query for column searches
         
         Args:
-            file_path: Path to the SQL file
+            column_name: Column name to search for
             
         Returns:
-            Detected dialect name (postgresql, snowflake, dbt, etc.)
+            Enhanced search query string
         """
-        file_path = file_path.lower()
+        # Create combinations of patterns that might identify column definitions or usage
+        patterns = [
+            f'"{column_name}" as',
+            f'select {column_name}',
+            f'definition',
+            f'usage',
+            f'table',
+            f'column'
+        ]
         
-        # Check for DBT models
-        if '/dbt/' in file_path or '/models/' in file_path or file_path.endswith('.sql') and ('/transform/' in file_path or '/transformations/' in file_path):
-            return "dbt"
+        # Build OR query with all combinations
+        query_parts = []
+        for i in range(0, len(patterns), 2):
+            if i + 1 < len(patterns):
+                query_parts.append(f"{patterns[i]} OR {patterns[i+1]} {column_name}")
         
-        # Check for Snowflake scripts
-        if any(pattern in file_path for pattern in ['/snowflake/', '.snowflake.sql', 'snowflake_']):
-            return "snowflake"
+        # Add extension filter
+        query = " OR ".join(query_parts) + " extension:sql"
+        return query
+    
+    def _is_column_relevant(self, content: str, column_name: str) -> bool:
+        """
+        Check if a file's content is relevant to the column we're searching for
         
-        # Check for PostgreSQL scripts
-        if any(pattern in file_path for pattern in ['/postgres/', '.pg.sql', 'postgresql', '.pgsql']):
-            return "postgresql"
+        Args:
+            content: File content to check
+            column_name: Column name we're searching for
+            
+        Returns:
+            True if the content is relevant to the column
+        """
+        if not content:
+            return False
+            
+        # Define patterns that suggest column definition or meaningful usage
+        patterns = [
+            # Column definition patterns
+            rf"CREATE\s+TABLE.*{column_name}",
+            rf"{column_name}\s+AS\s+",
+            rf"SELECT.*{column_name}\s+AS",
+            rf"SELECT.*AS\s+{column_name}",
+            rf"{column_name}\s+[A-Za-z0-9_]+\s*[,)]",  # Column in table definition
+            
+            # Column usage patterns
+            rf"WHERE\s+.*{column_name}\s*=",
+            rf"GROUP\s+BY\s+.*{column_name}",
+            rf"ORDER\s+BY\s+.*{column_name}",
+            rf"JOIN\s+.*ON\s+.*{column_name}\s*=",
+        ]
         
-        # Check for MySQL scripts
-        if any(pattern in file_path for pattern in ['/mysql/', '.mysql.sql', 'mysql_']):
-            return "mysql"
+        # Check each pattern
+        for pattern in patterns:
+            if re.search(pattern, content, re.IGNORECASE | re.DOTALL):
+                return True
+                
+        return False
+    
+    def trace_column_complete_lineage(self, table_name: str, column_name: str, direction="upstream", max_depth=5):
+        """
+        Trace complete column lineage with multiple strategies
         
-        # Check for SQL Server/TSQL scripts
-        if any(pattern in file_path for pattern in ['/sqlserver/', '.tsql', '.mssql', 'sql-server']):
-            return "tsql"
+        Args:
+            table_name: Table name (can be empty)
+            column_name: Column name to trace
+            direction: Direction of lineage (upstream/downstream)
+            max_depth: Maximum depth to traverse
+            
+        Returns:
+            Dictionary with complete lineage information
+        """
+        # First try the regular lineage method
+        lineage_result = self.trace_column_lineage(table_name, column_name)
         
-        # Default to PostgreSQL as the most common dialect
-        return "postgresql"
+        # If that didn't work, try direct file search
+        if not lineage_result or (isinstance(lineage_result, dict) and "error" in lineage_result):
+            search_results = self._search_column_fallback(table_name, column_name)
+            
+            # Transform search results into a lineage-like structure
+            files = search_results.get("search_results", [])
+            lineage_structure = {
+                "column_name": column_name,
+                "table_name": table_name or "unknown",
+                "files_found": len(files),
+                "lineage_method": "search_based",
+                "sources": []
+            }
+            
+            # Extract potential source columns from files
+            for file in files:
+                if isinstance(file, dict) and "content" in file:
+                    source_columns = self._extract_potential_source_columns(file["content"], column_name)
+                    if source_columns:
+                        file_info = {
+                            "file_path": file.get("path", "unknown"),
+                            "github_url": file.get("github_url", ""),
+                            "source_columns": source_columns
+                        }
+                        lineage_structure["sources"].append(file_info)
+            
+            return lineage_structure
+            
+        # Return the original lineage result if it worked
+        return lineage_result
+        
+    def _extract_potential_source_columns(self, content: str, target_column: str) -> List[Dict[str, str]]:
+        """
+        Extract potential source columns used to compute the target column
+        
+        Args:
+            content: SQL content to analyze
+            target_column: Target column name
+            
+        Returns:
+            List of potential source columns
+        """
+        source_columns = []
+        
+        # Look for common patterns where the target column is defined
+        patterns = [
+            # SELECT col1 + col2 AS target_column
+            rf"SELECT\s+(.{{1,100}})\s+AS\s+{target_column}",
+            # target_column = col1 + col2
+            rf"{target_column}\s*=\s*(.{{1,100}})[,\n]"
+        ]
+        
+        for pattern in patterns:
+            matches = re.finditer(pattern, content, re.IGNORECASE | re.DOTALL)
+            for match in matches:
+                if match.group(1):
+                    # Extract potential column names from the expression
+                    expr = match.group(1)
+                    # Look for word-like tokens that could be column names
+                    potential_columns = re.findall(r'[a-zA-Z][a-zA-Z0-9_]*', expr)
+                    for col in potential_columns:
+                        # Skip common SQL keywords and functions
+                        if col.lower() not in ["select", "from", "where", "and", "or", "sum", "count", "avg", "min", "max"]:
+                            source_columns.append({
+                                "name": col,
+                                "table": "unknown", # We don't know the table
+                                "confidence": "medium"
+                            })
+        
+        return source_columns
     
     def trace_complete_lineage(self, table_name: str, direction: str = "upstream", 
                               max_depth: int = 5, dialect: Optional[str] = None) -> Dict[str, Any]:
@@ -823,6 +936,80 @@ class SQLAnalysisAPI:
             logger.error(f"Error summarizing SQL file: {str(e)}")
             return "Failed to generate summary"
 
+    def detect_dialect_from_repo_url(self, repo_url: str) -> str:
+        """
+        Detect the appropriate SQL dialect based on repository URL patterns
+        
+        Args:
+            repo_url: GitHub repository URL
+            
+        Returns:
+            Detected dialect name (postgresql, snowflake, dbt, etc.)
+        """
+        if not repo_url:
+            return "postgresql"  # Default dialect
+            
+        repo_url = repo_url.lower()
+        
+        # Check for DBT repositories
+        if any(pattern in repo_url for pattern in ['/dbt-', '/dbt_', '/dbt/', 'dbt-labs', 'jaffle_shop']):
+            # Use minimal logging for LLM-friendly output
+            return "dbt"
+        
+        # Check for Snowflake repositories
+        if any(pattern in repo_url for pattern in ['/snowflake-', '/snowflake_', '/snowflake/']):
+            return "snowflake"
+        
+        # Check for PostgreSQL repositories
+        if any(pattern in repo_url for pattern in ['/postgres-', '/postgres_', '/postgresql']):
+            return "postgresql"
+        
+        # Check for MySQL repositories
+        if any(pattern in repo_url for pattern in ['/mysql-', '/mysql_', '/mysql']):
+            return "mysql"
+        
+        # Check for SQL Server repositories
+        if any(pattern in repo_url for pattern in ['/sqlserver', '/tsql', '/mssql']):
+            return "tsql"
+            
+        # Default to PostgreSQL
+        return "postgresql"
+    
+    def detect_dialect_from_file_path(self, file_path: str) -> str:
+        """
+        Detect the appropriate SQL dialect based on file path patterns
+        
+        Args:
+            file_path: Path to the SQL file
+            
+        Returns:
+            Detected dialect name (postgresql, snowflake, dbt, etc.)
+        """
+        file_path = file_path.lower()
+        
+        # Check for DBT models
+        if '/dbt/' in file_path or '/models/' in file_path or file_path.endswith('.sql') and ('/transform/' in file_path or '/transformations/' in file_path):
+            return "dbt"
+        
+        # Check for Snowflake scripts
+        if any(pattern in file_path for pattern in ['/snowflake/', '.snowflake.sql', 'snowflake_']):
+            return "snowflake"
+        
+        # Check for PostgreSQL scripts
+        if any(pattern in file_path for pattern in ['/postgres/', '.pg.sql', 'postgresql', '.pgsql']):
+            return "postgresql"
+        
+        # Check for MySQL scripts
+        if any(pattern in file_path for pattern in ['/mysql/', '.mysql.sql', 'mysql_']):
+            return "mysql"
+        
+        # Check for SQL Server/TSQL scripts
+        if any(pattern in file_path for pattern in ['/sqlserver/', '.tsql', '.mssql', 'sql-server']):
+            return "tsql"
+        
+        # Default to PostgreSQL as the most common dialect
+        return "postgresql"
+    
 # Define SQLAPI as an alias for SQLAnalysisAPI for backward compatibility
 class SQLAPI(SQLAnalysisAPI):
     """

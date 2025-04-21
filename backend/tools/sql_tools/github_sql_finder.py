@@ -19,15 +19,17 @@ class GitHubSQLFinder:
     GitHub SQL Finder class for searching SQL files in GitHub repositories
     """
     
-    def __init__(self, vector_store_path: Optional[str] = None):
+    def __init__(self, vector_store_path: Optional[str] = None, github_wrapper=None):
         """
         Initialize the GitHub SQL Finder
         
         Args:
             vector_store_path: Path to vector store (optional)
+            github_wrapper: GitHub API wrapper instance (optional)
         """
         self.vector_store = None
         self.vector_store_path = vector_store_path
+        self.github_wrapper = github_wrapper
     
     def initialize(self) -> bool:
         """
