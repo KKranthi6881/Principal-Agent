@@ -507,19 +507,18 @@ ${generateFailureFeedback(originalCode, sourceColumnName, newColumnName, aggrega
       
       if (analysis.finalCTE) {
         // Add to the final CTE
-        const finalPattern = new RegExp(`(final\\s+as\\s+\\(\\s*\\n\\s*select[\\s\\S]*?${targetCTE.name}\\.\\w+,[\\s\\S]*?)(?=\\s+from\\s+)`, 'i');
-        const finalMatch = modifiedCode.match(finalPattern);
+        const finalSelectPattern = /final\s+as\s+\(\s*\n\s*select\s+([\s\S]*?)(?=\s+from\s+)/;
+        const finalSelectMatch = modifiedCode.match(finalSelectPattern);
         
-        if (finalMatch) {
-          const indentMatch = finalMatch[1].match(/\n(\s+)\w/);
+        if (finalSelectMatch) {
+          const indentMatch = finalSelectMatch[1].match(/\n(\s+)\w/);
           const finalIndent = indentMatch ? indentMatch[1] : '        ';
           
-          // Add the column to the final select
-          const finalInsertion = finalMatch[1] + `\n${finalIndent}${targetCTE.name}.${newColumnName},`;
-          modifiedCode = modifiedCode.replace(finalMatch[1], finalInsertion);
+          const finalInsertion = finalSelectMatch[1] + `\n${finalIndent}${targetCTE.name}.${newColumnName},`;
+          modifiedCode = modifiedCode.replace(finalSelectMatch[1], finalInsertion);
           finalUpdated = true;
         }
-      } else if (analysis.finalSelect) {
+      } else {
         // Add to the main SELECT statement
         const selectIndex = modifiedCode.lastIndexOf('select');
         const fromIndex = modifiedCode.indexOf('from', selectIndex);
@@ -529,7 +528,6 @@ ${generateFailureFeedback(originalCode, sourceColumnName, newColumnName, aggrega
           const indentMatch = selectClause.match(/\n(\s+)\w/);
           const selectIndent = indentMatch ? indentMatch[1] : '    ';
           
-          // Add column to the select clause
           const selectInsertion = selectClause + `\n${selectIndent}${targetCTE.name}.${newColumnName},`;
           modifiedCode = modifiedCode.replace(selectClause, selectInsertion);
           finalUpdated = true;
@@ -846,7 +844,6 @@ ${generateFailureFeedback(originalCode, sourceColumnName, newColumnName, aggrega
                 size="md" 
                 color="purple.700"
                 fontWeight="600"
-                fontFamily="'Playfair Display', Georgia, serif"
                 pb={2}
                 borderBottom="2px solid"
                 borderColor="purple.200"
@@ -1111,12 +1108,24 @@ const MarkdownContent = ({ content }) => {
     const dataRows = tableLines.slice(2);
     
     return (
-      <Box className="key-value-table" overflow="auto">
-        <Table size="sm" variant="simple">
-          <Thead>
+      <Box className="md-table" 
+           width="100%" 
+           overflowX="auto" 
+           my={3}
+           border="1px solid"
+           borderColor="gray.200"
+           borderRadius="md">
+        <Table size="sm" variant="simple" width="100%">
+          <Thead bg="purple.50">
             <Tr>
               {headers.map((header, i) => (
-                <Th key={i}>{header}</Th>
+                <Th key={i} 
+                    py={2}
+                    px={3}
+                    color="purple.700"
+                    fontSize="sm">
+                  {header}
+                </Th>
               ))}
             </Tr>
           </Thead>
@@ -1127,9 +1136,16 @@ const MarkdownContent = ({ content }) => {
                 .filter(cell => cell !== '');
               
               return (
-                <Tr key={rowIdx}>
+                <Tr key={rowIdx} bg={rowIdx % 2 === 1 ? "gray.50" : "white"}>
                   {cells.map((cell, cellIdx) => (
-                    <Td key={cellIdx}>{cell}</Td>
+                    <Td key={cellIdx} 
+                        py={2}
+                        px={3}
+                        fontSize="sm"
+                        whiteSpace="pre-wrap"
+                        verticalAlign="top">
+                      {cell}
+                    </Td>
                   ))}
                 </Tr>
               );
@@ -2250,7 +2266,7 @@ const ChatPage = () => {
       if (conversation.query) {
         formattedMessages.push({
           id: `user-${id}`,
-          role: 'user',
+          role: 'user', 
           content: conversation.query,
           timestamp: conversation.timestamp
         });
@@ -2755,7 +2771,7 @@ const ChatPage = () => {
       .replace(/(<li>.*<\/li>\n)+/g, '<ul>$&</ul>')
       // Handle ordered lists
       .replace(/^\s*\d+\.\s+(.*$)/gm, '<li>$1</li>')
-      .replace(/(<li>.*<\/li>\n)+/g, '<ol>$&</ol>')
+      .replace(/(<li>.*<\/li>)+/g, '<ol>$&</ol>')
       // Handle tables (basic version)
       .replace(/\|\s*(.*?)\s*\|/g, '<td>$1</td>')
       .replace(/(<td>.*<\/td>)+/g, '<tr>$&</tr>')

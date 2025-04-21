@@ -69,15 +69,19 @@ class GitHubSQLFinder:
                 return []
         
         try:
+            # Detect query type and enhance the query
+            query_type = self._detect_query_type(query)
+            enhanced_query = self._enhance_query(query, query_type)
+            
             # Add SQL file filter to query if not already present
-            if 'extension:' not in query and '.sql' not in query:
-                query = f"{query} extension:sql"
+            if 'extension:' not in enhanced_query and '.sql' not in enhanced_query:
+                enhanced_query = f"{enhanced_query} extension:sql"
             
             # Log the query being used
-            logger.info(f"Searching vector store with query: '{query}'")
+            logger.info(f"Searching vector store with query: '{enhanced_query}'")
             
             # Search the vector store
-            results = self.vector_store.query(query, n_results=limit)
+            results = self.vector_store.query(enhanced_query, n_results=limit)
             
             # Process results
             formatted_results = []
@@ -85,11 +89,10 @@ class GitHubSQLFinder:
             # Check the structure of results and handle it appropriately
             if not results:
                 logger.warning("Vector store returned empty results")
-                return []
+                # Try fallback search if primary search fails
+                return self._perform_fallback_search(query, limit)
             
-            logger.info(f"Vector store returned results with keys: {results.keys() if isinstance(results, dict) else 'not a dict'}")
-                
-            # Check if 'metadatas' is a list of dictionaries or a list of lists
+            # Check the structure of results and handle it appropriately
             if 'metadatas' in results:
                 metadatas = results['metadatas']
                 documents = results.get('documents', [])
@@ -100,7 +103,6 @@ class GitHubSQLFinder:
                 if metadatas and isinstance(metadatas, list):
                     if metadatas and isinstance(metadatas[0], list):
                         # It's a list of lists (older ChromaDB format)
-                        logger.info("Detected older ChromaDB format (list of lists)")
                         metadatas = metadatas[0] if metadatas else []
                         documents = documents[0] if documents and isinstance(documents, list) and documents and isinstance(documents[0], list) else []
                 
@@ -194,15 +196,21 @@ class GitHubSQLFinder:
         Returns:
             List of SQL files with metadata
         """
-        query = f"extension:sql {table_name}"
-        # Additional DBT-specific patterns
-        dbt_ref_query = f'ref("{table_name}") OR ref(\'{table_name}\')'
-        source_query = f'source OR table:{table_name} OR "{table_name}" OR \'{table_name}\''
+        # Clean the table name (remove schema prefix if present)
+        clean_table = table_name.split('.')[-1] if '.' in table_name else table_name
         
-        # Combine queries
-        combined_query = f"{query} {dbt_ref_query} {source_query}"
+        # Try to detect if this is a DBT model
+        is_dbt_model = clean_table.startswith('fct_') or clean_table.startswith('dim_') or clean_table.startswith('stg_')
         
-        return self.search_sql_files(combined_query, limit)
+        if is_dbt_model:
+            # For DBT models, search for ref('model_name') pattern and the table name
+            query = f"ref('{clean_table}') OR name: {clean_table} OR {clean_table}"
+        else:
+            # For regular tables, search for direct references
+            query = f"\"{clean_table}\" table OR FROM {clean_table}"
+        
+        # Use the enhanced search
+        return self.search_with_fallback(query, limit)
     
     def search_for_column(self, table_name: str, column_name: str, limit: int = 20) -> List[Dict[str, Any]]:
         """
@@ -216,84 +224,36 @@ class GitHubSQLFinder:
         Returns:
             List of SQL files with metadata
         """
-        # Generate different ways the column might be referenced in SQL
-        column_patterns = []
-        
-        # If table name is provided, add table-qualified patterns
-        if table_name:
-            column_patterns.extend([
-                f"{table_name}.{column_name}",  # direct reference
-                f'"{table_name}"."{column_name}"',  # quoted reference (double quotes)
-                f"'{table_name}'.'{column_name}'",  # quoted reference (single quotes)
-                f"{table_name}.{column_name} as",  # column alias pattern
-                f"from {table_name}",  # from clause containing the table
-            ])
-        
-        # Add common patterns for column references
-        column_patterns.extend([
-            f"select {column_name}",  # direct in select list
-            f"SELECT {column_name}",  # uppercase variant
-            f"as {column_name}",  # column alias
-            f"AS {column_name}",  # uppercase alias
-            f", {column_name}",  # column in list
-            f"{column_name} =",  # column in where/join clause
-            f"{column_name},",  # column in select list
-            f"{column_name} as",  # column with alias
-            f"{column_name} from"  # column before from clause
-        ])
-        
-        # Additional patterns for SQL frameworks like DBT
-        column_patterns.extend([
-            f"field('{column_name}'",  # dbt field reference
-            f"\"column\": \"{column_name}\"",  # JSON column reference
-            f"column: {column_name}",  # YAML column reference
-            f"`{column_name}`",  # backtick quoting (MySQL, BigQuery)
-            f"[{column_name}]"  # bracket quoting (SQL Server)
-        ])
-        
-        # Convert patterns to query with OR
-        query = " OR ".join([f'"{pattern}"' for pattern in column_patterns])
-        
-        # Add simple column name search at the end
-        query = f"extension:sql ({query} OR {column_name})"
-        
-        # Run the search
-        results = self.search_sql_files(query, limit)
-        
-        # Post-process to improve relevance
-        if results:
-            # Prioritize results that have the column name in a more specific context
-            for result in results:
-                # Check content for relevant patterns
-                content = result.get("content", "").lower()
-                if content:
-                    # Calculate relevance score based on pattern matches
-                    score = 0
-                    
-                    # Higher score for table-qualified references
-                    if table_name and f"{table_name.lower()}.{column_name.lower()}" in content:
-                        score += 5
-                    
-                    # Medium score for column in select list or join/where conditions
-                    if any(pattern.lower() in content for pattern in [
-                        f"select {column_name.lower()}",
-                        f", {column_name.lower()},",
-                        f"{column_name.lower()} as",
-                        f"{column_name.lower()} =",
-                        f"{column_name.lower()} from"
-                    ]):
-                        score += 3
-                    
-                    # Base score for any mention
-                    score += 1
-                    
-                    # Store score in result
-                    result["relevance_score"] = score
+        try:
+            if not self.vector_store:
+                # Initialize SQL finder if not already done
+                self.initialize()
+                if not self.vector_store:
+                    return []
             
-            # Sort by relevance score
-            results.sort(key=lambda x: x.get("relevance_score", 0), reverse=True)
-        
-        return results
+            # Build query parts
+            query_parts = []
+            
+            # Add table.column format if table is provided
+            if table_name:
+                query_parts.append(f'"{table_name}.{column_name}"')
+                # Add DBT-specific patterns if likely a DBT environment
+                if table_name.startswith('fct_') or table_name.startswith('dim_') or table_name.startswith('stg_'):
+                    query_parts.append(f'"ref(\'{table_name}\')".{column_name}')
+            
+            # Add column definition patterns
+            query_parts.append(f'"{column_name}" as')
+            query_parts.append(f'select {column_name}')
+            
+            # Combine with OR
+            query = " OR ".join(query_parts)
+            
+            # Use the enhanced search with fallback
+            return self.search_with_fallback(query, limit)
+            
+        except Exception as e:
+            logger.error(f"Error searching for column {column_name}: {str(e)}")
+            return []
     
     def _detect_dialect(self, file_path: str, content: str, connector_tech_stack: str = None) -> str:
         """
@@ -571,3 +531,225 @@ class GitHubSQLFinder:
             print(f"Error extracting structure: {str(e)}")
         
         return structure 
+
+    def _detect_query_type(self, query: str) -> str:
+        """
+        Detect the type of query to optimize search strategy.
+        
+        Args:
+            query: The search query string
+            
+        Returns:
+            Query type string: 'file_path', 'column', 'dbt_model', or 'generic'
+        """
+        # File path detection
+        if query.endswith('.sql') or '/' in query or '\\' in query or 'models/' in query:
+            return 'file_path'
+        
+        # Column detection (including table.column format)
+        if '.' in query and not query.startswith('/') and not query.startswith('.'):
+            parts = query.split('.')
+            if len(parts) == 2 and all(re.match(r'^[a-zA-Z0-9_]+$', part) for part in parts):
+                return 'column'
+        
+        # Check for DBT model naming patterns
+        if query.startswith('fct_') or query.startswith('dim_') or query.startswith('stg_'):
+            return 'dbt_model'
+            
+        # Default to generic search
+        return 'generic'
+
+    def _enhance_query(self, query: str, query_type: str) -> str:
+        """
+        Enhance query based on detected type to improve search results.
+        
+        Args:
+            query: Original search query
+            query_type: Type of query ('file_path', 'column', 'dbt_model', or 'generic')
+            
+        Returns:
+            Enhanced query string
+        """
+        if query_type == 'file_path':
+            # For file paths, focus on exact path matching plus content
+            filename = os.path.basename(query)
+            return f'path:"{query}" OR filename:"{filename}"'
+            
+        elif query_type == 'column':
+            # For columns, search for column definitions and usage
+            if '.' in query:
+                table, column = query.split('.', 1)
+                return f'"{table}" near:"{column}" OR "SELECT {column}" OR "{column} as" OR "column: {column}"'
+            else:
+                return f'"{query}" as OR SELECT {query} OR column:{query}'
+                
+        elif query_type == 'dbt_model':
+            # For DBT models, search for both the model name and related patterns
+            return f'"{query}" model OR "name: {query}" OR "ref(\'{query}\')"'
+            
+        # Return original query for generic searches with minor enhancements
+        return f'{query} definition OR {query} usage OR {query} table OR {query} column'
+    
+    def search_with_fallback(self, query: str, limit: int = 20) -> List[Dict[str, Any]]:
+        """
+        Search with fallback strategies if primary search returns few results.
+        
+        Args:
+            query: Search query
+            limit: Maximum number of results
+            
+        Returns:
+            List of search results
+        """
+        # Try primary search first
+        results = self.search_sql_files(query, limit)
+        
+        # If we got enough results, return them
+        if len(results) >= min(3, limit):
+            return results
+            
+        # If few results, try alternative search strategies
+        alt_queries = self._generate_alternative_queries(query)
+        
+        additional_results = []
+        for alt_query in alt_queries:
+            alt_results = self.search_sql_files(alt_query, limit - len(results))
+            # Filter out duplicates
+            for result in alt_results:
+                if not any(r.get('path') == result.get('path') for r in results + additional_results):
+                    additional_results.append(result)
+                    if len(results) + len(additional_results) >= limit:
+                        break
+        
+        # Combine results
+        return results + additional_results[:limit-len(results)]
+    
+    def _generate_alternative_queries(self, query: str) -> List[str]:
+        """
+        Generate alternative queries for fallback search.
+        
+        Args:
+            query: Original search query
+            
+        Returns:
+            List of alternative search queries
+        """
+        alternatives = []
+        
+        # Try removing special characters
+        clean_query = re.sub(r'[^a-zA-Z0-9_\s]', ' ', query)
+        if clean_query != query:
+            alternatives.append(clean_query)
+        
+        # Try breaking into parts for multi-part queries
+        parts = re.split(r'[/._\-]', query)
+        if len(parts) > 1:
+            for part in parts:
+                if len(part) > 3:  # Skip very short parts
+                    alternatives.append(part)
+        
+        # For file paths, extract just the filename
+        if '/' in query or '\\' in query:
+            filename = os.path.basename(query)
+            alternatives.append(filename)
+            # Also try without extension
+            name_without_ext = os.path.splitext(filename)[0]
+            alternatives.append(name_without_ext)
+        
+        return alternatives
+    
+    def _perform_fallback_search(self, query: str, limit: int) -> List[Dict[str, Any]]:
+        """
+        Perform fallback search when primary search returns no results.
+        
+        Args:
+            query: Original search query
+            limit: Maximum number of results
+            
+        Returns:
+            List of search results
+        """
+        logger.info(f"Performing fallback search for query: '{query}'")
+        
+        # Generate alternative queries
+        alt_queries = self._generate_alternative_queries(query)
+        
+        all_results = []
+        for alt_query in alt_queries:
+            # Add SQL file filter if not already present
+            if 'extension:' not in alt_query and '.sql' not in alt_query:
+                alt_query = f"{alt_query} extension:sql"
+                
+            logger.info(f"Trying fallback query: '{alt_query}'")
+            
+            try:
+                # Search with alternative query
+                results = self.vector_store.query(alt_query, n_results=limit)
+                
+                if results and isinstance(results, dict) and 'metadatas' in results:
+                    metadatas = results['metadatas']
+                    documents = results.get('documents', [])
+                    
+                    # Handle case where metadatas is a list of lists
+                    if metadatas and isinstance(metadatas, list):
+                        if metadatas and isinstance(metadatas[0], list):
+                            # It's a list of lists (older ChromaDB format)
+                            metadatas = metadatas[0] if metadatas else []
+                            documents = documents[0] if documents and isinstance(documents, list) and documents and isinstance(documents[0], list) else []
+                    
+                    # Format results
+                    formatted_results = self._format_search_results(metadatas, documents)
+                    
+                    # Add to all results, avoiding duplicates
+                    for result in formatted_results:
+                        if not any(r.get('path') == result.get('path') for r in all_results):
+                            all_results.append(result)
+                            if len(all_results) >= limit:
+                                return all_results
+            except Exception as e:
+                logger.warning(f"Error in fallback search with query '{alt_query}': {str(e)}")
+        
+        return all_results
+    
+    def _format_search_results(self, metadatas, documents) -> List[Dict[str, Any]]:
+        """
+        Format search results into a standard structure.
+        
+        Args:
+            metadatas: Metadata from search results
+            documents: Documents from search results
+            
+        Returns:
+            Formatted search results
+        """
+        formatted_results = []
+        
+        for i, metadata in enumerate(metadatas):
+            if not metadata:
+                continue
+                
+            content = documents[i] if i < len(documents) else ""
+            
+            # Extract required fields
+            file_path = metadata.get('path', metadata.get('file_path', ''))
+            github_url = metadata.get('github_url', '')
+            
+            # Skip if no path
+            if not file_path:
+                continue
+                
+            # Create result entry
+            result = {
+                'path': file_path,
+                'content': content,
+                'github_url': github_url
+            }
+            
+            # Copy additional metadata fields
+            for key, value in metadata.items():
+                if key not in result and key not in ['path', 'file_path']:
+                    result[key] = value
+            
+            formatted_results.append(result)
+            
+        return formatted_results
