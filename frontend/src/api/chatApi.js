@@ -52,7 +52,39 @@ const chatApi = {
         throw new Error(`API error: ${response.status}`);
       }
       
-      return await response.json();
+      const data = await response.json();
+      
+      // Process the conversations to match the expected format in the frontend
+      if (data.status === 'success' && Array.isArray(data.conversations)) {
+        // Group user and assistant messages
+        const processedConversations = [];
+        let currentQuestion = null;
+        
+        data.conversations.forEach(conv => {
+          if (conv.role === 'user') {
+            // Save the question
+            currentQuestion = {
+              conversation_id: conv.conversation_id,
+              thread_id: conv.thread_id,
+              question: conv.content,
+              answer: '',
+              timestamp: conv.timestamp,
+              metadata: {}
+            };
+            processedConversations.push(currentQuestion);
+          } else if (conv.role === 'assistant' && currentQuestion) {
+            // Add the answer to the current question
+            currentQuestion.answer = conv.content;
+          }
+        });
+        
+        return {
+          status: 'success',
+          conversations: processedConversations
+        };
+      }
+      
+      return data;
     } catch (error) {
       console.error('Error fetching thread conversations:', error);
       throw error;
@@ -82,15 +114,26 @@ const chatApi = {
 
   fetchRecentConversations: async () => {
     try {
-      const response = await fetch(`${API_BASE_URL}/api/conversations`);
+      // Log the full URL to debug connection issues
+      const url = `${API_BASE_URL}/api/thread-conversations`;
+      console.log("⭐ Attempting to fetch conversations from:", url);
+      console.log("⭐ API_BASE_URL value:", API_BASE_URL);
+      
+      // Use our new thread conversations endpoint
+      const response = await fetch(url);
+      
+      console.log("Response status:", response.status, response.statusText);
       
       if (!response.ok) {
-        throw new Error(`API error: ${response.status}`);
+        throw new Error(`API error: ${response.status} - ${response.statusText}`);
       }
       
-      return await response.json();
+      const data = await response.json();
+      console.log("Response data:", data);
+      
+      return data;
     } catch (error) {
-      console.error('Error fetching recent conversations:', error);
+      console.error('❌ Error fetching recent conversations:', error);
       throw error;
     }
   },

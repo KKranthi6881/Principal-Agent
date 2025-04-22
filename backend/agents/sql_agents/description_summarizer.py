@@ -215,6 +215,15 @@ class DescriptionSummarizerAgent(Agent):
             Column description
         """
         try:
+            # Validate input parameters
+            if not column_name:
+                logger.error("Column name is required")
+                return {
+                    "error": "Column name is required",
+                    "column_name": "None",
+                    "table_name": table_name or "unknown"
+                }
+                
             # Search for the SQL code defining the table
             search_result = self.sql_tools.search_tables(table_name, limit=1)
             sql_code = ""
@@ -229,24 +238,35 @@ class DescriptionSummarizerAgent(Agent):
                     if full_content:
                         sql_code = full_content
             
-            # Get column lineage
-            lineage_result = self.sql_tools.get_column_lineage(
-                table_name=table_name,
-                column_name=column_name,
-                direction="upstream",
-                max_depth=2,
-                dialect=dialect,
-                repo_url=repo_url
-            )
+            # Get column lineage with try-except to handle potential errors
+            try:
+                lineage_result = self.sql_tools.get_column_lineage(
+                    table_name=table_name,
+                    column_name=column_name,
+                    direction="upstream",
+                    max_depth=2
+                )
+            except Exception as lineage_error:
+                logger.error(f"Error getting column lineage: {str(lineage_error)}")
+                # Create a default structure for lineage result
+                lineage_result = {
+                    "table": table_name or "unknown",
+                    "column": column_name,
+                    "error": str(lineage_error),
+                    "levels": {}
+                }
             
-            # Format lineage info for the prompt
-            lineage = json.dumps(lineage_result, indent=2)
+            # Format lineage info for the prompt - handle case where lineage_result is None or not a dict
+            if not lineage_result or not isinstance(lineage_result, dict):
+                lineage = json.dumps({"error": "No lineage information available"}, indent=2)
+            else:
+                lineage = json.dumps(lineage_result, indent=2)
             
             # Build the prompt
             prompt = self.column_description_prompt.format(
-                table_name=table_name,
+                table_name=table_name or "unknown",
                 column_name=column_name,
-                sql_code=sql_code,
+                sql_code=sql_code or "-- No SQL code available",
                 lineage=lineage
             )
             
@@ -255,14 +275,28 @@ class DescriptionSummarizerAgent(Agent):
             
             # Parse the response
             try:
-                return self.parser.parse(response.content)
+                result = self.parser.parse(response.content)
+                # Ensure required fields are present
+                if "column_name" not in result:
+                    result["column_name"] = column_name
+                if "table_name" not in result:
+                    result["table_name"] = table_name or "unknown"
+                return result
             except Exception as e:
                 logger.error(f"Error parsing model response: {str(e)}")
-                # Return the raw response if parsing fails
-                return {"raw_response": response.content}
+                # Return a structured response even if parsing fails
+                return {
+                    "raw_response": response.content,
+                    "column_name": column_name,
+                    "table_name": table_name or "unknown"
+                }
         except Exception as e:
             logger.error(f"Error describing column: {str(e)}")
-            return {"error": str(e)}
+            return {
+                "error": str(e),
+                "column_name": column_name,
+                "table_name": table_name or "unknown"
+            }
             
     def run(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
         """

@@ -61,7 +61,7 @@ import { atomDark } from 'react-syntax-highlighter/dist/cjs/styles/prism';
 import remarkGfm from 'remark-gfm';
 
 // Define API base URL directly in the component
-const API_BASE_URL = 'http://localhost:8000';
+const API_BASE_URL = 'http://localhost:8002';
 
 const ChatHistoryPage = () => {
   const [conversations, setConversations] = useState([]);
@@ -100,27 +100,47 @@ const ChatHistoryPage = () => {
 
   // Fetch conversations list
   useEffect(() => {
-    console.log("ChatHistoryPage mounted, fetching conversations");
+    console.log("🔍 ChatHistoryPage mounted, fetching conversations");
+    document.title = "Chat History"; // Set page title
+    
+    // Debug info
+    console.log("🔍 API_BASE_URL:", API_BASE_URL);
+    console.log("🔍 Current environment:", process.env.NODE_ENV);
+    
+    // Check if server is responsive
+    fetch(`${API_BASE_URL}/health`)
+      .then(res => {
+        console.log("🔍 Backend health check:", res.status, res.statusText);
+        return res.json();
+      })
+      .then(data => console.log("🔍 Health check response:", data))
+      .catch(err => console.error("❌ Health check failed:", err));
+    
     fetchThreads();
   }, []);
   
   // Handle conversation loading when conversationId is in URL
   useEffect(() => {
-    if (conversationId) {
+    if (conversationId && !threadId) {
       console.log(`Direct URL access to conversation: ${conversationId}`);
       loadDirectConversation(conversationId);
     } else {
-      // Reset direct conversation view when no ID in URL
+      // Reset direct conversation view when no ID in URL or when viewing a thread
       setDirectConversation(null);
       setDirectLoading(false);
       setDirectError(null);
     }
-  }, [conversationId]);
+  }, [conversationId, threadId]);
 
   // Load thread if threadId is provided in URL
   useEffect(() => {
     if (threadId) {
+      console.log(`Loading thread from URL: ${threadId}`);
       handleThreadSelect(threadId);
+      
+      // Reset any selected conversation when viewing a thread
+      setSelectedConversation(null);
+      setConversationDetails(null);
     }
   }, [threadId]);
 
@@ -558,67 +578,94 @@ const ChatHistoryPage = () => {
   const fetchThreadConversations = async (threadId) => {
     try {
       setIsLoadingThread(true);
-      console.log(`Fetching conversations for thread: ${threadId}`);
+      console.log(`Fetching conversations for thread ${threadId}...`);
       
-      // First try the thread-conversations endpoint
-      let response = await fetch(`${API_BASE_URL}/api/thread-conversations/${threadId}`);
+      const response = await fetch(`${API_BASE_URL}/api/thread/${threadId}/conversations`);
       
-      // If that fails, try to get the individual conversation
       if (!response.ok) {
-        console.log(`Thread endpoint failed, trying individual conversation: ${threadId}`);
-        response = await fetch(`${API_BASE_URL}/api/conversation/${threadId}`);
-        
-        if (!response.ok) {
-          throw new Error(`Failed to fetch conversation: ${response.status}`);
-        }
-        
-        const data = await response.json();
-        console.log("Individual conversation response:", data);
-        
-        // Convert the individual conversation to an array with proper field mapping
-        setThreadConversations([{
-          conversation_id: data.id || threadId,
-          thread_id: threadId,
-          question: data.query || "No question available",
-          answer: data.response || "No response available",
-          metadata: data.technical_details || {},
-          timestamp: data.timestamp || new Date().toISOString()
-        }]);
-        
-        return;
+        throw new Error(`Failed to fetch thread conversations: ${response.status}`);
       }
       
       const data = await response.json();
       console.log("Thread conversations response:", data);
       
-      if (Array.isArray(data.conversations)) {
-        // Make sure we have valid data in each conversation
-        const validatedConversations = data.conversations.map(conv => ({
-          ...conv,
-          question: conv.question || "No question available",
-          answer: conv.answer || "No response available"
-        }));
+      if (data.status === 'success' && Array.isArray(data.conversations)) {
+        // Process conversations to group question/answer pairs
+        const processedConversations = [];
+        let currentQuestion = null;
         
-        setThreadConversations(validatedConversations);
+        // Check if we have any conversations
+        if (data.conversations.length === 0) {
+          console.log("No conversations found for this thread");
+          toast({
+            title: "No conversations",
+            description: "This thread has no conversation history.",
+            status: "info",
+            duration: 3000,
+            isClosable: true,
+          });
+          setThreadConversations([]);
+          return;
+        }
+        
+        // Sort conversations by timestamp to ensure proper ordering
+        const sortedConversations = [...data.conversations].sort((a, b) => {
+          return new Date(a.timestamp) - new Date(b.timestamp);
+        });
+        
+        console.log("Processing", sortedConversations.length, "conversations");
+        
+        sortedConversations.forEach((conv, index) => {
+          console.log(`Processing conversation ${index}:`, conv.role, conv.conversation_id);
+          
+          if (conv.role === 'user') {
+            // Save the question
+            currentQuestion = {
+              id: conv.conversation_id,
+              question: conv.content,
+              answer: null,
+              timestamp: conv.timestamp,
+              metadata: {}
+            };
+            processedConversations.push(currentQuestion);
+          } else if (conv.role === 'assistant' && currentQuestion) {
+            // Add the answer to the current question
+            currentQuestion.answer = conv.content;
+          } else if (conv.role === 'assistant' && !currentQuestion) {
+            // Handle orphaned assistant messages
+            processedConversations.push({
+              id: conv.conversation_id,
+              question: "System message",
+              answer: conv.content,
+              timestamp: conv.timestamp,
+              metadata: { system: true }
+            });
+          }
+        });
+        
+        console.log("Processed conversations:", processedConversations);
+        setThreadConversations(processedConversations);
       } else {
-        console.warn("Unexpected response format:", data);
+        console.warn("Unexpected data format for thread conversations:", data);
         setThreadConversations([]);
         toast({
-          title: 'Warning',
-          description: 'Received unexpected data format from server',
-          status: 'warning',
-          duration: 5000,
+          title: "Warning",
+          description: "Received unexpected data format from server",
+          status: "warning",
+          duration: 3000,
+          isClosable: true,
         });
       }
     } catch (error) {
-      console.error('Error fetching thread conversations:', error);
-      setThreadConversations([]);
+      console.error(`Error fetching thread conversations: ${error}`);
       toast({
-        title: 'Error',
-        description: error.message,
-        status: 'error',
-        duration: 5000,
+        title: "Error",
+        description: "Failed to load thread conversations.",
+        status: "error",
+        duration: 3000,
+        isClosable: true,
       });
+      setThreadConversations([]);
     } finally {
       setIsLoadingThread(false);
     }
@@ -909,7 +956,7 @@ const ChatHistoryPage = () => {
                     
                     <VStack spacing={6} align="stretch">
                       {threadConversations.map((conv, index) => (
-                        <Box key={conv.conversation_id} borderWidth="1px" borderRadius="md" p={4}>
+                        <Box key={conv.id} borderWidth="1px" borderRadius="md" p={4}>
                           <Text fontWeight="bold" mb={2}>
                             Question:
                           </Text>

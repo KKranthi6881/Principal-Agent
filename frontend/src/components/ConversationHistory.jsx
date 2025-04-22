@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, Fragment } from 'react';
 import { Link } from 'react-router-dom';
 import { 
   Box, 
@@ -21,6 +21,8 @@ import {
 import { IoAdd, IoTrash } from 'react-icons/io5';
 import { fetchRecentConversations, fetchConversationsByThread, clearConversation } from '../api/chatApi';
 
+const API_BASE_URL = 'http://localhost:8002'; // Replace with your actual API base URL
+
 const ConversationHistory = ({ onSelectConversation, onNewChat }) => {
   const [threads, setThreads] = useState([]);
   const [expandedThreads, setExpandedThreads] = useState({});
@@ -30,18 +32,74 @@ const ConversationHistory = ({ onSelectConversation, onNewChat }) => {
   const toast = useToast();
 
   useEffect(() => {
-    loadConversations();
+    // Check database connection first, then load conversations
+    checkDatabaseConnection();
   }, []);
+
+  const checkDatabaseConnection = async () => {
+    try {
+      console.log("Checking database connection...");
+      
+      // Try direct fetch to check network connectivity first
+      const testUrl = `${API_BASE_URL}/health`;
+      console.log("Testing basic connectivity with:", testUrl);
+      
+      try {
+        const basicTest = await fetch(testUrl);
+        console.log("Basic connectivity test result:", basicTest.status, basicTest.statusText);
+      } catch (connErr) {
+        console.error("❌ CRITICAL: Basic connectivity failed:", connErr);
+        setError(`Cannot connect to backend server at ${API_BASE_URL}. Please check if the server is running.`);
+        setLoading(false);
+        return;
+      }
+      
+      // Now try the database test
+      const dbUrl = `${API_BASE_URL}/api/test-database`;
+      console.log("Testing database with:", dbUrl);
+      const response = await fetch(dbUrl);
+      const data = await response.json();
+      console.log("Database check result:", data);
+      
+      if (data.status === 'success') {
+        if (data.row_counts && data.row_counts.threads > 0) {
+          console.log(`Found ${data.row_counts.threads} threads in database`);
+          loadConversations();
+        } else {
+          console.warn("No conversation threads found in database");
+          setError("No conversation threads found in the database. Try creating a new conversation first.");
+          setLoading(false);
+        }
+      } else {
+        console.error("Database check failed:", data.detail);
+        setError(`Database check failed: ${data.detail}`);
+        setLoading(false);
+      }
+    } catch (err) {
+      console.error("❌ Error checking database:", err);
+      setError(`Error checking database: ${err.message}`);
+      setLoading(false);
+      
+      // As a fallback, try loading conversations directly
+      console.log("Attempting to load conversations directly as fallback...");
+      loadConversations();
+    }
+  };
 
   const loadConversations = async () => {
     try {
       setLoading(true);
+      console.log("Making API request to fetch conversations...");
       const response = await fetchRecentConversations();
+      console.log("API response received:", response);
       
       if (response.status === 'success') {
-        // The backend now returns threads instead of individual conversations
-        setThreads(response.conversations);
-        console.log("Loaded threads:", response.conversations);
+        // The backend now returns threads
+        setThreads(response.threads || []);
+        console.log("Loaded threads:", response.threads);
+      } else {
+        console.error("API returned error status:", response);
+        setError("Failed to load conversations: " + (response.detail || "Unknown error"));
       }
     } catch (err) {
       console.error('Error loading conversations:', err);
@@ -71,30 +129,19 @@ const ConversationHistory = ({ onSelectConversation, onNewChat }) => {
         console.log('Thread conversations response:', response); // Debug log
         
         if (response.status === 'success') {
-          // Transform the conversations to include architect response
-          const enhancedConversations = response.conversations.map(conv => {
-            // Parse technical details to get architect response
-            let architectResponse = null;
-            try {
-              const technicalDetails = JSON.parse(conv.technical_details || '{}');
-              if (technicalDetails.architect_response) {
-                architectResponse = technicalDetails.architect_response;
-              }
-            } catch (err) {
-              console.error('Error parsing technical details:', err);
-            }
-
-            return {
-              ...conv,
-              architect_response: architectResponse
-            };
-          });
-
           setThreadConversations(prev => ({
             ...prev,
-            [threadId]: enhancedConversations
+            [threadId]: response.conversations || []
           }));
-          console.log(`Enhanced conversations for thread ${threadId}:`, enhancedConversations);
+          console.log(`Loaded conversations for thread ${threadId}:`, response.conversations);
+        } else {
+          console.error(`Error in API response: ${response.detail || "Unknown error"}`);
+          toast({
+            title: 'Error',
+            description: 'Failed to load thread conversations',
+            status: 'error',
+            duration: 3000,
+          });
         }
       } catch (err) {
         console.error(`Error loading conversations for thread ${threadId}:`, err);
@@ -235,22 +282,6 @@ const ConversationHistory = ({ onSelectConversation, onNewChat }) => {
     );
   };
 
-  if (loading && threads.length === 0) {
-    return (
-      <Box p={4}>
-        <Text>Loading conversations...</Text>
-      </Box>
-    );
-  }
-
-  if (error) {
-    return (
-      <Box p={4}>
-        <Text color="red.500">Error: {error}</Text>
-      </Box>
-    );
-  }
-
   return (
     <Box p={4}>
       <Flex justify="space-between" align="center" mb={4}>
@@ -268,7 +299,11 @@ const ConversationHistory = ({ onSelectConversation, onNewChat }) => {
       <Divider mb={4} />
       
       <VStack spacing={3} align="stretch">
-        {threads.length === 0 ? (
+        {loading ? (
+          <Text textAlign="center">Loading conversations...</Text>
+        ) : error ? (
+          <Text textAlign="center" color="red.500">{error}</Text>
+        ) : threads.length === 0 ? (
           <Text textAlign="center" color="gray.500">No conversations yet</Text>
         ) : (
           threads.map(thread => (
@@ -278,7 +313,7 @@ const ConversationHistory = ({ onSelectConversation, onNewChat }) => {
                   <Flex justify="space-between" align="center" mb={2}>
                     <Text fontWeight="bold" fontSize="sm">Thread Started</Text>
                     <Text fontSize="xs" color="gray.500">
-                      {new Date(thread.timestamp).toLocaleString()}
+                      {new Date(thread.thread_created_at || thread.latest_timestamp).toLocaleString()}
                     </Text>
                   </Flex>
                   
@@ -292,7 +327,7 @@ const ConversationHistory = ({ onSelectConversation, onNewChat }) => {
                     _hover={{ bg: "gray.100" }}
                   >
                     <Text fontWeight="medium" noOfLines={2}>
-                      {thread.preview}
+                      {thread.latest_question || thread.topic || "Untitled conversation"}
                     </Text>
                   </Box>
 

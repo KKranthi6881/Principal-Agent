@@ -339,13 +339,29 @@ class DependencyAgent(Agent):
             if column_name:
                 entity_type = "column"
                 
-            # Format the dependencies for the prompt
-            upstream_deps = json.dumps(dependencies["dependencies"]["upstream"], indent=2)
-            downstream_deps = json.dumps(dependencies["dependencies"]["downstream"], indent=2)
+            # Initialize with empty defaults to prevent errors
+            upstream_deps = "[]"
+            downstream_deps = "[]"
             
-            if column_name and column_name in dependencies.get("columns", {}):
-                upstream_deps = json.dumps(dependencies["columns"][column_name]["upstream"], indent=2)
-                downstream_deps = json.dumps(dependencies["columns"][column_name]["downstream"], indent=2)
+            # Handle potential error cases with appropriate checks
+            if isinstance(dependencies, dict) and "dependencies" in dependencies:
+                # Format the dependencies for the prompt - handle table level
+                if "upstream" in dependencies.get("dependencies", {}):
+                    upstream_deps = json.dumps(dependencies["dependencies"]["upstream"], indent=2)
+                if "downstream" in dependencies.get("dependencies", {}):
+                    downstream_deps = json.dumps(dependencies["dependencies"]["downstream"], indent=2)
+                
+                # Handle column level if it exists
+                if column_name and "columns" in dependencies and isinstance(dependencies["columns"], dict):
+                    if column_name in dependencies["columns"]:
+                        col_info = dependencies["columns"][column_name]
+                        if "upstream" in col_info:
+                            upstream_deps = json.dumps(col_info["upstream"], indent=2)
+                        if "downstream" in col_info:
+                            downstream_deps = json.dumps(col_info["downstream"], indent=2)
+            else:
+                # If dependencies is not in expected format, use empty lists
+                logger.warning(f"Dependencies not in expected format: {dependencies}")
                 
             # Build the prompt
             prompt = self.impact_analysis_prompt.format(

@@ -13,7 +13,9 @@ from api.sql_agent_routes import router as sql_agent_router
 from database.migrations import run_migrations
 from database.database import db
 import logging
+import sqlite3
 from typing import Dict, Any, Optional
+from api.conversation_history_api import router as conversation_history_router
 
 # Configure logging
 logging.basicConfig(
@@ -47,6 +49,7 @@ app.include_router(sql_dependencies_api.router)
 app.include_router(settings_api.router)
 app.include_router(sql_analysis_api.router)
 app.include_router(sql_agent_router, prefix="/sql-agent", tags=["SQL Agent"])
+app.include_router(conversation_history_router)
 
 # Architect Analyze API endpoint
 @app.post("/api/architect/analyze/")

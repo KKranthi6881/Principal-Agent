@@ -382,6 +382,72 @@ async def delete_document(collection_name: str, doc_id: str):
     except AttributeError:
         raise HTTPException(status_code=400, detail="Invalid collection name")
 
+@app.get("/api/thread-conversations")
+async def get_all_thread_conversations():
+    """
+    Get all conversation threads with their latest messages
+    Returns a list of thread IDs, latest questions, and conversation counts
+    """
+    try:
+        conn = sqlite3.connect(os.path.join('database', 'conversations.db'))
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        
+        # Query to get threads with latest message and conversation count
+        cursor.execute("""
+            SELECT 
+                t.thread_id,
+                t.topic,
+                t.created_at as thread_created_at,
+                (
+                    SELECT c.content 
+                    FROM conversations c 
+                    WHERE c.thread_id = t.thread_id AND c.role = 'user'
+                    ORDER BY c.created_at DESC 
+                    LIMIT 1
+                ) as latest_question,
+                (
+                    SELECT c.created_at 
+                    FROM conversations c 
+                    WHERE c.thread_id = t.thread_id
+                    ORDER BY c.created_at DESC 
+                    LIMIT 1
+                ) as latest_timestamp,
+                (
+                    SELECT COUNT(*) 
+                    FROM conversations c 
+                    WHERE c.thread_id = t.thread_id
+                ) as conversation_count,
+                (
+                    SELECT c.conversation_id
+                    FROM conversations c
+                    WHERE c.thread_id = t.thread_id
+                    ORDER BY c.created_at ASC
+                    LIMIT 1
+                ) as first_conversation_id
+            FROM threads t
+            ORDER BY latest_timestamp DESC
+        """)
+        
+        threads = []
+        for row in cursor.fetchall():
+            threads.append({
+                "thread_id": row["thread_id"],
+                "topic": row["topic"],
+                "latest_question": row["latest_question"],
+                "latest_timestamp": row["latest_timestamp"],
+                "conversation_count": row["conversation_count"],
+                "first_conversation_id": row["first_conversation_id"],
+                "thread_created_at": row["thread_created_at"]
+            })
+        
+        return {"status": "success", "threads": threads}
+    except Exception as e:
+        logger.error(f"Error getting thread conversations: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+    finally:
+        conn.close()
+
 # Add a test endpoint to check if models are available
 @app.get("/test-models")
 async def test_models():

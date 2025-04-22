@@ -189,9 +189,9 @@ class SQLLLMInterface:
             if repo_url and not dialect:
                 dialect = self.sql_api.detect_dialect_from_repo_url(repo_url)
             
-            # Get full column lineage
+            # Get full column lineage - only pass the parameters defined in the method signature
             result = self.sql_api.trace_column_complete_lineage(
-                table_name, column_name, direction, max_depth, dialect
+                table_name, column_name, direction, max_depth
             )
             
             # Create simplified result for LLM consumption
@@ -199,7 +199,7 @@ class SQLLLMInterface:
                 "table": table_name,
                 "column": column_name,
                 "direction": direction,
-                "dialect_used": result.get("dialect_used", "unknown"),
+                "dialect_used": dialect or "unknown",  # Use the local dialect variable
                 "summary": result.get("summary", ""),
                 "column_chain": result.get("column_chain", []),
                 "levels": {}
@@ -232,7 +232,7 @@ class SQLLLMInterface:
             
         except Exception as e:
             logger.error(f"Error in get_column_lineage: {str(e)}")
-            return {"error": str(e)}
+            return {"error": str(e), "table": table_name, "column": column_name}
     
     def search_tables(self, table_name: str, limit: int = 5) -> Dict[str, Any]:
         """
