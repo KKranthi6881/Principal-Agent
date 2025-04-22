@@ -261,14 +261,28 @@ const ChatHistoryPage = () => {
   // Function to fetch a specific conversation directly
   const loadDirectConversation = async (id) => {
     try {
+      // Check if this ID is a thread ID
+      const isThread = threads.some(thread => thread.thread_id === id);
+      if (isThread) {
+        console.log(`ID ${id} is a thread ID, redirecting to thread view`);
+        // Navigate to thread view instead
+        navigate(`/history/${id}`);
+        return;
+      }
+
       setDirectLoading(true);
       setDirectError(null);
       
       console.log(`Fetching direct conversation: ${id}`);
-      const response = await axios.get(`${API_BASE_URL}/api/conversation/${id}`);
+      const response = await fetch(`${API_BASE_URL}/api/conversation/${id}`);
       
-      console.log('Direct conversation data:', response.data);
-      setDirectConversation(response.data);
+      if (!response.ok) {
+        throw new Error(`Failed to fetch conversation: ${response.status}`);
+      }
+      
+      const data = await response.json();
+      console.log('Direct conversation data:', data);
+      setDirectConversation(data);
     } catch (error) {
       console.error('Error fetching direct conversation:', error);
       setDirectError(`Failed to load conversation: ${error.message}`);
