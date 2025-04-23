@@ -61,7 +61,7 @@ import { atomDark } from 'react-syntax-highlighter/dist/cjs/styles/prism';
 import remarkGfm from 'remark-gfm';
 
 // Define API base URL directly in the component
-const API_BASE_URL = 'http://localhost:8002';
+const API_BASE_URL = 'http://localhost:8000';
 
 const ChatHistoryPage = () => {
   const [conversations, setConversations] = useState([]);

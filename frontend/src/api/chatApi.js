@@ -1,5 +1,5 @@
 // Simple fetch-based API client (no axios dependency)
-const API_BASE_URL = 'http://localhost:8002';
+const API_BASE_URL = 'http://localhost:8000';
 
 const chatApi = {
   sendMessage: async (data) => {

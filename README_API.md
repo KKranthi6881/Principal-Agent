@@ -64,11 +64,11 @@ python database/db_setup.py
 python run.py
 ```
 
-The API will be available at `http://localhost:8002`
+The API will be available at `http://localhost:8000`
 
 ## API Documentation
 
-The API documentation is available at `http://localhost:8002/docs` when the server is running.
+The API documentation is available at `http://localhost:8000/docs` when the server is running.
 
 ### Key Endpoints
 

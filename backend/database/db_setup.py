@@ -2,12 +2,18 @@ import sqlite3
 import os
 from pathlib import Path
 import json
+import logging
+
+# Configure logging
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
 # Database paths
 DB_DIR = Path(__file__).parent
 CONVERSATIONS_DB = DB_DIR / "conversations.db"
 LOG_INFO_DB = DB_DIR / "log_info.db"
 METADATA_DB = DB_DIR / "metadata.db"
+LINEAGE_DB = DB_DIR / "lineage.db"
 
 def setup_conversations_db():
     conn = sqlite3.connect(CONVERSATIONS_DB)
@@ -174,6 +180,98 @@ def setup_metadata_db():
     conn.commit()
     conn.close()
 
+def setup_lineage_db():
+    """Create the lineage database and tables if they don't exist"""
+    
+    # Ensure database directory exists
+    os.makedirs(os.path.dirname(LINEAGE_DB), exist_ok=True)
+    
+    # Connect to database
+    conn = sqlite3.connect(LINEAGE_DB)
+    cursor = conn.cursor()
+    
+    try:
+        # Create tables table
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS tables (
+            table_id TEXT PRIMARY KEY,
+            table_name TEXT NOT NULL,
+            schema_name TEXT,
+            database_name TEXT,
+            github_path TEXT,
+            github_repo TEXT,
+            connector_id TEXT,
+            tech_stack TEXT NOT NULL,
+            business_description TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """)
+        
+        # Create columns table
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS columns (
+            column_id TEXT PRIMARY KEY,
+            table_id TEXT NOT NULL,
+            column_name TEXT NOT NULL,
+            data_type TEXT,
+            is_primary_key BOOLEAN DEFAULT FALSE,
+            is_foreign_key BOOLEAN DEFAULT FALSE,
+            business_description TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (table_id) REFERENCES tables(table_id)
+        )
+        """)
+        
+        # Create relationships table
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS relationships (
+            relationship_id TEXT PRIMARY KEY,
+            source_table_id TEXT NOT NULL,
+            target_table_id TEXT NOT NULL,
+            relationship_type TEXT NOT NULL,
+            source_column_id TEXT,
+            target_column_id TEXT,
+            github_path TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (source_table_id) REFERENCES tables(table_id),
+            FOREIGN KEY (target_table_id) REFERENCES tables(table_id),
+            FOREIGN KEY (source_column_id) REFERENCES columns(column_id),
+            FOREIGN KEY (target_column_id) REFERENCES columns(column_id)
+        )
+        """)
+        
+        # Create lineage_definitions table
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS lineage_definitions (
+            lineage_id TEXT PRIMARY KEY,
+            root_table_id TEXT NOT NULL,
+            lineage_json JSON NOT NULL,
+            tech_stack TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (root_table_id) REFERENCES tables(table_id)
+        )
+        """)
+        
+        # Create indices
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_tables_name ON tables(table_name)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_tables_tech ON tables(tech_stack)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_columns_table ON columns(table_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_relationships_source ON relationships(source_table_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_relationships_target ON relationships(target_table_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_lineage_root ON lineage_definitions(root_table_id)")
+        
+        conn.commit()
+        logger.info("Successfully created lineage database tables")
+        
+    except Exception as e:
+        logger.error(f"Error setting up database: {str(e)}")
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
 def setup_all_databases():
     # Create database directory if it doesn't exist
     DB_DIR.mkdir(parents=True, exist_ok=True)
@@ -182,6 +280,7 @@ def setup_all_databases():
     setup_conversations_db()
     setup_log_info_db()
     setup_metadata_db()
+    setup_lineage_db()
     
     # Insert default LLM providers if they don't exist
     providers = [

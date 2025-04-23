@@ -157,4 +157,112 @@ class BaseSQLDialect(ABC):
             "error_type": error_type,
             "message": error_msg,
             "dialect": self.name
-        } 
+        }
+
+class SQLDialectHandler(ABC):
+    """Base class for SQL dialect handlers"""
+    
+    def __init__(self):
+        """Initialize the dialect handler"""
+        self.dialect = None  # Set by subclasses
+    
+    @abstractmethod
+    def parse_sql(self, sql_code: str) -> Tuple[Any, List[str]]:
+        """
+        Parse SQL code into an AST
+        
+        Args:
+            sql_code: SQL code to parse
+            
+        Returns:
+            Tuple of (AST, list of errors)
+        """
+        pass
+    
+    @abstractmethod
+    def get_table_name(self, table_node: Any) -> str:
+        """
+        Get fully qualified table name from a Table node
+        
+        Args:
+            table_node: SQLGlot Table expression
+            
+        Returns:
+            Fully qualified table name
+        """
+        pass
+    
+    @abstractmethod
+    def extract_column_metadata(self, column_node: Any) -> Dict[str, Any]:
+        """
+        Extract metadata for a column
+        
+        Args:
+            column_node: SQLGlot Column expression
+            
+        Returns:
+            Column metadata dictionary
+        """
+        pass
+    
+    def extract_table_metadata(self, table_node: Any) -> Dict[str, Any]:
+        """
+        Extract metadata for a table
+        
+        Args:
+            table_node: SQLGlot Table expression
+            
+        Returns:
+            Table metadata dictionary
+        """
+        return {
+            "name": self.get_table_name(table_node),
+            "schema": getattr(table_node, "schema", None),
+            "database": getattr(table_node, "db", None),
+            "catalog": getattr(table_node, "catalog", None)
+        }
+    
+    def extract_constraints(self, ast: Any) -> List[Dict[str, Any]]:
+        """
+        Extract constraints from SQL AST
+        
+        Args:
+            ast: SQLGlot AST
+            
+        Returns:
+            List of constraint dictionaries
+        """
+        constraints = []
+        
+        # Traverse AST looking for constraints
+        def visit(node):
+            if hasattr(node, "args"):
+                if isinstance(node.args, dict):
+                    for child in node.args.values():
+                        if isinstance(child, list):
+                            for item in child:
+                                visit(item)
+                        else:
+                            visit(child)
+                elif isinstance(node.args, list):
+                    for child in node.args:
+                        visit(child)
+                        
+            # Check for constraint types
+            if hasattr(node, "key") and node.key == "CONSTRAINT":
+                constraint = {
+                    "type": node.args.get("type", "UNKNOWN"),
+                    "name": node.args.get("name"),
+                    "columns": []
+                }
+                
+                # Extract columns involved in constraint
+                if "columns" in node.args:
+                    for col in node.args["columns"]:
+                        if hasattr(col, "name"):
+                            constraint["columns"].append(col.name)
+                            
+                constraints.append(constraint)
+                
+        visit(ast)
+        return constraints 

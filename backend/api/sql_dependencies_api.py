@@ -1,5 +1,7 @@
 """
-API for SQL dependencies
+SQL Dependencies API
+
+This module provides endpoints for analyzing SQL dependencies.
 """
 
 from fastapi import APIRouter, HTTPException, Depends, Query, Path, Body
@@ -8,11 +10,8 @@ from typing import List, Dict, Any, Optional
 import logging
 import os
 
-# Try to import tools using both potential import paths
-try:
-    from tools.sql_tools.dependency_analyzer import SQLDependencyTool
-except ImportError:
-    from backend.tools.sql_tools.dependency_analyzer import SQLDependencyTool
+# Import local modules
+from tools.sql_tools import SQLDependencyTool, get_dialect_parser, get_available_dialects
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -211,4 +210,49 @@ async def analyze_downstream_dependencies(
         return downstream_info
     except Exception as e:
         logger.error(f"Error analyzing downstream dependencies: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error analyzing downstream dependencies: {str(e)}") 
+        raise HTTPException(status_code=500, detail=f"Error analyzing downstream dependencies: {str(e)}")
+
+
+@router.post("/analyze")
+async def analyze_sql_dependencies(
+    sql_code: str = Body(..., description="SQL code to analyze"),
+    tech_stack: str = Body(..., description="Tech stack (tsql, postgresql, dbt, etc.)"),
+    github_path: Optional[str] = Body(None, description="Path to file in GitHub"),
+    connector_id: Optional[str] = Body(None, description="GitHub connector ID")
+):
+    """
+    Analyze SQL dependencies and extract lineage information
+    """
+    try:
+        # Get dialect parser
+        dialect = get_dialect_parser(tech_stack)
+        if not dialect:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported tech stack: {tech_stack}"
+            )
+        
+        # Create dependency analyzer
+        analyzer = SQLDependencyTool(dialect=dialect)
+        
+        # Analyze dependencies
+        result = analyzer.analyze_dependencies(
+            sql_code,
+            github_path=github_path,
+            connector_id=connector_id
+        )
+        
+        return result
+    
+    except Exception as e:
+        logger.error(f"Error analyzing SQL dependencies: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error analyzing SQL dependencies: {str(e)}"
+        )
+
+
+@router.get("/tech-stacks")
+async def get_tech_stacks():
+    """Get list of supported SQL tech stacks"""
+    return get_available_dialects() 

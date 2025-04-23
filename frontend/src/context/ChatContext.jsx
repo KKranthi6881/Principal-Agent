@@ -59,7 +59,7 @@ export const ChatProvider = ({ children }) => {
     if (!threadId || threadId === 'undefined') return;
     
     try {
-      const response = await fetch(`http://localhost:8002/api/thread/${threadId}/conversations`);
+      const response = await fetch(`http://localhost:8000/api/thread/${threadId}/conversations`);
       if (!response.ok) throw new Error('Failed to fetch thread messages');
       
       const data = await response.json();

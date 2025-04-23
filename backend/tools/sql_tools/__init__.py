@@ -1,19 +1,16 @@
 """
-SQL Analysis Tools
+SQL Tools Package
 
-This package provides tools for SQL code analysis, dependency tracing,
-and lineage visualization.
+This package provides tools for SQL parsing, analysis, and lineage extraction.
 """
 
-from .api import SQLAPI, SQLAnalysisAPI
+from .dialects import get_dialect_parser, get_available_dialects
 from .dependency_analyzer import SQLDependencyTool
-from .github_sql_finder import GitHubSQLFinder
-from .llm_interface import SQLLLMInterface
+from .lineage.sqlglot_lineage import SQLGlotLineageExtractor
 
 __all__ = [
-    'SQLAPI', 
-    'SQLAnalysisAPI', 
-    'SQLDependencyTool', 
-    'GitHubSQLFinder', 
-    'SQLLLMInterface'
+    'get_dialect_parser',
+    'get_available_dialects',
+    'SQLDependencyTool',
+    'SQLGlotLineageExtractor'
 ] 

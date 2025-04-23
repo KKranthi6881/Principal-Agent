@@ -21,7 +21,7 @@ import {
 import { IoAdd, IoTrash } from 'react-icons/io5';
 import { fetchRecentConversations, fetchConversationsByThread, clearConversation } from '../api/chatApi';
 
-const API_BASE_URL = 'http://localhost:8002'; // Replace with your actual API base URL
+const API_BASE_URL = 'http://localhost:8000'; // Replace with your actual API base URL
 
 const ConversationHistory = ({ onSelectConversation, onNewChat }) => {
   const [threads, setThreads] = useState([]);

@@ -1,7 +1,7 @@
 """
-Base SQL Lineage Extractor
+Base Lineage Extractor
 
-This module defines the base class for SQL lineage extraction.
+This module provides the base class for SQL lineage extractors.
 """
 
 import os
@@ -14,43 +14,37 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 class BaseLineageExtractor(ABC):
-    """
-    Base class for SQL lineage extractors. All lineage extractors should inherit from this.
-    """
+    """Base class for SQL lineage extractors"""
     
     def __init__(self):
-        """
-        Initialize the SQL lineage extractor
-        """
+        """Initialize the base lineage extractor"""
         pass
     
-    @abstractmethod
     def extract_table_lineage(self, sql_ast: Any, file_path: Optional[str] = None) -> Dict[str, Any]:
         """
         Extract table-level lineage from SQL AST
         
         Args:
-            sql_ast: SQL AST
-            file_path: Path to the file (optional)
+            sql_ast: SQL AST (implementation-specific)
+            file_path: Path to the original SQL file
             
         Returns:
             Dictionary with table lineage information
         """
-        pass
+        raise NotImplementedError("Subclasses must implement extract_table_lineage")
     
-    @abstractmethod
     def extract_column_lineage(self, sql_ast: Any, file_path: Optional[str] = None) -> Dict[str, Any]:
         """
         Extract column-level lineage from SQL AST
         
         Args:
-            sql_ast: SQL AST
-            file_path: Path to the file (optional)
+            sql_ast: SQL AST (implementation-specific)
+            file_path: Path to the original SQL file
             
         Returns:
             Dictionary with column lineage information
         """
-        pass
+        raise NotImplementedError("Subclasses must implement extract_column_lineage")
     
     def format_lineage(self, 
                        target_table: str, 

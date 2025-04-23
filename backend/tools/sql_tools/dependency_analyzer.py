@@ -1,9 +1,7 @@
 """
-SQL Dependency Analyzer Tool
+SQL Dependency Analyzer
 
-This module coordinates the SQL dependency analysis process,
-combining GitHub file search with SQL parsing to build 
-comprehensive dependency graphs.
+This module provides tools for analyzing SQL dependencies and extracting lineage information.
 """
 
 import logging
@@ -18,6 +16,8 @@ import uuid
 
 from .sql_dependency_analyzer import SQLDependencyAnalyzer
 from .github_sql_finder import GitHubSQLFinder
+from .dialects import SQLDialectHandler
+from .lineage.sqlglot_lineage import SQLGlotLineageExtractor
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -28,13 +28,14 @@ class SQLDependencyTool:
     Main tool for analyzing SQL dependencies from GitHub repositories
     """
     
-    def __init__(self, vector_store_path: str = None, github_wrapper = None):
+    def __init__(self, vector_store_path: str = None, github_wrapper = None, dialect: SQLDialectHandler = None):
         """
         Initialize the SQL Dependency Tool
         
         Args:
             vector_store_path: Path to the ChromaDB vector store
             github_wrapper: GitHub API wrapper instance (optional)
+            dialect: SQL dialect handler
         """
         # If path is None, use default
         if vector_store_path is None:
@@ -58,6 +59,9 @@ class SQLDependencyTool:
         
         # Cache for file content to avoid repeated processing
         self.file_cache = {}
+        
+        self.dialect = dialect
+        self.lineage_extractor = SQLGlotLineageExtractor()
         
     def initialize(self):
         """Initialize components and connections"""
@@ -1000,4 +1004,67 @@ class SQLDependencyTool:
             }
         except Exception as e:
             logger.error(f"Error searching for column {column_name}: {str(e)}")
-            return {"error": f"Error searching for column: {str(e)}", "files_found": 0, "results": []} 
+            return {"error": f"Error searching for column: {str(e)}", "files_found": 0, "results": []}
+    
+    def analyze_dependencies(self, sql_code: str, github_path: Optional[str] = None,
+                           connector_id: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Analyze SQL dependencies and extract lineage information
+        
+        Args:
+            sql_code: SQL code to analyze
+            github_path: Path to file in GitHub
+            connector_id: GitHub connector ID
+            
+        Returns:
+            Dictionary with dependency and lineage information
+        """
+        try:
+            # Parse SQL code
+            ast, errors = self.dialect.parse_sql(sql_code)
+            
+            if errors:
+                return {
+                    "success": False,
+                    "errors": errors,
+                    "tech_stack": self.dialect.dialect
+                }
+            
+            if not ast:
+                return {
+                    "success": False,
+                    "errors": ["Failed to parse SQL code"],
+                    "tech_stack": self.dialect.dialect
+                }
+            
+            # Extract table lineage
+            table_lineage = self.lineage_extractor.extract_table_lineage(
+                ast,
+                file_path=github_path
+            )
+            
+            # Extract column lineage
+            column_lineage = self.lineage_extractor.extract_column_lineage(
+                ast,
+                file_path=github_path
+            )
+            
+            # Combine results
+            result = {
+                "success": True,
+                "tech_stack": self.dialect.dialect,
+                "github_path": github_path,
+                "connector_id": connector_id,
+                "table_lineage": table_lineage,
+                "column_lineage": column_lineage
+            }
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error analyzing SQL dependencies: {str(e)}")
+            return {
+                "success": False,
+                "errors": [str(e)],
+                "tech_stack": self.dialect.dialect
+            } 

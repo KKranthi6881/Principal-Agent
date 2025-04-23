@@ -1,7 +1,18 @@
+"""
+Backend Server
+
+This module starts the FastAPI server and initializes all components.
+"""
+
 import os
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request, Body
 from fastapi.middleware.cors import CORSMiddleware
+import logging
+import sqlite3
+from typing import Dict, Any, Optional
+
+# Import API routers
 from api import llm_providers_api
 from api import github_connectors_api
 from api import github_vector_api
@@ -10,12 +21,12 @@ from api import sql_dependencies_api
 from api import settings_api
 from api import sql_analysis_api
 from api.sql_agent_routes import router as sql_agent_router
+from api.conversation_history_api import router as conversation_history_router
+from api.lineage_api import router as lineage_router
+
+# Import database components
 from database.migrations import run_migrations
 from database.database import db
-import logging
-import sqlite3
-from typing import Dict, Any, Optional
-from api.conversation_history_api import router as conversation_history_router
 
 # Configure logging
 logging.basicConfig(
@@ -26,18 +37,18 @@ logger = logging.getLogger(__name__)
 
 # Create FastAPI app
 app = FastAPI(
-    title="Data Architect API",
-    description="API for data architecture capabilities",
-    version="0.1.0"
+    title="Principal-Agent Backend",
+    description="Backend API for SQL lineage analysis and GitHub integration",
+    version="1.0.0"
 )
 
 # Configure CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allows all origins
+    allow_origins=["*"],  # In production, replace with specific origins
     allow_credentials=True,
-    allow_methods=["*"],  # Allows all methods
-    allow_headers=["*"],  # Allows all headers
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # Include routers
@@ -50,6 +61,7 @@ app.include_router(settings_api.router)
 app.include_router(sql_analysis_api.router)
 app.include_router(sql_agent_router, prefix="/sql-agent", tags=["SQL Agent"])
 app.include_router(conversation_history_router)
+app.include_router(lineage_router)
 
 # Architect Analyze API endpoint
 @app.post("/api/architect/analyze/")
@@ -158,4 +170,13 @@ async def health_check():
 
 # Run the application
 if __name__ == "__main__":
-    uvicorn.run("run:app", host="0.0.0.0", port=8002, reload=True) 
+    # Get port from environment or use default
+    port = int(os.getenv("PORT", 8000))
+    
+    # Run server
+    uvicorn.run(
+        "run:app",
+        host="0.0.0.0",
+        port=port,
+        reload=True  # Enable auto-reload during development
+    ) 

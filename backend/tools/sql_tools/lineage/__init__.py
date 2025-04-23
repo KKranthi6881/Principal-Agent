@@ -1,11 +1,13 @@
 """
-SQL Lineage Extractors
+SQL Lineage Package
 
-This module provides lineage extraction capabilities for SQL code.
+This package provides tools for extracting lineage information from SQL code.
 """
 
-from .base_lineage import BaseLineageExtractor
 from .sqlglot_lineage import SQLGlotLineageExtractor
-from .adapters import LineageAdapter
+from .base_lineage import BaseLineageExtractor
 
-__all__ = ['BaseLineageExtractor', 'SQLGlotLineageExtractor', 'LineageAdapter'] 
+__all__ = [
+    'SQLGlotLineageExtractor',
+    'BaseLineageExtractor'
+] 
