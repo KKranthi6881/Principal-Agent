@@ -481,7 +481,7 @@ class DBTDialect(BaseSQLDialect):
             
         # Extract DBT dependencies
         deps = self.extract_dependencies(sql_code, file_path)
-        if deps and deps.get("errors"):
+        if deps["errors"]:
             result["errors"].extend(deps["errors"])
             
         # Extract model name from dependencies if present
@@ -492,7 +492,7 @@ class DBTDialect(BaseSQLDialect):
         source_tables = []
         
         # Add sources (e.g. source('raw', 'customers') -> raw.customers)
-        for source in (deps.get("sources", []) if deps else []):
+        for source in deps.get("sources", []):
             source_tables.append({
                 "name": source.get("table"),
                 "schema": source.get("source"),
@@ -500,7 +500,7 @@ class DBTDialect(BaseSQLDialect):
             })
             
         # Add refs (e.g. ref('stg_customers') -> stg_customers)
-        for ref in (deps.get("refs", []) if deps else []):
+        for ref in deps.get("refs", []):
             source_tables.append({
                 "name": ref.get("model"),
                 "schema": ref.get("project", "dbt_ref"),
@@ -508,7 +508,7 @@ class DBTDialect(BaseSQLDialect):
             })
             
         # Add direct table references
-        for table in (deps.get("tables", []) if deps else []):
+        for table in deps.get("tables", []):
             # Skip tables that look like macros or references
             if isinstance(table, str) and not table.startswith('__dbt_'):
                 parts = table.split('.')
@@ -632,7 +632,7 @@ class DBTDialect(BaseSQLDialect):
             
         # Extract DBT dependencies
         deps = self.extract_dependencies(sql_code, file_path)
-        if deps and deps.get("errors"):
+        if deps["errors"]:
             result["errors"].extend(deps["errors"])
             
         # Extract model name from dependencies if present
@@ -643,7 +643,7 @@ class DBTDialect(BaseSQLDialect):
         source_tables = []
         
         # Add sources (e.g. source('raw', 'customers') -> raw.customers)
-        for source in (deps.get("sources", []) if deps else []):
+        for source in deps.get("sources", []):
             source_tables.append({
                 "name": source.get("table"),
                 "schema": source.get("source"),
@@ -651,7 +651,7 @@ class DBTDialect(BaseSQLDialect):
             })
             
         # Add refs (e.g. ref('stg_customers') -> stg_customers)
-        for ref in (deps.get("refs", []) if deps else []):
+        for ref in deps.get("refs", []):
             source_tables.append({
                 "name": ref.get("model"),
                 "schema": ref.get("project", "dbt_ref"),
@@ -659,7 +659,7 @@ class DBTDialect(BaseSQLDialect):
             })
             
         # Add direct table references
-        for table in (deps.get("tables", []) if deps else []):
+        for table in deps.get("tables", []):
             # Skip tables that look like macros or references
             if isinstance(table, str) and not table.startswith('__dbt_'):
                 parts = table.split('.')
@@ -813,7 +813,7 @@ class DBTDialect(BaseSQLDialect):
             
         # Extract DBT dependencies
         deps = self.extract_dependencies(sql_code, file_path)
-        if deps and deps.get("errors"):
+        if deps["errors"]:
             result["errors"].extend(deps["errors"])
             
         # Extract model name from dependencies if present
@@ -824,7 +824,7 @@ class DBTDialect(BaseSQLDialect):
         source_tables = []
         
         # Add sources (e.g. source('raw', 'customers') -> raw.customers)
-        for source in (deps.get("sources", []) if deps else []):
+        for source in deps.get("sources", []):
             source_tables.append({
                 "name": source.get("table"),
                 "schema": source.get("source"),
@@ -832,7 +832,7 @@ class DBTDialect(BaseSQLDialect):
             })
             
         # Add refs (e.g. ref('stg_customers') -> stg_customers)
-        for ref in (deps.get("refs", []) if deps else []):
+        for ref in deps.get("refs", []):
             source_tables.append({
                 "name": ref.get("model"),
                 "schema": ref.get("project", "dbt_ref"),
@@ -840,7 +840,7 @@ class DBTDialect(BaseSQLDialect):
             })
             
         # Add direct table references
-        for table in (deps.get("tables", []) if deps else []):
+        for table in deps.get("tables", []):
             # Skip tables that look like macros or references
             if isinstance(table, str) and not table.startswith('__dbt_'):
                 parts = table.split('.')
@@ -990,7 +990,7 @@ class DBTDialect(BaseSQLDialect):
             
         # Extract DBT dependencies
         deps = self.extract_dependencies(sql_code, file_path)
-        if deps and deps.get("errors"):
+        if deps["errors"]:
             result["errors"].extend(deps["errors"])
             
         # Extract model name from dependencies if present
@@ -1001,7 +1001,7 @@ class DBTDialect(BaseSQLDialect):
         source_tables = []
         
         # Add sources (e.g. source('raw', 'customers') -> raw.customers)
-        for source in (deps.get("sources", []) if deps else []):
+        for source in deps.get("sources", []):
             source_tables.append({
                 "name": source.get("table"),
                 "schema": source.get("source"),
@@ -1009,7 +1009,7 @@ class DBTDialect(BaseSQLDialect):
             })
             
         # Add refs (e.g. ref('stg_customers') -> stg_customers)
-        for ref in (deps.get("refs", []) if deps else []):
+        for ref in deps.get("refs", []):
             source_tables.append({
                 "name": ref.get("model"),
                 "schema": ref.get("project", "dbt_ref"),
@@ -1017,7 +1017,7 @@ class DBTDialect(BaseSQLDialect):
             })
             
         # Add direct table references
-        for table in (deps.get("tables", []) if deps else []):
+        for table in deps.get("tables", []):
             # Skip tables that look like macros or references
             if isinstance(table, str) and not table.startswith('__dbt_'):
                 parts = table.split('.')
@@ -1136,7 +1136,7 @@ class DBTDialect(BaseSQLDialect):
             
         # Extract DBT dependencies
         deps = self.extract_dependencies(sql_code, file_path)
-        if deps and deps.get("errors"):
+        if deps["errors"]:
             result["errors"].extend(deps["errors"])
             
         # Extract model name from dependencies if present
@@ -1147,7 +1147,7 @@ class DBTDialect(BaseSQLDialect):
         source_tables = []
         
         # Add sources (e.g. source('raw', 'customers') -> raw.customers)
-        for source in (deps.get("sources", []) if deps else []):
+        for source in deps.get("sources", []):
             source_tables.append({
                 "name": source.get("table"),
                 "schema": source.get("source"),
@@ -1155,7 +1155,7 @@ class DBTDialect(BaseSQLDialect):
             })
             
         # Add refs (e.g. ref('stg_customers') -> stg_customers)
-        for ref in (deps.get("refs", []) if deps else []):
+        for ref in deps.get("refs", []):
             source_tables.append({
                 "name": ref.get("model"),
                 "schema": ref.get("project", "dbt_ref"),
@@ -1163,7 +1163,7 @@ class DBTDialect(BaseSQLDialect):
             })
             
         # Add direct table references
-        for table in (deps.get("tables", []) if deps else []):
+        for table in deps.get("tables", []):
             # Skip tables that look like macros or references
             if isinstance(table, str) and not table.startswith('__dbt_'):
                 parts = table.split('.')
@@ -1493,65 +1493,19 @@ class DBTDialect(BaseSQLDialect):
         # Look for table names after JOIN
         join_pattern = r'(?i)join\s+([a-zA-Z0-9_\.]+)'
         join_matches = re.findall(join_pattern, sql_code)
+        tables.extend(join_matches)
         
-    def _find_select_statements(self, ast):
-        """Find all SELECT statements in an AST"""
-        selects = []
+        # Look for DBT refs
+        ref_pattern = r'__dbt_ref_([a-zA-Z0-9_]+)'
+        ref_matches = re.findall(ref_pattern, sql_code)
+        tables.extend([f"__dbt_ref_{m}" for m in ref_matches])
         
-        if hasattr(ast, 'expressions'):
-            for expr in ast.expressions:
-                if isinstance(expr, Select):
-                    selects.append(expr)
-                selects.extend(self._find_select_statements(expr))
+        # Look for DBT sources
+        source_pattern = r'__dbt_source_([a-zA-Z0-9_]+)_([a-zA-Z0-9_]+)'
+        source_matches = re.findall(source_pattern, sql_code)
+        tables.extend([f"__dbt_source_{s[0]}_{s[1]}" for s in source_matches])
         
-        return selects
-
-    def _extract_columns_from_select(self, select_stmt):
-        """Extract column information from a SELECT statement"""
-        columns = []
-        
-        # Handle SELECT * case
-        if hasattr(select_stmt, 'selects') and select_stmt.selects:
-            for col in select_stmt.selects:
-                column_info = {}
-                
-                # Try to get column name from alias or direct name
-                if hasattr(col, 'alias') and col.alias:
-                    column_info["name"] = col.alias
-                elif hasattr(col, 'name') and col.name:
-                    column_info["name"] = col.name
-                elif hasattr(col, 'this') and hasattr(col.this, 'name'):
-                    column_info["name"] = col.this.name
-                elif hasattr(col, 'this') and col.this == '*':
-                    # Handle * case - we need to extract columns from CTEs or source tables
-                    # For now, add a placeholder
-                    column_info["name"] = "column_" + str(len(columns) + 1)
-                else:
-                    # Use string representation as fallback
-                    column_info["name"] = str(col)
-                    # Clean up the column name if it has complex expressions
-                    if ' AS ' in column_info["name"]:
-                        column_info["name"] = column_info["name"].split(' AS ')[-1].strip()
-                    elif ' as ' in column_info["name"]:
-                        column_info["name"] = column_info["name"].split(' as ')[-1].strip()
-                
-                # Add the column if we extracted a valid name
-                if column_info.get("name") and column_info["name"] != '*':
-                    columns.append(column_info)
-        
-        return columns
-        
-    def _extract_table_refs_from_text(self, sql_text):
-        """Extract table references directly from SQL text"""
-        # Extract __dbt_ref_XXX patterns
-        dbt_refs = re.findall(r'__dbt_ref_([a-zA-Z0-9_]+)', sql_text)
-        refs = [{'model': ref} for ref in dbt_refs]
-        
-        # Extract __dbt_source_XXX_YYY patterns
-        dbt_sources = re.findall(r'__dbt_source_([a-zA-Z0-9_]+)_([a-zA-Z0-9_]+)', sql_text)
-        sources = [{'source': source, 'table': table} for source, table in dbt_sources]
-        
-        return {"refs": refs, "sources": sources}
+        return tables
 
     def _extract_cte_dependencies(self, sql_code):
         """
@@ -1631,18 +1585,18 @@ class DBTDialect(BaseSQLDialect):
             
         # Extract DBT dependencies
         deps = self.extract_dependencies(sql_code, file_path)
-        if deps and deps.get("errors"):
+        if deps["errors"]:
             result["errors"].extend(deps["errors"])
             
         # Extract model name from dependencies if present
-        if deps and deps.get("model_name"):
+        if deps.get("model_name"):
             result["target_table"] = deps["model_name"]
             
         # Initialize source tables
         source_tables = []
         
         # Add sources (e.g. source('raw', 'customers') -> raw.customers)
-        for source in (deps.get("sources", []) if deps else []):
+        for source in deps.get("sources", []):
             source_tables.append({
                 "name": source.get("table"),
                 "schema": source.get("source"),
@@ -1650,7 +1604,7 @@ class DBTDialect(BaseSQLDialect):
             })
             
         # Add refs (e.g. ref('stg_customers') -> stg_customers)
-        for ref in (deps.get("refs", []) if deps else []):
+        for ref in deps.get("refs", []):
             source_tables.append({
                 "name": ref.get("model"),
                 "schema": ref.get("project", "dbt_ref"),
@@ -1658,7 +1612,7 @@ class DBTDialect(BaseSQLDialect):
             })
             
         # Add direct table references
-        for table in (deps.get("tables", []) if deps else []):
+        for table in deps.get("tables", []):
             # Skip tables that look like macros or references
             if isinstance(table, str) and not table.startswith('__dbt_'):
                 parts = table.split('.')

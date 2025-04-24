@@ -222,12 +222,11 @@ class LineageDB:
         
         try:
             cursor.execute(
-                """INSERT INTO relationships 
-                   (relationship_id, source_table_id, target_table_id, relationship_type,
-                    source_column_id, target_column_id, sql_snippet, github_path) 
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                (relationship_id, source_table_id, target_table_id, relationship_type,
-                 source_column_id, target_column_id, sql_snippet, github_path)
+                "INSERT INTO relationships (relationship_id, source_table_id, target_table_id, relationship_type, "
+                "source_column_id, target_column_id, github_path) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (relationship_id, source_table_id, target_table_id, relationship_type, 
+                 source_column_id, target_column_id, github_path)
             )
             
             conn.commit()

@@ -8,12 +8,13 @@ import tempfile
 import shutil
 import threading
 import logging
-from typing import Dict, List, Any, Optional
+from typing import Dict, Any, List, Optional
 import json
 import sqlite3
 import requests
 from urllib.parse import urlparse
 import subprocess
+from tools.sql_tools.dbt_column_extractor import DBTColumnExtractor
 
 # Import local modules
 from tools.sql_tools.dialects import get_dialect_parser
@@ -232,6 +233,13 @@ async def process_repository_for_lineage(connector_id: str, repo_url: str, tech_
                 try:
                     dialect_lineage = dialect_handler.extract_lineage(sql_code, relative_path)
                     
+                    # Debug logging for column extraction
+                    logger.info(f"Dialect lineage keys: {list(dialect_lineage.keys()) if dialect_lineage else None}")
+                    if dialect_lineage and 'columns' in dialect_lineage:
+                        logger.info(f"Found {len(dialect_lineage['columns'])} columns in dialect_lineage")
+                    else:
+                        logger.info("No 'columns' key found in dialect_lineage")
+                    
                     # If we get a valid target table from dialect extraction
                     if dialect_lineage and dialect_lineage.get("target_table"):
                         target_table = dialect_lineage["target_table"]
@@ -392,13 +400,14 @@ async def process_repository_for_lineage(connector_id: str, repo_url: str, tech_
                                 source_table_id=source_id,
                                 target_table_id=table_id,
                                 relationship_type="depends_on",
-                                github_path=relative_path
+                                github_path=relative_path,
+                                sql_snippet=sql_code[:100] if sql_code else None  # Add sql_snippet parameter
                             )
                             logger.info(f"Added relationship: {source_table} -> {target_table}")
                         except Exception as rel_e:
                             logger.warning(f"Failed to add relationship: {str(rel_e)}")
                     
-                    # Process column lineage
+                    # Process column lineage from SQL files
                     if column_lineage and "target_columns" in column_lineage:
                         for column_info in column_lineage.get("target_columns", []):
                             column_name = column_info.get("name")
@@ -410,9 +419,39 @@ async def process_repository_for_lineage(connector_id: str, repo_url: str, tech_
                                 column_id = lineage_db.add_column(
                                     table_id=table_id,
                                     column_name=column_name,
-                                    data_type=column_info.get("data_type")
+                                    data_type=column_info.get("data_type"),
+                                    business_description=column_info.get("description"),
+                                    is_primary_key=column_info.get("is_primary_key", False),
+                                    is_foreign_key=column_info.get("is_foreign_key", False)
                                 )
-                                logger.info(f"Added column {column_name} to table {target_table}")
+                                logger.info(f"Added column {column_name} to table {target_table} from SQL extraction")
+                            except Exception as col_e:
+                                logger.warning(f"Failed to add column {column_name}: {str(col_e)}")
+                    
+                    # Process column information from YAML files in dialect_lineage
+                    if dialect_lineage and "columns" in dialect_lineage:
+                        for column_info in dialect_lineage.get("columns", []):
+                            column_name = column_info.get("column_name")
+                            table_name = column_info.get("table_name")
+                            
+                            if not column_name:
+                                continue
+                                
+                            # Important: Map columns to the current target table regardless of their extracted table_name
+                            # This ensures columns are properly associated with their tables in the database
+                            logger.info(f"Processing column {column_name} for table {target_table}")
+                                
+                            # Add the column to the table
+                            try:
+                                column_id = lineage_db.add_column(
+                                    table_id=table_id,
+                                    column_name=column_name,
+                                    data_type=column_info.get("data_type"),
+                                    business_description=column_info.get("description"),
+                                    is_primary_key=column_info.get("is_primary_key", False),
+                                    is_foreign_key=column_info.get("is_foreign_key", False)
+                                )
+                                logger.info(f"Added column {column_name} to table {target_table} from YAML extraction")
                             except Exception as col_e:
                                 logger.warning(f"Failed to add column {column_name}: {str(col_e)}")
                     
@@ -457,7 +496,24 @@ async def process_repository_for_lineage(connector_id: str, repo_url: str, tech_
     finally:
         # Clean up temporary directory
         if temp_dir and os.path.exists(temp_dir):
+            # Process all DBT files to ensure columns are properly extracted
+            if tech_stack.lower() == 'dbt':
+                try:
+                    logger.info(f"Running enhanced DBT column extraction on {temp_dir}")
+                    # Get absolute path to database file
+                    db_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'database/lineage.db')
+                    if not os.path.exists(db_path):
+                        logger.error(f"Database file not found at {db_path}")
+                    else:
+                        logger.info(f"Using database at {db_path}")
+                        column_extractor = DBTColumnExtractor(db_path=db_path)
+                        column_extractor.process_all_dbt_files(temp_dir, force_refresh=True)
+                        logger.info(f"Enhanced DBT column extraction completed successfully")
+                except Exception as ext_err:
+                    logger.error(f"Error during enhanced column extraction: {str(ext_err)}")
+            
             try:
+                # Clean up temporary directory
                 shutil.rmtree(temp_dir)
                 logger.info(f"Cleaned up temporary directory: {temp_dir}")
             except Exception as e:
