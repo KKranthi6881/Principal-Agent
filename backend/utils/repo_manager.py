@@ -77,7 +77,7 @@ def has_local_repo(repo_url: str, branch: str = 'main') -> bool:
     
     return False
 
-def clone_repository(repo_url: str, branch: str = 'main') -> Tuple[bool, str, Optional[str]]:
+def clone_repository(repo_url: str, branch: str = 'main') -> Optional[str]:
     """
     Clone a repository to the persistent storage
     
@@ -86,14 +86,25 @@ def clone_repository(repo_url: str, branch: str = 'main') -> Tuple[bool, str, Op
         branch: The branch name
         
     Returns:
-        Tuple of (success, repo_path, error_message)
+        Path to the cloned repository if successful, None otherwise
     """
+    # Fix for URL duplication issue - check if URL starts with https://github.com/https://github.com
+    if repo_url.startswith('https://github.com/https://github.com'):
+        repo_url = repo_url.replace('https://github.com/https://github.com', 'https://github.com')
+    # Fix for URLs that might have https://github.com/ and then owner/repo
+    elif repo_url.startswith('https://github.com/') and '/github.com/' in repo_url:
+        # Extract just the owner/repo part
+        parts = repo_url.split('/github.com/')
+        if len(parts) > 1:
+            repo_url = 'https://github.com/' + parts[1]
+    
+    logger.info(f"Using repository URL: {repo_url}")
     repo_path = get_repo_storage_path(repo_url, branch)
     
     # If the repository already exists, just return the path
     if has_local_repo(repo_url, branch):
         logger.info(f"Repository {repo_url} already exists at {repo_path}")
-        return True, repo_path, None
+        return repo_path
     
     # Create parent directory if it doesn't exist
     os.makedirs(REPO_STORAGE_BASE, exist_ok=True)
@@ -123,21 +134,22 @@ def clone_repository(repo_url: str, branch: str = 'main') -> Tuple[bool, str, Op
                 result = subprocess.run(cmd, capture_output=True, text=True)
                 
                 if result.returncode != 0:
-                    error_msg = f"Failed to clone repository: {result.stderr}"
-                    logger.error(error_msg)
-                    return False, repo_path, error_msg
+                    logger.info(f"Failed to checkout branch {branch}, will use default branch")
+                    return repo_path
+                else:
+                    logger.error(f"Failed to clone repository: {result.stderr}")
+                    return None
             else:
-                error_msg = f"Failed to clone repository: {result.stderr}"
-                logger.error(error_msg)
-                return False, repo_path, error_msg
+                logger.error(f"Failed to clone repository: {result.stderr}")
+                return None
         
         logger.info(f"Successfully cloned {repo_url} to {repo_path}")
-        return True, repo_path, None
+        return repo_path
         
     except Exception as e:
         error_msg = f"Error cloning repository: {str(e)}"
         logger.error(error_msg)
-        return False, repo_path, error_msg
+        return None
 
 def update_repository(repo_path: str, branch: str = 'main') -> Tuple[bool, Optional[str]]:
     """
@@ -298,6 +310,85 @@ def get_repository_size(repo_path: str) -> int:
             total_size += os.path.getsize(file_path)
     
     return total_size
+
+def check_repo_path(repo_path: str) -> bool:
+    """
+    Check if a path is a valid git repository
+    
+    Args:
+        repo_path: The repository path to check
+        
+    Returns:
+        True if the path is a valid git repository, False otherwise
+    """
+    if not os.path.exists(repo_path):
+        return False
+        
+    if not os.path.exists(os.path.join(repo_path, '.git')):
+        return False
+        
+    return True
+
+def get_repository_files(repo_path: str, path: str = "") -> List[Dict[str, Any]]:
+    """
+    Get a list of files in a repository path
+    
+    Args:
+        repo_path: The repository path
+        path: The path within the repository to list files from
+        
+    Returns:
+        List of file information dictionaries with keys:
+        - path: The relative path to the file or directory
+        - is_dir: Whether the path is a directory
+        - size: Size of the file in bytes (if it's a file)
+    """
+    if not check_repo_path(repo_path):
+        logger.error(f"Invalid repository path: {repo_path}")
+        return []
+    
+    # Get the full path to list
+    full_path = os.path.join(repo_path, path.lstrip('/')) if path else repo_path
+    
+    if not os.path.exists(full_path):
+        logger.error(f"Path does not exist: {full_path}")
+        return []
+    
+    # List files in the directory
+    files = []
+    
+    try:
+        for item in os.listdir(full_path):
+            # Skip .git and hidden files by default
+            if item.startswith('.git'):
+                continue
+                
+            item_path = os.path.join(full_path, item)
+            relative_path = os.path.join(path, item) if path else item
+            
+            # Make sure paths use forward slashes for consistency
+            relative_path = relative_path.replace('\\', '/')
+            
+            is_dir = os.path.isdir(item_path)
+            
+            file_info = {
+                "path": relative_path + ('/' if is_dir else ''),
+                "is_dir": is_dir,
+            }
+            
+            # Add size for files
+            if not is_dir:
+                file_info["size"] = os.path.getsize(item_path)
+                
+            files.append(file_info)
+        
+        # Sort: directories first, then alphabetically
+        files.sort(key=lambda f: (not f["is_dir"], f["path"].lower()))
+        
+        return files
+    except Exception as e:
+        logger.error(f"Error listing repository files: {str(e)}")
+        return []
 
 def clean_old_repositories(max_age_days: int = 30, max_total_size_gb: float = 10):
     """

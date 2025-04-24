@@ -11,6 +11,7 @@ import ConnectorsPage from './pages/ConnectorsPage'
 import LLMProviderConnectorPage from './pages/connectors/LLMProviderConnectorPage'
 import ChatInterface from './components/ChatInterface'
 import GitHubConnectors from './pages/GitHubConnectors'
+import RepositoryPage from './pages/RepositoryPage'
 import TestPage from './pages/TestPage'
 import ErrorBoundary from './components/ErrorBoundary'
 
@@ -74,6 +75,11 @@ function App() {
               <Route path="/connectors/github" element={
                 <MainLayout>
                   <GitHubConnectors />
+                </MainLayout>
+              } />
+              <Route path="/repository" element={
+                <MainLayout>
+                  <RepositoryPage />
                 </MainLayout>
               } />
               <Route path="*" element={<Navigate to="/" />} />

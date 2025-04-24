@@ -15,7 +15,8 @@ import {
   IoChatbubbles, 
   IoCloudUpload, 
   IoTime,
-  IoServer
+  IoServer,
+  IoGitBranch
 } from 'react-icons/io5';
 
 const AppHeader = () => {
@@ -70,6 +71,15 @@ const AppHeader = () => {
               colorScheme="orange"
             >
               Connectors
+            </Button>
+            <Button
+              as={Link}
+              to="/repository"
+              leftIcon={<IoGitBranch />}
+              variant={isActive('/repository') ? 'solid' : 'ghost'}
+              colorScheme="orange"
+            >
+              Repository
             </Button>
             <Button
               as={Link}

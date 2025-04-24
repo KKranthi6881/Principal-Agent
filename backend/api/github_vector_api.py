@@ -106,6 +106,9 @@ router = APIRouter(prefix="/api/github", tags=["github"])
 # Create GitHub sync table
 github_utils.create_github_sync_table()
 
+# GitHub repository file operations
+from utils.repo_manager import clone_repository, get_repository_files, check_repo_path
+
 # Pydantic models
 class SyncRequest(BaseModel):
     """GitHub repository sync request"""
@@ -858,6 +861,211 @@ async def get_embedding_providers():
             }
         ]
     }
+
+@router.get("/files_by_url", response_model=List[dict])
+async def get_repository_files_by_url_api(
+    repo: str,
+    branch: Optional[str] = "main",
+    path: Optional[str] = ""
+):
+    """
+    Get files from a GitHub repository using the full repository URL
+    
+    This endpoint returns a list of files in the specified repository path.
+    Used by the Repository Browser in the frontend.
+    """
+    try:
+        # Normalize the repository URL
+        repo_url = repo
+        if not repo_url.endswith(".git"):
+            repo_url = f"{repo_url}.git"
+        
+        # Log the repository URL
+        logger.info(f"Fetching files from repository: {repo_url}")
+        
+        # Clone/update the repository
+        repo_path = clone_repository(repo_url, branch)
+        if not repo_path:
+            raise HTTPException(status_code=500, detail=f"Failed to clone repository {repo_url}")
+        
+        # Get the files at the specified path
+        files = get_repository_files(repo_path, path)
+        
+        # Return the files as a list of dictionaries
+        return files
+    except HTTPException:
+        # Re-raise HTTP exceptions as-is
+        raise
+    except Exception as e:
+        logger.error(f"Error getting repository files: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to get repository files: {str(e)}")
+
+@router.get("/files", response_model=List[dict])
+async def get_repository_files_api(
+    owner: str = None, 
+    repo: str = None,
+    repo_url: Optional[str] = None,
+    branch: Optional[str] = "main",
+    path: Optional[str] = ""
+):
+    """
+    Get files from a GitHub repository
+    
+    This endpoint returns a list of files in the specified repository path.
+    Used by the Repository Browser in the frontend.
+    """
+    try:
+        # Determine how to get the repository URL
+        if repo_url:
+            # Use the provided repo_url directly
+            pass
+        elif owner and repo:
+            # Construct the URL from owner and repo
+            repo_name = f"{owner}/{repo}"
+            repo_url = f"https://github.com/{repo_name}.git"
+        else:
+            # Missing required parameters
+            raise HTTPException(
+                status_code=422, 
+                detail="Either 'repo_url' or both 'owner' and 'repo' must be provided"
+            )
+        
+        # Normalize the repository URL
+        if not repo_url.endswith(".git"):
+            repo_url = f"{repo_url}.git"
+        
+        logger.info(f"Fetching files from repository: {repo_url}")
+            
+        # Clone/update the repository
+        repo_path = clone_repository(repo_url, branch)
+        if not repo_path:
+            raise HTTPException(status_code=500, detail=f"Failed to clone repository {repo_url}")
+        
+        # Get the files at the specified path
+        files = get_repository_files(repo_path, path)
+        
+        # Return the files as a list of dictionaries
+        return [{
+            "path": file["path"],
+            "type": "dir" if file["is_dir"] else "file",
+            "size": file.get("size", 0)
+        } for file in files]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error getting repository files: {str(e)}")
+
+@router.get("/content")
+async def get_github_content(
+    repo: Optional[str] = None,
+    path: Optional[str] = None,
+    sync_id: Optional[str] = None,
+    owner: Optional[str] = None,
+    repo_name: Optional[str] = None,
+    repo_url: Optional[str] = None,
+    branch: Optional[str] = "main"
+):
+    """
+    Get content of a file from a GitHub repository
+    
+    This endpoint returns the content of a file in the specified repository.
+    Used by the Repository Browser in the frontend.
+    """
+    try:
+        # Check which parameters were provided and determine how to proceed
+        if sync_id:
+            # Fetch content for a sync
+            sync = db.get_sync_by_id(sync_id)
+            if not sync:
+                raise HTTPException(status_code=404, detail=f"Sync with ID {sync_id} not found")
+            
+            # Get the content from the vector store
+            embedding_records = vector_store.lookup_by_metadata({"sync_id": sync_id})
+            
+            # Convert to a dict of path -> content
+            content_dict = {}
+            for record in embedding_records:
+                file_path = record.metadata.get("path", "")
+                if file_path:
+                    content_dict[file_path] = record.text
+            
+            return {"content_map": content_dict}
+        elif owner and repo_name and path:
+            # Fetch using owner/repo_name format
+            logger.info(f"Fetching content using owner/repo: {owner}/{repo_name}, path: {path}")
+            repo_url = f"https://github.com/{owner}/{repo_name}.git"
+            return await fetch_repo_content(repo_url, path)
+        elif repo and path:
+            # Normalize repository URL
+            normalized_repo = repo
+            
+            # Fix double .git extension
+            if normalized_repo.endswith(".git.git"):
+                normalized_repo = normalized_repo[:-4]  # Remove last .git
+            elif not normalized_repo.endswith(".git"):
+                normalized_repo = f"{normalized_repo}.git"
+            
+            # Fix duplicate github.com
+            if "github.com/github.com" in normalized_repo:
+                normalized_repo = normalized_repo.replace("github.com/github.com", "github.com")
+            
+            logger.info(f"Fetching content using normalized URL: {normalized_repo}, path: {path}")
+            return await fetch_repo_content(normalized_repo, path)
+        else:
+            raise HTTPException(status_code=400, detail="Either (repo and path), (owner, repo_name and path), or sync_id must be provided")
+    except HTTPException as e:
+        # Re-raise HTTP exceptions
+        raise e
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error getting file content: {str(e)}")
+
+async def fetch_repo_content(repo_url: str, path: str):
+    """Helper function to fetch content from a repository."""
+    try:
+        # Normalize repository URL
+        if repo_url.endswith(".git.git"):
+            repo_url = repo_url[:-4]  # Remove duplicate .git
+            logger.info(f"Fixed duplicate .git extension: {repo_url}")
+        
+        # Clone the repository
+        repo_path = clone_repository(repo_url)
+        if not repo_path:
+            raise HTTPException(status_code=500, detail=f"Failed to clone repository {repo_url}")
+        
+        # Determine the full path to the file in the repository
+        full_path = os.path.join(repo_path, path.lstrip('/'))
+        logger.info(f"Attempting to read file at: {full_path}")
+        
+        # Check if file exists
+        if not os.path.exists(full_path):
+            raise HTTPException(status_code=404, detail=f"File not found: {path}")
+        
+        # Check if it's a file (not a directory)
+        if os.path.isdir(full_path):
+            logger.info(f"Path is a directory: {full_path}")
+            # Return an empty content for directories
+            return {"content": "", "is_dir": True}
+        
+        # Read the file content
+        try:
+            with open(full_path, 'r', encoding='utf-8', errors='replace') as file:
+                content = file.read()
+            logger.info(f"Successfully read file: {path} ({len(content)} bytes)")
+            
+            # Return the content in the expected format
+            return {"content": content, "is_dir": False}
+            
+        except UnicodeDecodeError:
+            # If the file is binary, return an appropriate message
+            logger.warn(f"Binary file detected: {full_path}")
+            return {"content": "Binary file cannot be displayed", "is_binary": True}
+            
+        except Exception as e:
+            logger.error(f"Error reading file {full_path}: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Failed to read file: {str(e)}")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting file content: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error getting file content: {str(e)}")
 
 @router.get("/repo_storage", response_model=dict)
 async def get_repo_storage_status():

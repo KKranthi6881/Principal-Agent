@@ -697,6 +697,44 @@ async def export_column_lineage_json(
             detail=f"Error exporting column lineage JSON: {str(e)}"
         )
 
+@router.get("/by-path", response_model=Dict[str, Any])
+async def get_lineage_by_github_path(
+    github_path: str = Query(..., description="GitHub path to get lineage for")
+):
+    """
+    Get lineage definition by GitHub path
+    
+    This endpoint retrieves lineage information for a file based on its GitHub path.
+    It's useful for the repository browser to display lineage visualization for SQL files.
+    """
+    try:
+        # Use the LineageDB method to get lineage by GitHub path
+        lineage_def = lineage_db.get_lineage_by_github_path(github_path)
+        
+        if not lineage_def:
+            # Not raising an exception as not all files have lineage
+            return {
+                "success": False,
+                "message": f"No lineage data found for GitHub path: {github_path}"
+            }
+        
+        return {
+            "success": True,
+            "lineage_id": lineage_def["lineage_id"],
+            "table_name": lineage_def["table_name"],
+            "tech_stack": lineage_def["tech_stack"],
+            "lineage_json": lineage_def["lineage_json"],
+            "github_path": github_path,
+            "created_at": lineage_def["created_at"]
+        }
+    
+    except Exception as e:
+        logger.error(f"Error retrieving lineage by GitHub path: {str(e)}")
+        return {
+            "success": False,
+            "message": f"Error retrieving lineage data: {str(e)}"
+        }
+
 @router.get("/export-file/{tech_stack}", response_model=Dict[str, Any])
 async def export_lineage_to_file(
     tech_stack: str = Path(..., description="Tech stack to export (tsql, dbt, mysql, postgresql, snowflake)"),
