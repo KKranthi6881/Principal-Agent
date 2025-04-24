@@ -894,3 +894,256 @@ class LineageDB:
             raise
         finally:
             conn.close()
+            
+    def generate_comprehensive_lineage(self, root_table_id: str, github_path: str = None) -> str:
+        """
+        Generate a comprehensive lineage JSON that includes tables, columns and relationships
+        
+        This creates a complete visualization-ready data structure including:
+        - All related tables (upstream and downstream)
+        - All columns for each table
+        - All relationships between tables with relationship types
+        - GitHub paths and other metadata for UI visualization
+        
+        Args:
+            root_table_id: ID of the table to generate lineage for
+            github_path: GitHub path of the file
+            
+        Returns:
+            ID of the stored lineage definition
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            # Get the root table details
+            root_table = self.get_table_by_id(root_table_id)
+            if not root_table:
+                raise ValueError(f"Table with ID {root_table_id} not found")
+            
+            # Get tech stack from root table
+            tech_stack = root_table.get("tech_stack")
+            if not tech_stack:
+                tech_stack = "unknown"
+                
+            # Initialize the lineage structure
+            lineage = {
+                "root_table": {
+                    "id": root_table["table_id"],
+                    "name": root_table["table_name"],
+                    "schema": root_table["schema_name"],
+                    "database": root_table["database_name"],
+                    "github_path": github_path or root_table["github_path"],
+                },
+                "tables": [],  # Will hold all related tables
+                "columns": [],  # Will hold all columns
+                "relationships": [],  # Will hold all relationships
+                "metadata": {
+                    "tech_stack": tech_stack,
+                    "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "source_github_path": github_path or root_table["github_path"]
+                }
+            }
+            
+            # Get all related tables (both upstream and downstream)
+            cursor.execute(
+                """WITH RECURSIVE related_tables AS (
+                    -- Start with the root table
+                    SELECT table_id FROM tables WHERE table_id = ?
+                    UNION
+                    -- Get upstream tables (sources)
+                    SELECT r.source_table_id 
+                    FROM relationships r
+                    JOIN related_tables rt ON r.target_table_id = rt.table_id
+                    UNION
+                    -- Get downstream tables (targets)
+                    SELECT r.target_table_id
+                    FROM relationships r
+                    JOIN related_tables rt ON r.source_table_id = rt.table_id
+                )
+                SELECT t.* FROM tables t JOIN related_tables rt ON t.table_id = rt.table_id
+                """,
+                (root_table_id,)
+            )
+            tables = [dict(row) for row in cursor.fetchall()]
+            
+            # Get all columns for these tables
+            table_ids = [t["table_id"] for t in tables]
+            placeholders = ",".join(["?"] * len(table_ids))
+            
+            cursor.execute(
+                f"SELECT * FROM columns WHERE table_id IN ({placeholders})",
+                table_ids
+            )
+            all_columns = [dict(row) for row in cursor.fetchall()]
+            
+            # Group columns by table_id
+            columns_by_table = {}
+            for column in all_columns:
+                table_id = column["table_id"]
+                if table_id not in columns_by_table:
+                    columns_by_table[table_id] = []
+                columns_by_table[table_id].append(column)
+            
+            # Get all relationships between these tables
+            cursor.execute(
+                f"""SELECT r.*, 
+                      st.table_name as source_table_name, 
+                      tt.table_name as target_table_name,
+                      sc.column_name as source_column_name,
+                      tc.column_name as target_column_name
+                   FROM relationships r
+                   JOIN tables st ON r.source_table_id = st.table_id
+                   JOIN tables tt ON r.target_table_id = tt.table_id
+                   LEFT JOIN columns sc ON r.source_column_id = sc.column_id
+                   LEFT JOIN columns tc ON r.target_column_id = tc.column_id
+                   WHERE r.source_table_id IN ({placeholders})
+                   AND r.target_table_id IN ({placeholders})""",
+                table_ids + table_ids
+            )
+            relationships = [dict(row) for row in cursor.fetchall()]
+            
+            # Build the full lineage structure
+            for table in tables:
+                table_id = table["table_id"]
+                table_columns = columns_by_table.get(table_id, [])
+                
+                # Format table with its columns
+                formatted_table = {
+                    "id": table["table_id"],
+                    "name": table["table_name"],
+                    "schema": table["schema_name"],
+                    "database": table["database_name"],
+                    "tech_stack": table["tech_stack"],
+                    "github_path": table["github_path"],
+                    "column_count": len(table_columns)
+                }
+                
+                lineage["tables"].append(formatted_table)
+                
+                # Add columns to the columns array
+                for col in table_columns:
+                    formatted_column = {
+                        "id": col["column_id"],
+                        "table_id": table_id,
+                        "table_name": table["table_name"],
+                        "name": col["column_name"],
+                        "data_type": col["data_type"],
+                        "description": col["business_description"],
+                        "is_primary_key": bool(col["is_primary_key"]),
+                        "is_foreign_key": bool(col["is_foreign_key"])
+                    }
+                    
+                    lineage["columns"].append(formatted_column)
+            
+            # Format relationships
+            for rel in relationships:
+                formatted_rel = {
+                    "id": rel["relationship_id"],
+                    "type": rel["relationship_type"],
+                    "source": {
+                        "table_id": rel["source_table_id"],
+                        "table_name": rel["source_table_name"],
+                        "column_id": rel["source_column_id"],
+                        "column_name": rel["source_column_name"]
+                    },
+                    "target": {
+                        "table_id": rel["target_table_id"],
+                        "table_name": rel["target_table_name"],
+                        "column_id": rel["target_column_id"],
+                        "column_name": rel["target_column_name"]
+                    },
+                    "github_path": rel["github_path"]
+                }
+                
+                lineage["relationships"].append(formatted_rel)
+            
+            # Store this comprehensive lineage in the database
+            lineage_id = self.add_lineage_definition(root_table_id, lineage, tech_stack)
+            
+            # Update the lineage definition with the github_path
+            # Use try/except to handle cases where the github_path column might not exist yet
+            if github_path:
+                try:
+                    cursor.execute(
+                        "UPDATE lineage_definitions SET github_path = ? WHERE lineage_id = ?",
+                        (github_path, lineage_id)
+                    )
+                    conn.commit()
+                except sqlite3.OperationalError as e:
+                    if 'no such column: github_path' in str(e):
+                        logger.warning("github_path column does not exist in lineage_definitions table. "
+                                      "Run 'ALTER TABLE lineage_definitions ADD COLUMN github_path TEXT;' "
+                                      "to add this column.")
+                    else:
+                        raise
+            
+            return lineage_id
+            
+        except Exception as e:
+            logger.error(f"Error generating comprehensive lineage: {str(e)}")
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+            
+    def get_lineage_by_github_path(self, github_path: str) -> Dict:
+        """
+        Get lineage definitions by GitHub path
+        
+        This is useful for finding all lineage definitions related to a specific file
+        in the GitHub repository.
+        
+        Args:
+            github_path: Path to the file in GitHub
+            
+        Returns:
+            Dictionary with lineage information or None if not found
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            # First try to find by exact github_path
+            cursor.execute(
+                """SELECT ld.*, t.table_name, t.tech_stack 
+                   FROM lineage_definitions ld
+                   JOIN tables t ON ld.root_table_id = t.table_id
+                   WHERE ld.github_path = ?
+                   ORDER BY ld.updated_at DESC
+                   LIMIT 1""",
+                (github_path,)
+            )
+            result = cursor.fetchone()
+            
+            # If not found, try to find by partial match (filename in path)
+            if not result:
+                # Extract the filename from the path
+                import os
+                filename = os.path.basename(github_path)
+                
+                cursor.execute(
+                    """SELECT ld.*, t.table_name, t.tech_stack 
+                       FROM lineage_definitions ld
+                       JOIN tables t ON ld.root_table_id = t.table_id
+                       WHERE ld.github_path LIKE ? OR t.github_path LIKE ?
+                       ORDER BY ld.updated_at DESC
+                       LIMIT 1""",
+                    (f'%{filename}%', f'%{filename}%')
+                )
+                result = cursor.fetchone()
+            
+            if result:
+                lineage_def = dict(result)
+                
+                # Parse the JSON
+                lineage_def["lineage_json"] = json.loads(lineage_def["lineage_json"])
+                
+                return lineage_def
+            
+            return None
+        except Exception as e:
+            logger.error(f"Error getting lineage by GitHub path: {str(e)}")
+            raise
+        finally:
+            conn.close()

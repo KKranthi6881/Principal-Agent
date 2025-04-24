@@ -14,11 +14,11 @@ import sqlite3
 import requests
 from urllib.parse import urlparse
 import subprocess
-from tools.sql_tools.dbt_column_extractor import DBTColumnExtractor
 
 # Import local modules
 from tools.sql_tools.dialects import get_dialect_parser
 from tools.sql_tools.lineage.sqlglot_lineage import SQLGlotLineageExtractor
+from tools.sql_tools.dbt_column_extractor import DBTColumnExtractor
 from database.lineage_db import LineageDB
 
 # Configure logging
@@ -509,6 +509,50 @@ async def process_repository_for_lineage(connector_id: str, repo_url: str, tech_
                         column_extractor = DBTColumnExtractor(db_path=db_path)
                         column_extractor.process_all_dbt_files(temp_dir, force_refresh=True)
                         logger.info(f"Enhanced DBT column extraction completed successfully")
+                        
+                        # Generate comprehensive lineage definitions for visualization
+                        try:
+                            # Create LineageDB with the same db_path
+                            lineage_db = LineageDB(db_path=db_path)
+                            
+                            # Get all tables for this repository
+                            conn = lineage_db._get_connection()
+                            cursor = conn.cursor()
+                            
+                            # Make sure repo_url is not None to avoid SQL issues
+                            if repo_url is None:
+                                repo_url = ''
+                                logger.warning("Repository URL is None, using empty string for query")
+                                
+                            cursor.execute(
+                                """SELECT * FROM tables 
+                                   WHERE tech_stack = ? AND (github_repo = ? OR github_repo IS NULL)""",
+                                (tech_stack, repo_url)
+                            )
+                            repo_tables = cursor.fetchall()
+                            conn.close()
+                            
+                            logger.info(f"Generating comprehensive lineage for {len(repo_tables)} tables")
+                            
+                            # Generate lineage for each table
+                            for table in repo_tables:
+                                table_dict = dict(table)
+                                table_id = table_dict['table_id']
+                                github_path = table_dict['github_path']
+                                
+                                try:
+                                    # Generate and store comprehensive lineage
+                                    lineage_id = lineage_db.generate_comprehensive_lineage(
+                                        root_table_id=table_id,
+                                        github_path=github_path
+                                    )
+                                    logger.info(f"Generated comprehensive lineage for {table_dict['table_name']} with ID {lineage_id}")
+                                except Exception as lin_err:
+                                    logger.warning(f"Error generating lineage for table {table_dict['table_name']}: {str(lin_err)}")
+                            
+                            logger.info("Comprehensive lineage generation completed successfully")
+                        except Exception as lin_err:
+                            logger.error(f"Error during comprehensive lineage generation: {str(lin_err)}")
                 except Exception as ext_err:
                     logger.error(f"Error during enhanced column extraction: {str(ext_err)}")
             
