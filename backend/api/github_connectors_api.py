@@ -5,7 +5,7 @@ import os
 import uuid
 import json
 from typing import Dict, List, Optional, Any
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, BackgroundTasks
 from pydantic import BaseModel, Field
 import sqlite3
 import requests
@@ -119,6 +119,40 @@ class TestConnectionResponse(BaseModel):
     message: str
     details: Optional[Dict[str, Any]] = None
 
+# Function to trigger lineage extraction
+def trigger_lineage_extraction(connector_id: str, connector: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Helper function to trigger lineage extraction in the background
+    """
+    try:
+        # Construct URL for the lineage extraction endpoint
+        base_url = "http://localhost:8000"  # Adjust as needed for production
+        url = f"{base_url}/api/lineage/github-connector/{connector_id}/extract-lineage"
+        
+        # Use tech_stack from connector
+        tech_stack = connector.get("tech_stack", "postgresql")
+        
+        # Make a request to trigger lineage extraction
+        params = {"tech_stack": tech_stack}
+        response = requests.post(url, params=params)
+        
+        # Parse response
+        if response.status_code == 200:
+            print(f"Lineage extraction started for connector {connector_id}")
+            return response.json()
+        else:
+            print(f"Error triggering lineage extraction: {response.status_code} - {response.text}")
+            return {
+                "status": "error",
+                "message": f"Failed to start lineage extraction: {response.text}"
+            }
+    except Exception as e:
+        print(f"Error triggering lineage extraction: {str(e)}")
+        return {
+            "status": "error",
+            "message": f"Error triggering lineage extraction: {str(e)}"
+        }
+
 # API endpoints
 @router.get("/github_connectors", response_model=GitHubConnectorList)
 async def get_github_connectors():
@@ -158,7 +192,7 @@ async def get_github_connectors():
         raise HTTPException(status_code=500, detail=f"Error getting GitHub connectors: {str(e)}")
 
 @router.post("/github_connectors", response_model=GitHubConnectorResponse)
-async def create_github_connector(connector: GitHubConnectorCreate):
+async def create_github_connector(connector: GitHubConnectorCreate, background_tasks: BackgroundTasks):
     """
     Create a new GitHub connector
     """
@@ -215,10 +249,18 @@ async def create_github_connector(connector: GitHubConnectorCreate):
             except:
                 created_connector['repositories'] = []
         
-        return {
+        # Prepare connector data
+        connector_data = {
             **created_connector,
             'has_token': has_token
         }
+        
+        # Only trigger lineage extraction if connector is active
+        if connector.active:
+            # Trigger lineage extraction directly and ignore response
+            background_tasks.add_task(trigger_lineage_extraction, connector_id, connector_data)
+        
+        return connector_data
     except HTTPException:
         raise
     except Exception as e:
@@ -264,7 +306,7 @@ async def get_github_connector(connector_id: str):
         raise HTTPException(status_code=500, detail=f"Error getting GitHub connector: {str(e)}")
 
 @router.put("/github_connectors/{connector_id}", response_model=GitHubConnectorResponse)
-async def update_github_connector(connector_id: str, connector: GitHubConnectorUpdate):
+async def update_github_connector(connector_id: str, connector: GitHubConnectorUpdate, background_tasks: BackgroundTasks):
     """
     Update a GitHub connector
     """
@@ -405,10 +447,19 @@ async def update_github_connector(connector_id: str, connector: GitHubConnectorU
             except:
                 updated_connector['repositories'] = []
         
-        return {
+        # Prepare response
+        connector_data = {
             **updated_connector,
             'has_token': has_token
         }
+        
+        # Only trigger lineage extraction if connector is active and 
+        # either active status was explicitly set to true or tech_stack was updated
+        if connector_data.get('active', False) and (connector.active is True or connector.tech_stack is not None):
+            # Trigger lineage extraction directly and ignore response
+            background_tasks.add_task(trigger_lineage_extraction, connector_id, connector_data)
+        
+        return connector_data
     except HTTPException:
         raise
     except Exception as e:

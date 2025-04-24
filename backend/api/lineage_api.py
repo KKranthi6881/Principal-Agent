@@ -2,18 +2,22 @@
 API for SQL lineage extraction and storage
 """
 
-from fastapi import APIRouter, HTTPException, Body, Query, File, UploadFile, Path, Depends
+from fastapi import APIRouter, HTTPException, Body, Query, File, UploadFile, Path, Depends, BackgroundTasks
 from pydantic import BaseModel, Field
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Union
 import json
 import os
 import uuid
 import logging
+import asyncio
+import time
+import sqlite3
 
 # Import local modules
 from tools.sql_tools.dialects import get_dialect_parser
 from tools.sql_tools.lineage.sqlglot_lineage import SQLGlotLineageExtractor
 from database.lineage_db import LineageDB
+from api.lineage_tasks import process_repository_for_lineage, get_lineage_task, get_all_lineage_tasks
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -47,6 +51,24 @@ class LineageResponse(BaseModel):
     tech_stack: str
     lineage_json: Dict
     created_at: str
+
+class TaskResponse(BaseModel):
+    """Response model for task information"""
+    task_id: str
+    status: str
+    connector_id: str
+    repo_url: str
+    tech_stack: str
+    total_files: int
+    processed_files: int
+    successful_files: int
+    failed_files: int
+    elapsed_seconds: float
+    error: Optional[str] = None
+
+class TaskListResponse(BaseModel):
+    """Response model for list of tasks"""
+    tasks: List[TaskResponse]
 
 # API endpoints
 @router.post("/parse", response_model=Dict[str, Any])
@@ -425,4 +447,314 @@ async def parse_from_github_connector(
         raise HTTPException(
             status_code=500,
             detail=f"Error parsing from GitHub connector: {str(e)}"
+        )
+
+@router.post("/github-connector/{connector_id}/extract-lineage", response_model=Dict[str, Any])
+async def extract_lineage_from_github(
+    background_tasks: BackgroundTasks,
+    connector_id: str = Path(..., description="GitHub connector ID"),
+    tech_stack: Optional[str] = Query(None, description="Override tech stack (optional)"),
+    branch: Optional[str] = Query("main", description="Branch to extract from")
+):
+    """
+    Start a background task to extract lineage from a GitHub repository
+    
+    This will extract lineage from all SQL files in the repository and store it in the
+    lineage database. The process runs in the background and can be monitored with
+    the task status endpoint.
+    """
+    try:
+        # Get connector details from database
+        conn = sqlite3.connect(os.path.join('database', 'metadata.db'))
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT * FROM github_connectors WHERE id = ?", (connector_id,))
+        connector = cursor.fetchone()
+        
+        if not connector:
+            raise HTTPException(
+                status_code=404,
+                detail=f"GitHub connector with ID {connector_id} not found"
+            )
+        
+        connector = dict(connector)
+        conn.close()
+        
+        # Use tech stack from connector if not provided
+        if not tech_stack:
+            tech_stack = connector.get("tech_stack", "postgresql")
+        
+        # Get repository URL
+        repo_url = connector.get("repo_url")
+        if not repo_url:
+            owner = connector.get("owner")
+            if "repositories" in connector and connector["repositories"]:
+                try:
+                    repositories = json.loads(connector["repositories"])
+                    if repositories and len(repositories) > 0:
+                        repo_name = repositories[0]
+                        repo_url = f"https://github.com/{owner}/{repo_name}"
+                except:
+                    pass
+        
+        if not repo_url:
+            raise HTTPException(
+                status_code=400,
+                detail="No repository URL found for connector"
+            )
+        
+        # Generate task ID
+        task_id = f"{connector_id}_{int(time.time())}"
+        
+        # Start background task
+        background_tasks.add_task(
+            process_repository_for_lineage,
+            connector_id=connector_id,
+            repo_url=repo_url,
+            tech_stack=tech_stack,
+            branch=branch
+        )
+        
+        return {
+            "task_id": task_id,
+            "status": "started",
+            "message": f"Started lineage extraction for {repo_url}",
+            "connector_id": connector_id,
+            "tech_stack": tech_stack,
+            "repo_url": repo_url
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error starting lineage extraction: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error starting lineage extraction: {str(e)}"
+        )
+
+@router.get("/tasks/{task_id}", response_model=TaskResponse)
+async def get_task_status(
+    task_id: str = Path(..., description="Task ID")
+):
+    """
+    Get the status of a lineage extraction task
+    """
+    try:
+        task = get_lineage_task(task_id)
+        
+        if not task:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Task {task_id} not found"
+            )
+        
+        return {
+            "task_id": task_id,
+            **task
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting task status: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error getting task status: {str(e)}"
+        )
+
+@router.get("/tasks", response_model=TaskListResponse)
+async def get_all_tasks():
+    """
+    Get all lineage extraction tasks
+    """
+    try:
+        tasks = get_all_lineage_tasks()
+        
+        # Add task IDs
+        tasks_with_ids = []
+        for i, task in enumerate(tasks):
+            task_with_id = {
+                "task_id": f"task_{i}",
+                **task
+            }
+            tasks_with_ids.append(task_with_id)
+        
+        return {
+            "tasks": tasks_with_ids
+        }
+    
+    except Exception as e:
+        logger.error(f"Error getting all tasks: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error getting all tasks: {str(e)}"
+        )
+
+@router.get("/export/{table_name}", response_model=Dict[str, Any])
+async def export_lineage_json(
+    table_name: str = Path(..., description="Table name to export lineage for"),
+    tech_stack: str = Query(..., description="Tech stack (tsql, dbt, mysql, postgresql, snowflake)")
+):
+    """
+    Export complete lineage information as JSON with GitHub file references
+    
+    This endpoint provides a comprehensive lineage graph that includes table metadata,
+    relationships, and GitHub file links for visualization in a UI.
+    """
+    try:
+        # Find the table
+        table = lineage_db.get_table_by_name(table_name, tech_stack)
+        
+        if not table:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Table '{table_name}' not found for tech stack '{tech_stack}'"
+            )
+        
+        # Export the complete lineage
+        lineage_json = lineage_db.export_lineage_to_json(root_table_id=table["table_id"])
+        
+        if not lineage_json:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No lineage information found for table '{table_name}'"
+            )
+        
+        return lineage_json
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error exporting lineage JSON: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error exporting lineage JSON: {str(e)}"
+        )
+
+@router.get("/export-columns/{table_name}", response_model=Dict[str, Any])
+async def export_column_lineage_json(
+    table_name: str = Path(..., description="Table name to export column lineage for"),
+    tech_stack: str = Query(..., description="Tech stack (tsql, dbt, mysql, postgresql, snowflake)")
+):
+    """
+    Export column-level lineage information as JSON with GitHub file references
+    
+    This endpoint provides detailed column-level lineage for visualization in a UI,
+    showing how data flows from source columns to target columns.
+    """
+    try:
+        # Find the table
+        table = lineage_db.get_table_by_name(table_name, tech_stack)
+        
+        if not table:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Table '{table_name}' not found for tech stack '{tech_stack}'"
+            )
+        
+        # Export the complete lineage
+        lineage_json = lineage_db.export_lineage_to_json(root_table_id=table["table_id"])
+        
+        if not lineage_json:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No lineage information found for table '{table_name}'"
+            )
+        
+        # Format the response specifically for column-level visualization
+        result = {
+            "table_id": lineage_json["root_table_id"],
+            "table_name": lineage_json["root_table_name"],
+            "tech_stack": lineage_json["tech_stack"],
+            "tables": lineage_json["tables"],
+            "column_relationships": lineage_json["column_relationships"],
+            "github_links": {}
+        }
+        
+        # Extract GitHub links from tables
+        for table in lineage_json["tables"]:
+            if "github_url" in table and table["github_url"]:
+                result["github_links"][table["table_id"]] = {
+                    "table_name": table["table_name"],
+                    "github_path": table.get("github_path"),
+                    "github_url": table["github_url"]
+                }
+        
+        # Add column metadata if available
+        if "column_metadata" in lineage_json:
+            result["column_metadata"] = lineage_json["column_metadata"]
+        
+        return result
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error exporting column lineage JSON: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error exporting column lineage JSON: {str(e)}"
+        )
+
+@router.get("/export-file/{tech_stack}", response_model=Dict[str, Any])
+async def export_lineage_to_file(
+    tech_stack: str = Path(..., description="Tech stack to export (tsql, dbt, mysql, postgresql, snowflake)"),
+    table_name: str = Query(None, description="Optional table name to filter by"),
+    output_dir: str = Query("exports", description="Directory to save the JSON file to"),
+    filename: str = Query(None, description="Optional filename for the exported JSON")
+):
+    """
+    Export lineage data to a JSON file for external visualization tools
+    
+    This endpoint saves the lineage data to a JSON file that can be used by external
+    visualization tools. The file is saved to the specified directory (default is 'exports').
+    """
+    try:
+        # If table name is provided, get its ID
+        root_table_id = None
+        if table_name:
+            table = lineage_db.get_table_by_name(table_name, tech_stack)
+            if not table:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Table '{table_name}' not found for tech stack '{tech_stack}'"
+                )
+            root_table_id = table["table_id"]
+        
+        # Export lineage data to file
+        file_path = lineage_db.save_lineage_to_json_file(
+            root_table_id=root_table_id,
+            tech_stack=tech_stack if not root_table_id else None,
+            output_dir=output_dir,
+            filename=filename
+        )
+        
+        if not file_path:
+            if root_table_id:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"No lineage data found for table ID {root_table_id}"
+                )
+            else:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"No lineage data found for tech stack {tech_stack}"
+                )
+        
+        return {
+            "success": True,
+            "tech_stack": tech_stack,
+            "table_name": table_name,
+            "file_path": file_path,
+            "message": f"Lineage data exported successfully to {file_path}"
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error exporting lineage data to file: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error exporting lineage data to file: {str(e)}"
         )

@@ -95,6 +95,8 @@ import {
   IoClose
 } from 'react-icons/io5';
 import { FaDatabase } from 'react-icons/fa';
+import LineageTaskMonitor from '../components/LineageTaskMonitor.jsx';
+import useLineageMonitoring from '../hooks/useLineageMonitoring.jsx';
 
 const GitHubConnectors = () => {
   const [connectors, setConnectors] = useState([]);
@@ -135,11 +137,15 @@ const GitHubConnectors = () => {
   const [isSyncing, setIsSyncing] = useState(false);
   const [syncResult, setSyncResult] = useState(null);
   const [forceFullSync, setForceFullSync] = useState(false);
+  const [syncModalTab, setSyncModalTab] = useState(0);
   
   // Sync status tracking
   const [syncStatuses, setSyncStatuses] = useState({});
   const [pollingActive, setPollingActive] = useState(false);
   const pollingRef = useRef(null);
+  
+  // Initialize lineage monitoring hook
+  const lineageMonitoring = useLineageMonitoring(setSyncModalTab);
   
   // Fetch connectors on component mount
   useEffect(() => {
@@ -148,6 +154,9 @@ const GitHubConnectors = () => {
     
     // Start polling for sync statuses
     setPollingActive(true);
+    
+    // Start monitoring lineage tasks
+    lineageMonitoring.startMonitoring();
     
     return () => {
       // Clean up polling interval on component unmount
@@ -215,7 +224,7 @@ const GitHubConnectors = () => {
   };
   
   // Get sync status for a specific connector and provider
-  const getSyncStatus = (connector, embeddingProvider) => {
+  const getSyncStatus = (connector) => {
     // Create a repo URL if it's not directly available
     let repoUrl = connector.repo_url || '';
     
@@ -234,7 +243,7 @@ const GitHubConnectors = () => {
     
     if (!repoUrl) return null;
     
-    const key = `${connector.id}_${repoUrl}_${embeddingProvider}`;
+    const key = `${connector.id}_${repoUrl}_${selectedEmbeddingProvider}`;
     return syncStatuses[key];
   };
   
@@ -243,7 +252,7 @@ const GitHubConnectors = () => {
     const providers = ["openai-small", "openai-large", "ollama"];
     
     return providers.some(provider => {
-      const status = getSyncStatus(connector, provider);
+      const status = getSyncStatus(connector);
       return status && status.status === 'in_progress';
     });
   };
@@ -254,7 +263,7 @@ const GitHubConnectors = () => {
     let mostRecent = null;
     
     providers.forEach(provider => {
-      const status = getSyncStatus(connector, provider);
+      const status = getSyncStatus(connector);
       if (status && (!mostRecent || new Date(status.sync_timestamp) > new Date(mostRecent.sync_timestamp))) {
         mostRecent = status;
       }
@@ -643,134 +652,77 @@ const GitHubConnectors = () => {
   const handleVectorSync = (connector) => {
     setSelectedVectorConnector(connector);
     setIsVectorSyncModalOpen(true);
-    setSyncResult(null);
-    setForceFullSync(false);
+    // Start with vector sync tab (index 0)
+    setSyncModalTab(0);
+    // Fetch the latest lineage tasks
+    lineageMonitoring.fetchLineageTasks();
   };
   
   // Start vector sync
   const startVectorSync = async () => {
-    if (!selectedVectorConnector) return;
-    
-    setIsSyncing(true);
-    setSyncResult(null);
-    
     try {
-      // Build the request
-      const request = {
+      setIsSyncing(true);
+      setSyncResult(null);
+      
+      // Create sync request payload
+      const payload = {
         connector_id: selectedVectorConnector.id,
-        repo_url: selectedVectorConnector.repo_url || '', // Use repo_url if available
         embedding_provider: selectedEmbeddingProvider,
-        force_full_sync: forceFullSync,
-        branch: selectedVectorConnector.default_branch || 'main'
+        force_full_sync: forceFullSync
       };
       
-      // If repo_url is not available, construct it from other fields
-      if (!request.repo_url && selectedVectorConnector.github_type === 'public') {
-        // Handle different repository formats
-        if (selectedVectorConnector.repositories && selectedVectorConnector.repositories.length > 0) {
-          const firstRepo = selectedVectorConnector.repositories[0];
-          if (firstRepo.includes('/')) {
-            // It's already in owner/repo format
-            request.repo_url = `https://github.com/${firstRepo}`;
-          } else if (selectedVectorConnector.owner) {
-            // We have owner and repo separately
-            request.repo_url = `https://github.com/${selectedVectorConnector.owner}/${firstRepo}`;
-          }
-        } else if (selectedVectorConnector.owner) {
-          // For older connectors that might not have repositories defined
-          request.repo_url = `https://github.com/${selectedVectorConnector.owner}/${selectedVectorConnector.name.replace(/\s+/g, '-').toLowerCase()}`;
-        }
-      }
-      
-      // Make sure we have a repo URL
-      if (!request.repo_url) {
-        throw new Error("No repository URL available for sync");
-      }
-      
-      // Call the API
+      // Make API call to start vector sync
       const response = await fetch('/api/github/sync', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json'
         },
-        body: JSON.stringify(request)
+        body: JSON.stringify(payload)
       });
       
       const data = await response.json();
       
       if (!response.ok) {
-        // Handle specific error cases
-        if (data.detail && data.detail.includes("OpenAI API key is required")) {
-          throw new Error("OpenAI API key is missing. Please add an OpenAI provider in Settings > LLM Providers.");
-        } else if (data.detail && data.detail.includes("Ollama")) {
-          throw new Error("Ollama connection error. Make sure Ollama is running on your machine.");
-        } else {
-          throw new Error(data.detail || `API error: ${response.status}`);
-        }
+        throw new Error(data.detail || 'Failed to start sync process');
       }
       
+      // Set sync result
       setSyncResult({
         success: true,
+        message: 'Vector sync started successfully. Files will be processed in the background.',
         syncId: data.sync_id,
-        message: `Sync started with ID ${data.sync_id}. Check status in background tasks.`,
-        status: data.status
+        files_indexed: data.files_indexed || 0
       });
       
-      toast({
-        title: 'Vector Sync Started',
-        description: `Sync process started for repository. This may take some time to complete.`,
-        status: 'info',
-        duration: 5000,
-        isClosable: true,
-      });
+      // After successful vector sync, check for lineage tasks
+      const tasks = await lineageMonitoring.fetchLineageTasks();
       
-      // Immediately fetch sync statuses to update UI
-      fetchSyncStatuses();
-      
-      // Auto-close the modal after successful sync start
-      setTimeout(() => {
-        closeVectorSyncModal();
-      }, 3000);
-      
-    } catch (error) {
-      console.error('Error starting vector sync:', error);
-      
-      // Create a more user-friendly error message with instructions
-      let errorMessage = error.message;
-      let detailedInstructions = "";
-      
-      if (error.message.includes("OpenAI API key")) {
-        errorMessage = "OpenAI API key is required for OpenAI embeddings";
-        detailedInstructions = `
-          To configure an OpenAI provider:
-          1. Go to Settings > LLM Providers
-          2. Click "Add Provider"
-          3. Select "OpenAI" as the provider
-          4. Enter your API key from openai.com
-          5. Click Save
-        `;
-      } else if (error.message.includes("Ollama")) {
-        errorMessage = "Error connecting to Ollama. Please make sure Ollama is running on your machine.";
-        detailedInstructions = `
-          To use Ollama:
-          1. Ensure Ollama is installed and running on your machine
-          2. Verify Ollama is accessible at http://localhost:11434
-        `;
+      // If we have active tasks, switch to lineage tab
+      if (lineageMonitoring.hasActiveTasks) {
+        // Wait a moment to allow UI to update first
+        setTimeout(() => {
+          setSyncModalTab(1);
+          toast({
+            title: "Lineage extraction in progress",
+            description: "Switch to the Lineage Progress tab to monitor progress",
+            status: "info",
+            duration: 5000,
+            isClosable: true,
+          });
+        }, 2000);
       }
       
+      // Refresh sync statuses
+      await fetchSyncStatuses();
+      
+    } catch (error) {
+      console.error('Error starting sync:', error);
       setSyncResult({
         success: false,
-        message: errorMessage,
-        detailedInstructions: detailedInstructions,
-        status: 'failed'
-      });
-      
-      toast({
-        title: 'Error Starting Vector Sync',
-        description: errorMessage,
-        status: 'error',
-        duration: 5000,
-        isClosable: true,
+        message: `Error: ${error.message}`,
+        detailedInstructions: error.message.includes('OpenAI API key') 
+          ? 'Please configure your OpenAI API key in Settings > LLM Providers before using this feature.' 
+          : null
       });
     } finally {
       setIsSyncing(false);
@@ -880,362 +832,414 @@ const GitHubConnectors = () => {
   const closeVectorSyncModal = () => {
     setIsVectorSyncModalOpen(false);
     setSelectedVectorConnector(null);
+    setSelectedEmbeddingProvider('openai-small');
     setSyncResult(null);
-    
-    // Trigger a final fetch to ensure UI is up to date
-    fetchSyncStatuses();
+    setForceFullSync(false);
+    setSyncModalTab(0); // Reset tab index when closing
   };
   
   // Vector Sync Modal Component
   const VectorSyncModal = () => (
-    <Modal isOpen={isVectorSyncModalOpen} onClose={closeVectorSyncModal} isCentered size="lg">
+    <Modal isOpen={isVectorSyncModalOpen} onClose={closeVectorSyncModal} size="xl">
       <ModalOverlay />
       <ModalContent>
-        <ModalHeader>Vector Store Sync</ModalHeader>
+        <ModalHeader>
+          Sync Repository with Vector Store
+          {selectedVectorConnector && (
+            <Text fontSize="sm" fontWeight="normal" mt={1}>
+              {selectedVectorConnector.name}
+            </Text>
+          )}
+        </ModalHeader>
         <ModalCloseButton />
         <ModalBody>
-          {selectedVectorConnector && (
-            <VStack spacing={4} align="stretch">
-              <Box>
-                <Text fontWeight="bold">Repository:</Text>
-                <Text mt={1}>{selectedVectorConnector.repo_url || 
-                  (selectedVectorConnector.owner && selectedVectorConnector.repositories && selectedVectorConnector.repositories.length > 0 ? 
-                    `${selectedVectorConnector.owner}/${selectedVectorConnector.repositories[0]}` : 
-                    'Unknown')}</Text>
-              </Box>
-              
-              <FormControl>
-                <FormLabel>Embedding Provider</FormLabel>
-                <Select 
-                  value={selectedEmbeddingProvider}
-                  onChange={(e) => setSelectedEmbeddingProvider(e.target.value)}
-                  isDisabled={isSyncing}
-                >
-                  {embedddingProviders.map(provider => (
-                    <option key={provider.id} value={provider.id}>
-                      {provider.name}
-                    </option>
-                  ))}
-                </Select>
-                <Text fontSize="xs" color="gray.600" mt={1}>
-                  Select the embedding model to use for vector storage
-                </Text>
-                
-                {selectedEmbeddingProvider.startsWith('openai') && (
-                  <Alert status="info" variant="left-accent" mt={2} size="sm">
-                    <AlertIcon />
-                    <Box>
-                      <Text fontSize="xs">
-                        Requires an OpenAI API key to be configured in Settings &gt; LLM Providers. 
-                        Uses your OpenAI account credits.
-                      </Text>
-                    </Box>
-                  </Alert>
-                )}
-                
-                {selectedEmbeddingProvider === 'ollama' && (
-                  <Alert status="info" variant="left-accent" mt={2} size="sm">
-                    <AlertIcon />
-                    <Box>
-                      <Text fontSize="xs">
-                        Uses local Ollama instance for embeddings (free, no API key required).
-                        Requires Ollama to be running on your machine.
-                      </Text>
-                    </Box>
-                  </Alert>
-                )}
-              </FormControl>
-              
-              <FormControl display="flex" alignItems="center" mt={2}>
-                <FormLabel htmlFor="force-full-sync" mb="0">
-                  Force Full Sync
-                </FormLabel>
-                <Switch 
-                  id="force-full-sync" 
-                  isChecked={forceFullSync}
-                  onChange={(e) => setForceFullSync(e.target.checked)}
-                  isDisabled={isSyncing}
-                  colorScheme="teal"
-                />
-                <Tooltip label="Re-sync all files ignoring previous sync history">
-                  <IconButton
-                    icon={<IoInformationCircle />}
-                    size="xs"
-                    variant="ghost"
-                    ml={1}
-                    aria-label="Force full sync info"
-                  />
-                </Tooltip>
-              </FormControl>
-              
-              {syncResult && (
-                <Alert
-                  status={syncResult.success ? 'success' : 'error'}
-                  variant="subtle"
-                  flexDirection="column"
-                  alignItems="flex-start"
-                  mt={2}
-                  mb={2}
-                  borderRadius="md"
-                >
-                  <HStack mb={1}>
-                    <AlertIcon />
-                    <AlertTitle>
-                      {syncResult.success ? 'Operation Successful' : 'Operation Failed'}
-                    </AlertTitle>
-                  </HStack>
-                  <AlertDescription>
-                    <Text>{syncResult.message}</Text>
-                    {syncResult.syncId && (
-                      <Text mt={2} fontSize="sm">Sync ID: {syncResult.syncId}</Text>
-                    )}
+          <Tabs index={syncModalTab} onChange={(index) => setSyncModalTab(index)} variant="enclosed">
+            <TabList>
+              <Tab>Vector Sync</Tab>
+              <Tab>Lineage Progress</Tab>
+            </TabList>
+            <TabPanels>
+              <TabPanel>
+                {/* Existing vector sync content */}
+                {!syncResult ? (
+                  <VStack spacing={4} align="stretch">
+                    <FormControl>
+                      <FormLabel>Embedding Provider</FormLabel>
+                      <Select
+                        value={selectedEmbeddingProvider}
+                        onChange={(e) => setSelectedEmbeddingProvider(e.target.value)}
+                        isDisabled={isSyncing || isLoadingProviders}
+                      >
+                        {embedddingProviders.map((provider) => (
+                          <option key={provider.id} value={provider.id}>
+                            {provider.name}
+                          </option>
+                        ))}
+                      </Select>
+                    </FormControl>
                     
-                    {!syncResult.success && syncResult.detailedInstructions && (
-                      <Box mt={3} p={3} bg="gray.50" borderRadius="md">
-                        <Text fontWeight="bold" mb={2}>How to fix this:</Text>
-                        <Text whiteSpace="pre-line">{syncResult.detailedInstructions}</Text>
-                      </Box>
+                    <FormControl>
+                      <FormLabel>Sync Options</FormLabel>
+                      <Flex alignItems="center">
+                        <Switch
+                          id="force-full-sync"
+                          isChecked={forceFullSync}
+                          onChange={(e) => setForceFullSync(e.target.checked)}
+                          isDisabled={isSyncing}
+                          mr={2}
+                        />
+                        <FormLabel htmlFor="force-full-sync" mb={0}>
+                          Force Full Sync (re-index all files)
+                        </FormLabel>
+                      </Flex>
+                    </FormControl>
+                    
+                    <Divider />
+                    
+                    <Text fontSize="sm" color="gray.600">
+                      This will scan the repository and index all code files in the vector store for
+                      semantic search and AI analysis. This process may take several minutes depending
+                      on the repository size.
+                    </Text>
+                    
+                    {selectedVectorConnector && getMostRecentSync(selectedVectorConnector) && (
+                      <Alert status="info" size="sm">
+                        <AlertIcon />
+                        <VStack align="start" spacing={0}>
+                          <Text fontSize="sm">
+                            Last synced: {new Date(getMostRecentSync(selectedVectorConnector).created_at).toLocaleString()}
+                          </Text>
+                          <Text fontSize="sm">
+                            Files indexed: {getMostRecentSync(selectedVectorConnector).files_indexed || 0}
+                          </Text>
+                        </VStack>
+                      </Alert>
                     )}
-                  </AlertDescription>
-                </Alert>
-              )}
-            </VStack>
-          )}
+                  </VStack>
+                ) : (
+                  <VStack spacing={4} align="stretch">
+                    <Alert
+                      status={syncResult.success ? "success" : "error"}
+                      variant="subtle"
+                      flexDirection="column"
+                      alignItems="center"
+                      justifyContent="center"
+                      textAlign="center"
+                      height="200px"
+                    >
+                      <AlertIcon boxSize="40px" mr={0} />
+                      <AlertTitle mt={4} mb={1} fontSize="lg">
+                        {syncResult.success ? "Sync Successful!" : "Sync Failed"}
+                      </AlertTitle>
+                      <AlertDescription maxWidth="sm">
+                        {syncResult.message}
+                        {syncResult.files_indexed > 0 && (
+                          <Text mt={2}>
+                            {syncResult.files_indexed} files indexed
+                          </Text>
+                        )}
+                      </AlertDescription>
+                    </Alert>
+                  </VStack>
+                )}
+              </TabPanel>
+              <TabPanel>
+                {/* Lineage extraction progress content */}
+                <Box pt={2}>
+                  <LineageTaskMonitor />
+                </Box>
+              </TabPanel>
+            </TabPanels>
+          </Tabs>
         </ModalBody>
         <ModalFooter>
-          <Button variant="outline" mr={3} onClick={closeVectorSyncModal}>
-            Close
-          </Button>
-          <Button
-            colorScheme="red"
-            mr={3}
-            isLoading={isSyncing}
-            onClick={deleteVectors}
-            leftIcon={<IoTrash />}
-          >
-            Delete Vectors
-          </Button>
-          <Button
-            colorScheme="teal"
-            isLoading={isSyncing}
-            onClick={startVectorSync}
-            leftIcon={<IoRefresh />}
-          >
-            Sync Now
-          </Button>
+          {!syncResult ? (
+            <>
+              <Button
+                colorScheme="red"
+                mr={3}
+                leftIcon={<IoTrash />}
+                onClick={deleteVectors}
+                isDisabled={isSyncing}
+                size="sm"
+              >
+                Delete Vectors
+              </Button>
+              <Button
+                colorScheme="blue"
+                leftIcon={<IoRefresh />}
+                onClick={startVectorSync}
+                isLoading={isSyncing}
+                loadingText="Syncing..."
+                size="sm"
+              >
+                Start Sync
+              </Button>
+            </>
+          ) : (
+            <Button colorScheme="blue" onClick={closeVectorSyncModal} size="sm">
+              Close
+            </Button>
+          )}
         </ModalFooter>
       </ModalContent>
     </Modal>
   );
   
+  // Add this new function after the handleVectorSync function
+  const startLineageExtraction = async (connector) => {
+    try {
+      // Show loading toast
+      toast({
+        title: "Starting lineage extraction",
+        description: "Please wait while we analyze the repository structure...",
+        status: "info",
+        duration: 3000,
+        isClosable: true,
+      });
+      
+      // Make API call to start lineage extraction
+      const response = await fetch(`/api/lineage/github-connector/${connector.id}/extract-lineage`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({})
+      });
+      
+      if (!response.ok) {
+        const data = await response.json();
+        throw new Error(data.detail || `Error ${response.status}: ${response.statusText}`);
+      }
+      
+      const data = await response.json();
+      
+      // Show success toast
+      toast({
+        title: "Lineage extraction started",
+        description: "Processing SQL files in the background. See progress in the Lineage tab.",
+        status: "success",
+        duration: 5000,
+        isClosable: true,
+      });
+      
+      // Fetch the latest tasks
+      setTimeout(() => {
+        lineageMonitoring.fetchLineageTasks();
+      }, 1000);
+      
+    } catch (error) {
+      console.error("Error starting lineage extraction:", error);
+      toast({
+        title: "Error starting lineage extraction",
+        description: error.message,
+        status: "error",
+        duration: 5000,
+        isClosable: true,
+      });
+    }
+  };
+  
   // Render list of existing connectors
   const renderConnectorsList = () => {
     if (isLoading) {
       return (
-        <Box textAlign="center" py={10}>
-          <Spinner size="xl" color="purple.500" />
-          <Text mt={4}>Loading GitHub connectors...</Text>
+        <Box p={5} textAlign="center">
+          <Spinner size="xl" color="blue.500" />
+          <Text mt={4}>Loading connectors...</Text>
         </Box>
       );
     }
-    
+
     if (connectors.length === 0) {
       return (
-        <Box textAlign="center" py={8} borderWidth="1px" borderRadius="lg" borderStyle="dashed">
-          <Icon as={IoLogoGithub} w={10} h={10} color="gray.400" />
-          <Text mt={4} color="gray.500">No GitHub connectors found</Text>
-          <Text fontSize="sm" color="gray.400" mt={2}>Add a connector to integrate with GitHub repositories</Text>
-        </Box>
+        <Alert status="info" borderRadius="md" my={4}>
+          <AlertIcon />
+          <Box flex="1">
+            <AlertTitle>No Connectors Found</AlertTitle>
+            <AlertDescription>
+              Add a GitHub connector to get started.
+            </AlertDescription>
+          </Box>
+        </Alert>
       );
     }
-    
+
     return (
-      <VStack spacing={4} align="stretch">
-        {connectors.map((connector) => {
-          const isSyncing = isConnectorSyncing(connector);
-          const recentSync = getMostRecentSync(connector);
-          
-          return (
-            <Card key={connector.id} variant="outline">
-              <CardHeader>
-                <Flex justify="space-between" align="center">
-                  <HStack>
-                    <Icon as={IoLogoGithub} w={6} h={6} color="purple.500" />
-                    <Heading size="md">{connector.name}</Heading>
-                    <Badge colorScheme={connector.active ? 'green' : 'gray'}>
-                      {connector.active ? 'Active' : 'Inactive'}
-                    </Badge>
-                    <Badge colorScheme={connector.github_type === 'public' ? 'blue' : 'orange'}>
-                      {connector.github_type === 'public' ? 'Public GitHub' : 'Enterprise GitHub'}
-                    </Badge>
-                    
-                    {/* Sync Status Badge */}
-                    {recentSync && (
+      <Grid templateColumns={{base: "1fr", md: "repeat(2, 1fr)", lg: "repeat(3, 1fr)"}} gap={6}>
+        {connectors.map((connector) => (
+          <Card key={connector.id} boxShadow="md" borderRadius="lg" overflow="hidden">
+            <CardHeader bg={connector.active ? "blue.50" : "gray.50"} p={4}>
+              <Flex justifyContent="space-between" alignItems="center">
+                <Heading size="md" color={connector.active ? "blue.700" : "gray.500"}>
+                  {connector.name}
+                </Heading>
+                <Badge 
+                  colorScheme={
+                    connector.tech_stack === 'postgresql' ? 'blue' : 
+                    connector.tech_stack === 'mysql' ? 'orange' : 
+                    connector.tech_stack === 'snowflake' ? 'cyan' : 
+                    connector.tech_stack === 'tsql' ? 'purple' :
+                    connector.tech_stack === 'dbt' ? 'green' : 'gray'
+                  }
+                >
+                  {connector.tech_stack}
+                </Badge>
+              </Flex>
+            </CardHeader>
+            
+            <CardBody p={4}>
+              <VStack align="start" spacing={3}>
+                {connector.description && (
+                  <Text fontSize="sm" color="gray.600">
+                    {connector.description}
+                  </Text>
+                )}
+                
+                <Flex wrap="wrap" gap={2}>
+                  <Tag size="sm" colorScheme={connector.github_type === 'public' ? 'green' : 'purple'}>
+                    <TagLabel>{connector.github_type}</TagLabel>
+                  </Tag>
+                  
+                  {connector.has_token && (
+                    <Tag size="sm" colorScheme="blue">
+                      <Icon as={IoLockClosed} mr={1} />
+                      <TagLabel>Authenticated</TagLabel>
+                    </Tag>
+                  )}
+                  
+                  {connector.active ? (
+                    <Tag size="sm" colorScheme="green">
+                      <Icon as={IoCheckmarkCircle} mr={1} />
+                      <TagLabel>Active</TagLabel>
+                    </Tag>
+                  ) : (
+                    <Tag size="sm" colorScheme="red">
+                      <Icon as={IoCloseCircle} mr={1} />
+                      <TagLabel>Inactive</TagLabel>
+                    </Tag>
+                  )}
+                </Flex>
+                
+                <Divider />
+                
+                <Box width="100%">
+                  <Text fontWeight="bold" fontSize="sm" mb={2}>Repository</Text>
+                  {connector.repo_url ? (
+                    <Link href={connector.repo_url} isExternal color="blue.500" fontSize="sm">
+                      <Flex alignItems="center">
+                        <Icon as={IoLogoGithub} mr={1} />
+                        {connector.repo_url.replace('https://github.com/', '').replace('.git', '')}
+                      </Flex>
+                    </Link>
+                  ) : connector.owner && connector.repositories && connector.repositories.length > 0 ? (
+                    <Link href={`https://github.com/${connector.owner}/${connector.repositories[0]}`} isExternal color="blue.500" fontSize="sm">
+                      <Flex alignItems="center">
+                        <Icon as={IoLogoGithub} mr={1} />
+                        {connector.owner}/{connector.repositories[0]}
+                      </Flex>
+                    </Link>
+                  ) : (
+                    <Text fontSize="sm" color="gray.500">No repository URL specified</Text>
+                  )}
+                </Box>
+                
+                {/* Show sync status if available */}
+                {getSyncStatus(connector) && (
+                  <Box width="100%" mt={2}>
+                    <Flex justifyContent="space-between" alignItems="center" mb={1}>
+                      <Text fontSize="sm" fontWeight="bold">Vector Sync Status</Text>
                       <Badge 
                         colorScheme={
-                          recentSync.status === 'completed' ? 'green' : 
-                          recentSync.status === 'in_progress' ? 'blue' : 'red'
+                          getSyncStatus(connector).state === 'completed' ? 'green' : 
+                          getSyncStatus(connector).state === 'failed' ? 'red' : 'blue'
                         }
+                        fontSize="xs"
                       >
-                        <HStack spacing={1}>
-                          {recentSync.status === 'in_progress' && <Spinner size="xs" />}
-                          <Text>
-                            {recentSync.status === 'completed' ? 'Synced' : 
-                             recentSync.status === 'in_progress' ? 'Syncing' : 'Failed'}
-                          </Text>
-                        </HStack>
+                        {getSyncStatus(connector).state}
                       </Badge>
-                    )}
-                  </HStack>
-                  <HStack>
-                    <Button 
+                    </Flex>
+                    <Progress 
+                      value={100} 
                       size="sm" 
-                      leftIcon={isSyncing ? <Spinner size="xs" /> : <IoRefresh />} 
-                      colorScheme="teal" 
-                      variant="outline"
-                      onClick={() => handleVectorSync(connector)}
-                      isLoading={isSyncing}
-                      loadingText="Syncing"
-                    >
-                      {isSyncing ? 'Syncing' : 'Vector Sync'}
-                    </Button>
-                    <Button 
-                      size="sm" 
-                      leftIcon={<IoSettings />} 
-                      colorScheme="purple" 
-                      variant="outline"
-                      onClick={() => handleEdit(connector)}
-                    >
-                      Edit
-                    </Button>
-                    <Button 
-                      size="sm" 
-                      leftIcon={<IoTrash />} 
-                      colorScheme="red" 
-                      variant="outline"
-                      onClick={() => confirmDelete(connector)}
-                    >
-                      Delete
-                    </Button>
-                  </HStack>
-                </Flex>
-              </CardHeader>
-              <CardBody pt={0}>
-                {connector.description && (
-                  <Text mb={4} color="gray.600">{connector.description}</Text>
-                )}
-                
-                {/* Sync Progress Display */}
-                {isSyncing && (
-                  <Box mb={4}>
-                    <Text fontSize="sm" fontWeight="medium" mb={1}>Vector Sync in Progress</Text>
-                    <Progress size="sm" isIndeterminate colorScheme="blue" />
-                  </Box>
-                )}
-                
-                {/* Sync Status Info */}
-                {recentSync && recentSync.status !== 'in_progress' && (
-                  <Box mb={4}>
-                    <Flex align="center" gap={2}>
-                      <Circle 
-                        size="10px" 
-                        bg={recentSync.status === 'completed' ? 'green.500' : 'red.500'} 
-                      />
-                      <Text fontSize="sm" fontWeight="medium">
-                        {recentSync.status === 'completed' 
-                          ? `Last sync: ${recentSync.files_processed} files processed (${new Date(recentSync.sync_timestamp).toLocaleString()})` 
-                          : `Sync failed: ${recentSync.error_message || 'Unknown error'}`
-                        }
+                      colorScheme={
+                        getSyncStatus(connector).state === 'completed' ? 'green' : 
+                        getSyncStatus(connector).state === 'failed' ? 'red' : 'blue'
+                      }
+                      borderRadius="full"
+                    />
+                    <Flex justifyContent="space-between" mt={1}>
+                      <Text fontSize="xs" color="gray.500">
+                        {new Date(getSyncStatus(connector).created_at).toLocaleString()}
+                      </Text>
+                      <Text fontSize="xs" color="gray.500">
+                        {getSyncStatus(connector).files_indexed || 0} files
                       </Text>
                     </Flex>
                   </Box>
                 )}
+              </VStack>
+            </CardBody>
+            
+            <CardFooter bg="gray.50" p={4}>
+              <Flex width="100%" justifyContent="space-between">
+                <HStack>
+                  <IconButton
+                    icon={<IoSettings />}
+                    aria-label="Edit connector"
+                    size="sm"
+                    colorScheme="blue"
+                    variant="outline"
+                    onClick={() => handleEdit(connector)}
+                  />
+                  <IconButton
+                    icon={<IoTrash />}
+                    aria-label="Delete connector"
+                    size="sm"
+                    colorScheme="red"
+                    variant="outline"
+                    onClick={() => confirmDelete(connector)}
+                  />
+                </HStack>
                 
-                <SimpleGrid columns={{ base: 1, md: 2 }} spacing={4}>
-                  <Box>
-                    <Heading size="xs" mb={2}>Connection Details</Heading>
-                    <List spacing={2}>
-                      <ListItem>
-                        <HStack>
-                          <Icon as={IoPerson} color="gray.500" />
-                          <Text fontWeight="bold" mr={1}>Owner:</Text>
-                          <Text>{connector.owner || '-'}</Text>
-                        </HStack>
-                      </ListItem>
-                      {connector.organization && (
-                        <ListItem>
-                          <HStack>
-                            <Icon as={IoServer} color="gray.500" />
-                            <Text fontWeight="bold" mr={1}>Organization:</Text>
-                            <Text>{connector.organization}</Text>
-                          </HStack>
-                        </ListItem>
-                      )}
-                      {connector.github_type === 'enterprise' && connector.api_url && (
-                        <ListItem>
-                          <HStack>
-                            <Icon as={IoLink} color="gray.500" />
-                            <Text fontWeight="bold" mr={1}>API URL:</Text>
-                            <Text>{connector.api_url}</Text>
-                          </HStack>
-                        </ListItem>
-                      )}
-                      <ListItem>
-                        <HStack>
-                          <Icon as={IoGitBranch} color="gray.500" />
-                          <Text fontWeight="bold" mr={1}>Default Branch:</Text>
-                          <Text>{connector.default_branch || 'main'}</Text>
-                        </HStack>
-                      </ListItem>
-                      <ListItem>
-                        <HStack>
-                          <Icon as={FaDatabase} color="gray.500" />
-                          <Text fontWeight="bold" mr={1}>Tech Stack:</Text>
-                          <Text>{connector.tech_stack || 'postgresql'}</Text>
-                        </HStack>
-                      </ListItem>
-                      <ListItem>
-                        <HStack>
-                          <Icon as={IoLockClosed} color="gray.500" />
-                          <Text fontWeight="bold" mr={1}>Token:</Text>
-                          <Text>{connector.has_token ? '••••••••' : 'Not set'}</Text>
-                        </HStack>
-                      </ListItem>
-                    </List>
-                  </Box>
-                  
-                  <Box>
-                    <Heading size="xs" mb={2}>Repositories</Heading>
-                    {connector.repositories && connector.repositories.length > 0 ? (
-                      <Box maxH="120px" overflowY="auto" p={2} borderWidth="1px" borderRadius="md">
-                        <List spacing={1}>
-                          {connector.repositories.map((repo, index) => (
-                            <ListItem key={index}>
-                              <HStack>
-                                <Icon as={IoCode} color="gray.500" />
-                                <Text>{repo}</Text>
-                              </HStack>
-                            </ListItem>
-                          ))}
-                        </List>
-                      </Box>
-                    ) : (
-                      <Text color="gray.500">No specific repositories configured</Text>
-                    )}
-                  </Box>
-                </SimpleGrid>
-              </CardBody>
-              <CardFooter pt={0}>
-                <Text fontSize="sm" color="gray.500">
-                  Created: {new Date(connector.created_at).toLocaleString()}
-                  {connector.updated_at !== connector.created_at && 
-                    ` • Updated: ${new Date(connector.updated_at).toLocaleString()}`}
-                </Text>
-              </CardFooter>
-            </Card>
-          );
-        })}
-      </VStack>
+                <HStack>
+                  {connector.active && (
+                    <>
+                      <Tooltip label="Extract Lineage">
+                        <IconButton
+                          icon={<IoGitBranch />}
+                          aria-label="Extract Lineage"
+                          size="sm"
+                          colorScheme="green"
+                          onClick={() => {
+                            setSelectedVectorConnector(connector);
+                            setIsVectorSyncModalOpen(true);
+                            setSyncModalTab(1); // Switch to Lineage tab
+                            // Start lineage extraction immediately
+                            startLineageExtraction(connector);
+                            // Then fetch tasks to show progress
+                            lineageMonitoring.fetchLineageTasks();
+                          }}
+                        />
+                      </Tooltip>
+                      <Tooltip label="Sync with Vector Store">
+                        <IconButton
+                          icon={<IoRefresh />}
+                          aria-label="Sync with Vector Store"
+                          size="sm"
+                          colorScheme="blue"
+                          isLoading={isConnectorSyncing(connector)}
+                          onClick={() => handleVectorSync(connector)}
+                        />
+                      </Tooltip>
+                    </>
+                  )}
+                </HStack>
+              </Flex>
+            </CardFooter>
+          </Card>
+        ))}
+      </Grid>
     );
   };
   

@@ -8,10 +8,11 @@ import os
 import re
 import json
 import logging
+import yaml
 from typing import Dict, List, Set, Tuple, Optional, Any
 import sqlglot
 from sqlglot import parse_one, ParseError
-from sqlglot.expressions import Select, Table, Column, Subquery, Create
+from sqlglot.expressions import Select, Table, Column, Subquery, Create, Insert
 
 # Import base classes
 from ..base_dialect import BaseSQLDialect
@@ -28,98 +29,274 @@ class DBTDialect(BaseSQLDialect):
     
     def __init__(self):
         """Initialize the DBT dialect parser"""
-        super().__init__("dbt")
+        super().__init__(name="dbt")
+        self.dbt_supported_file_types = [".sql", ".yml", ".yaml"]
     
-    def _get_sqlglot_dialect(self) -> str:
+    def _get_sqlglot_dialect(self, dialect_hint=None):
         """
         Get the SQLGlot dialect name for DBT (uses postgres as base)
+        
+        Args:
+            dialect_hint: An optional hint about what the dialect might be.
         
         Returns:
             The SQLGlot dialect name
         """
+        if dialect_hint:
+            return dialect_hint
         return "postgres"  # DBT is typically based on the target warehouse dialect, default to Postgres
     
-    def parse_sql(self, sql_code: str) -> Tuple[Any, List[str]]:
+    def parse_sql(self, sql, file_path=None, dialect_hint=None):
         """
-        Parse DBT SQL code using SQLGlot
-        
+        Parse DBT SQL code using SQLGlot. Attempts reconstruction and multiple fallbacks.
+
         Args:
-            sql_code: SQL code to parse
-            
+            sql: A string with DBT SQL code.
+            file_path: An optional string with the path to the file.
+            dialect_hint: An optional hint about what the dialect might be.
+
         Returns:
-            Tuple of (AST, errors)
+            A tuple of (ast, errors) where ast is the abstract syntax tree and
+            errors is a list of error messages.
         """
-        errors = []
-        ast = None
-        
+        parsing_errors = [] # Store errors encountered during this function
+
+        # --- Initial Checks ---
+        if file_path and (file_path.endswith(".yml") or file_path.endswith(".yaml")):
+            return None, ["Cannot parse YAML files as SQL"]
+        if self._is_macro_only_file(sql):
+            deps = self.extract_dependencies(sql, file_path, extract_only=True)
+            return None, [f"Macro-only file, skipping SQL parsing. Found refs: {len(deps.get('refs',[]))}, sources: {len(deps.get('sources',[]))} via regex."]
+        if not self._looks_like_sql(sql):
+            return None, ["Input doesn't appear to be SQL code"]
+
+        # --- Preprocessing --- 
         try:
-            # Handle DBT-specific syntax before parsing
-            cleaned_sql = self._preprocess_sql(sql_code)
-            
-            # Parse with SQLGlot
-            ast = parse_one(cleaned_sql, dialect=self._get_sqlglot_dialect())
-        except ParseError as e:
-            errors.append(f"Parse error: {str(e)}")
-        except Exception as e:
-            errors.append(f"Error parsing SQL: {str(e)}")
+            processed_sql, preprocessing_errors = self._preprocess_sql(sql)
+            parsing_errors.extend(preprocessing_errors)
+            if not processed_sql:
+                parsing_errors.append("Preprocessing returned empty SQL.")
+                return None, parsing_errors
+        except Exception as preproc_e:
+            parsing_errors.append(f"Critical error during preprocessing: {str(preproc_e)}")
+            logger.error(f"Preprocessing failed critically: {preproc_e}", exc_info=True)
+            return None, parsing_errors
+
+        # --- Reconstruction Attempt ---
+        sql_to_parse = None
+        try:
+            reconstructed_sql, reconstruction_errors = self._reconstruct_dbt_sql(processed_sql)
+            parsing_errors.extend(reconstruction_errors)
+            if reconstructed_sql:
+                sql_to_parse = reconstructed_sql
+                parsing_errors.append("Attempting parse on reconstructed SQL from DBT CTEs")
+            else:
+                parsing_errors.append("CTE reconstruction did not yield SQL, falling back.")
+                sql_to_parse = processed_sql # Fallback to preprocessed if reconstruction fails
+        except Exception as recon_e:
+            parsing_errors.append(f"Critical error during CTE reconstruction: {str(recon_e)}")
+            logger.error(f"CTE Reconstruction failed critically: {recon_e}", exc_info=True)
+            sql_to_parse = processed_sql # Fallback to preprocessed
         
-        return ast, errors
+        if not sql_to_parse:
+             parsing_errors.append("No SQL available to parse after preprocessing/reconstruction.")
+             return None, parsing_errors
+
+        # --- Parsing with Dialect Fallback --- 
+        dialect = self._get_sqlglot_dialect(dialect_hint)
+        fallback_dialects = ["postgres", "snowflake", "bigquery", "mysql", "duckdb", "spark", "tsql"]
+        if dialect in fallback_dialects:
+            fallback_dialects.remove(dialect)
+        dialects_to_try = [dialect] + fallback_dialects
+
+        ast = None
+        last_parse_error = None
+        successful_dialect = None
+        
+        logger.info(f"Attempting to parse SQL for file {file_path} (length {len(sql_to_parse)}):\n---\n{sql_to_parse[:1000]}...\n---")
+
+        for try_dialect in dialects_to_try:
+            try:
+                parsed_expressions = sqlglot.parse(sql_to_parse, read=try_dialect)
+                if parsed_expressions:
+                    significant_expr = next((expr for expr in parsed_expressions 
+                                             if isinstance(expr, (Select, Create, Insert, sqlglot.exp.CTE))), 
+                                            parsed_expressions[0])
+                    ast = significant_expr
+                    successful_dialect = try_dialect
+                    if try_dialect != dialect:
+                        parsing_errors.append(f"Parse successful with fallback dialect: {try_dialect}")
+                    else: 
+                         parsing_errors.append(f"Parse successful with initial dialect: {try_dialect}")
+                    break # Success!
+                else:
+                    last_parse_error = f"Parsing with {try_dialect} returned no expressions."
+            except Exception as e:
+                last_parse_error = e
+                logger.debug(f"Parsing attempt failed with dialect {try_dialect}. Error: {str(e)}. SQL attempted:\n---\n{sql_to_parse[:500]}...\n---")
+            
+        # --- Handling Persistent Parsing Failures --- 
+        if ast is None:
+            final_error_msg = f"Failed to parse SQL with all attempted dialects. Last error ({dialects_to_try[-1]}): {str(last_parse_error)}"
+            parsing_errors.append(final_error_msg)
+            logger.warning(f"Failed parsing SQL file: {file_path or '[No Path Provided]'}. {final_error_msg}. Final SQL attempted (showing start):\n---\n{sql_to_parse[:1000]}...\n---")
+
+            # --- Fragment Parsing Fallback ---
+            parsing_errors.append("Attempting fallback: Parsing largest SQL fragment.")
+            try:
+                # Stricter fragment regex: Look for SELECT...; or WITH...; or CREATE...;
+                # Ensuring it captures until a semicolon or end of string/block.
+                fragment_patterns = [
+                    r'(?i)(\bSELECT\b.*?)(?:;|\Z)', # Select statement
+                    r'(?i)(\bWITH\b.*?)(?:;|\Z)',   # With statement
+                    r'(?i)(\bCREATE\b.*?)(?:;|\Z)' # Create statement
+                ]
+                potential_statements = []
+                for pattern in fragment_patterns:
+                    matches = re.findall(pattern, sql_to_parse, re.DOTALL)
+                    potential_statements.extend([m.strip() for m in matches if m])
+
+                if potential_statements:
+                    longest_fragment = max(potential_statements, key=len)
+                    if len(longest_fragment) > 20:
+                        # +++ Clean fragment before parsing +++
+                        cleaned_fragment = re.sub(r'\x1b\[[0-9;]*m', '', longest_fragment) # Remove ANSI
+                        cleaned_fragment = cleaned_fragment.strip().rstrip(';') # Strip and remove trailing semicolon for sqlglot
+                        
+                        logger.info(f"Attempting lenient parse on longest cleaned fragment ({len(cleaned_fragment)} chars) for {file_path}:\n---\n{cleaned_fragment[:500]}...\n---")
+                        parsed_expressions = sqlglot.parse(cleaned_fragment, read="postgres")
+                        if parsed_expressions:
+                            ast = parsed_expressions[0]
+                            parsing_errors.append(f"Lenient parse successful using longest cleaned fragment ({len(cleaned_fragment)} chars) with postgres dialect.")
+                            logger.info(f"Lenient fragment parsing succeeded for {file_path}")
+                        else: 
+                             parsing_errors.append("Lenient fragment parsing returned no expressions.")
+                    else:
+                         parsing_errors.append("Longest fragment found was too short ({len(longest_fragment)}) for lenient parsing.")
+                else:
+                     parsing_errors.append("No suitable SQL fragments found for lenient parsing.")
+            except Exception as lenient_e:
+                 error_msg = f"Lenient fragment parsing attempt failed: {str(lenient_e)}"
+                 parsing_errors.append(error_msg)
+                 logger.warning(f"Lenient fragment parsing failed for {file_path}: {error_msg}", exc_info=True)
+
+        # --- Return Result --- 
+        if ast:
+            final_errors = [e for e in parsing_errors if "Warning:" in e or "successful" in e or "failed" in e or "error" in e.lower()]
+            return ast, final_errors
+        else:
+            return None, parsing_errors
     
-    def _preprocess_sql(self, sql_code: str) -> str:
+    def _preprocess_sql(self, sql):
         """
         Preprocess DBT-specific syntax like Jinja templates
         
         Args:
-            sql_code: SQL code to preprocess
+            sql: A string with DBT SQL code.
             
         Returns:
-            Preprocessed SQL code
+            A tuple of (processed_sql, errors) where processed_sql is the processed SQL
+            code and errors is a list of error messages.
         """
-        # Skip if not SQL content
-        if not self._looks_like_sql(sql_code):
-            return ""
+        errors = []
+        processed_sql = sql
+
+        # Handle empty or None input
+        if not processed_sql or processed_sql.strip() == "":
+            return None, ["Input SQL is empty"]
+
+        try:
+            # --- Phase 1: Basic Cleaning & Jinja Comment Removal ---
+            # Remove ANSI escape sequences first
+            processed_sql = re.sub(r'\x1b\[[0-9;]*m', '', processed_sql)
             
-        # Remove Jinja comments
-        sql_code = re.sub(r'{#.*?#}', '', sql_code, flags=re.DOTALL)
-        
-        # Handle DBT jinja blocks (config, docs, etc.)
-        sql_code = re.sub(r'{{\s*config\s*\(.*?\)\s*}}', '', sql_code, flags=re.DOTALL)
-        sql_code = re.sub(r'{{\s*doc\s*\(.*?\)\s*}}', '', sql_code, flags=re.DOTALL)
-        
-        # Replace DBT refs with table names
-        def replace_ref(match):
-            ref_name = match.group(1).strip("' \"")
-            return f"table_{ref_name}"
-        
-        sql_code = re.sub(r'{{\s*ref\s*\(\s*([^)]+)\s*\)\s*}}', replace_ref, sql_code)
-        
-        # Replace DBT sources with table names
-        def replace_source(match):
-            source_parts = match.group(1).split(',')
-            if len(source_parts) >= 2:
-                source_name = source_parts[0].strip("' \"")
-                table_name = source_parts[1].strip("' \"")
-                return f"src_{source_name}_{table_name}"
-            return "source_table"
-        
-        sql_code = re.sub(r'{{\s*source\s*\(\s*([^)]+)\s*\)\s*}}', replace_source, sql_code)
-        
-        # Replace other Jinja expressions with placeholders
-        sql_code = re.sub(r'{{\s*([^}]+)\s*}}', 'NULL', sql_code)
-        
-        # Replace Jinja control structures with SQL comments
-        sql_code = re.sub(r'{%\s*if\s*.*?%}', '/* if condition */', sql_code, flags=re.DOTALL)
-        sql_code = re.sub(r'{%\s*else\s*.*?%}', '/* else condition */', sql_code, flags=re.DOTALL)
-        sql_code = re.sub(r'{%\s*endif\s*.*?%}', '/* endif */', sql_code, flags=re.DOTALL)
-        sql_code = re.sub(r'{%\s*for\s*.*?%}', '/* for loop */', sql_code, flags=re.DOTALL)
-        sql_code = re.sub(r'{%\s*endfor\s*.*?%}', '/* endfor */', sql_code, flags=re.DOTALL)
-        
-        # Replace macros with SQL comments
-        sql_code = re.sub(r'{{\s*([a-zA-Z0-9_]+)\((.*?)\)\s*}}', r'/* macro \1 */', sql_code, flags=re.DOTALL)
-        
-        return sql_code
+            # Handle SQL comments (--)
+            processed_sql = re.sub(r"--.*?$", "", processed_sql, flags=re.MULTILINE)
+
+            # Handle Jinja comments {# ... #} before other Jinja processing
+            processed_sql = re.sub(r"{#.*?#}", "", processed_sql, flags=re.DOTALL)
+
+            # --- Phase 2: Jinja Macro/Statement Placeholder Replacement ---
+            # Replace Jinja macros and control structures with placeholders
+            # Handle macro definitions completely
+            processed_sql = re.sub(
+                r"({%\s*macro\s+[^%]*%})(.*?)({%\s*endmacro\s*%})",
+                " /* DBT_MACRO_DEFINITION */ \n", # Add newline for safety
+                processed_sql,
+                flags=re.DOTALL | re.IGNORECASE,
+            )
+            # Handle materialization blocks
+            processed_sql = re.sub(
+                r"({%\s*materialization\s+[^%]*%})(.*?)({%\s*endmaterialization\s*%})",
+                " /* DBT_MATERIALIZATION */ \n",
+                processed_sql,
+                flags=re.DOTALL | re.IGNORECASE,
+            )
+            # Handle for loops
+            processed_sql = re.sub(r"({%\s*for\s+.*?%})(.*?)({%\s*endfor\s*%})", " /* DBT_FOR_LOOP */ \n", processed_sql, flags=re.DOTALL | re.IGNORECASE)
+            # Handle if/else/endif structures (more complex nesting)
+            processed_sql = re.sub(r"{%\s*(el)?if\s+.*?%}", " /* DBT_IF_BLOCK */ \n", processed_sql, flags=re.IGNORECASE)
+            processed_sql = re.sub(r"{%\s*else\s*%}", " /* DBT_ELSE_BLOCK */ \n", processed_sql, flags=re.IGNORECASE)
+            processed_sql = re.sub(r"{%\s*endif\s*%}", " /* DBT_ENDIF_BLOCK */ \n", processed_sql, flags=re.IGNORECASE)
+            # Handle set statements
+            processed_sql = re.sub(r"{%\s*set\s+.*?%}", " /* DBT_SET_STATEMENT */ \n", processed_sql, flags=re.IGNORECASE)
+            # Replace remaining Jinja statements
+            processed_sql = re.sub(r"{%.*?%}", " /* DBT_STATEMENT */ \n", processed_sql)
+
+            # --- Phase 3: Jinja Expression Replacement ({{ ... }}) ---
+            # Handle config blocks
+            processed_sql = re.sub(r"{{\s*config\s*\([^}]*\)\s*}}", " /* DBT_CONFIG */ ", processed_sql, flags=re.IGNORECASE)
+            # Replace DBT utility function calls
+            processed_sql = re.sub(r"{{\s*dbt_utils\.[^}]+?}}", " /* DBT_UTILS_FUNC */ ", processed_sql, flags=re.IGNORECASE)
+            # Replace ref macros (handle quotes and potential package names)
+            processed_sql = re.sub(r"{{\s*ref\s*\(\s*(['\"])(.+?)\1\s*(,\s*['\"](.+?)['\"])?\s*\)\s*}}", 
+                                 lambda m: f"__dbt_ref_{m.group(4)}_{m.group(2)}" if m.group(4) else f"__dbt_ref_{m.group(2)}", 
+                                 processed_sql, flags=re.IGNORECASE)
+            # Replace source macros
+            processed_sql = re.sub(r"{{\s*source\s*\(\s*(['\"])(.+?)\1\s*,\s*(['\"])(.+?)\3\s*\)\s*}}", 
+                                 r"__dbt_source_\2_\4", 
+                                 processed_sql, flags=re.IGNORECASE)
+            # Replace var macros
+            processed_sql = re.sub(r"{{\s*var\s*\(\s*(['\"])(.+?)\1.*?\)\s*}}", r"__dbt_var_\2", processed_sql, flags=re.IGNORECASE)
+            # Replace env_var macros
+            processed_sql = re.sub(r"{{\s*env_var\s*\(\s*(['\"])(.+?)\1.*?\)\s*}}", r"__dbt_env_var_\2", processed_sql, flags=re.IGNORECASE)
+            # Replace other simple Jinja expressions {{ arbitrary_expression }} with a generic placeholder
+            processed_sql = re.sub(r"{{.*?}}", " /* DBT_EXPRESSION */ ", processed_sql)
+
+            # --- Phase 4: Post-Jinja SQL Cleaning ---
+            # Remove SQL block comments /* ... */ AFTER Jinja replacements
+            processed_sql = re.sub(r"/\*.*?\*/", "", processed_sql, flags=re.DOTALL)
+            
+            # Replace multiple newlines/whitespace with a single space
+            processed_sql = re.sub(r'\s+', ' ', processed_sql)
+            
+            # Remove empty statements (just semicolons)
+            processed_sql = re.sub(r';\s*;+', ';', processed_sql)
+            processed_sql = processed_sql.replace('( ; ',')').replace('(;',')') # Semicolons inside parens
+            processed_sql = processed_sql.strip('; ') # Leading/trailing semicolons
+            
+            # Remove dangling commas (e.g., "col1, col2, )" or "( , col1" or ", WHERE")
+            processed_sql = re.sub(r',\s*\)', ')', processed_sql)
+            processed_sql = re.sub(r'\(\s*,', '(', processed_sql)
+            processed_sql = re.sub(r',\s*(WHERE|GROUP|ORDER|LIMIT|UNION|INTERSECT|EXCEPT)\b', r' \1', processed_sql, flags=re.IGNORECASE)
+            processed_sql = processed_sql.strip(', ')
+            
+            # Check final length
+            if len(processed_sql.strip()) < 5:
+                 # Check original length vs processed length - if drastically different, likely mostly Jinja
+                if len(sql) > 100 and len(processed_sql) < len(sql) * 0.1:
+                     errors.append("Warning: Processed SQL is very short compared to original. Likely Jinja-heavy.")
+                elif len(processed_sql.strip()) == 0:
+                     return None, errors + ["Processed SQL is empty after cleaning."]
+                else:
+                     errors.append("Warning: Processed SQL is very short after cleaning.")
+
+            return processed_sql, errors
+        except Exception as e:
+            logger.error(f"Error during preprocessing SQL: {str(e)}", exc_info=True)
+            return None, [f"Error preprocessing SQL: {str(e)}"]
     
-    def _looks_like_sql(self, text: str) -> bool:
+    def _looks_like_sql(self, text):
         """
         Check if the text looks like SQL code and not a YML file or markdown
         
@@ -129,90 +306,184 @@ class DBTDialect(BaseSQLDialect):
         Returns:
             True if it looks like SQL, False otherwise
         """
-        # Skip empty text
-        if not text or not text.strip():
+        if not text:
             return False
-            
-        # Check if it starts with YAML markers
-        if text.lstrip().startswith('version:') or text.lstrip().startswith('---'):
+
+        # Remove comments and whitespace before checking
+        cleaned_text = re.sub(r"--.*?$", "", text, flags=re.MULTILINE)
+        cleaned_text = re.sub(r"/\*.*?\*/", "", cleaned_text, flags=re.DOTALL)
+        # Remove ANSI escape sequences
+        cleaned_text = re.sub(r'\x1b\[[0-9;]*m', '', cleaned_text)
+        # Remove Jinja comments
+        cleaned_text = re.sub(r"{#.*?#}", "", cleaned_text, flags=re.DOTALL)
+        cleaned_text = cleaned_text.strip()
+
+        if not cleaned_text:
             return False
-            
-        # Check if it's markdown
-        if text.lstrip().startswith('#') or text.lstrip().startswith('##'):
-            return False
-        
-        # Look for common SQL keywords
-        sql_keywords = ['select', 'from', 'where', 'with', 'insert', 'update', 'delete', 'create', 'drop']
-        text_lower = text.lower()
+
+        # Special handling for DBT-specific files
+        # If the file is only macro definitions with no SQL content
+        if cleaned_text.startswith("{%") and "macro" in cleaned_text[:30]:
+            macro_content = len(re.findall(r"{%\s*macro\s+.*?%}", cleaned_text))
+            # Check if it's primarily a macro file with little SQL content
+            if macro_content > 0 and len(cleaned_text) - len(re.sub(r"{%\s*macro.*?endmacro\s*%}", "", cleaned_text, flags=re.DOTALL)) > len(cleaned_text) * 0.7:
+                # If more than 70% of the file is macro definitions, don't treat it as SQL
+                # But still check for SQL keywords inside the macros
+                sql_pattern = r'(?i)\s*(SELECT|CREATE|INSERT|UPDATE|DELETE|WITH|ALTER)\s+'
+                if re.search(sql_pattern, cleaned_text):
+                    return True
+                return False
+
+        # Check if it contains common SQL keywords
+        sql_keywords = [
+            r"\bSELECT\b",
+            r"\bFROM\b",
+            r"\bWHERE\b",
+            r"\bJOIN\b",
+            r"\bGROUP BY\b",
+            r"\bORDER BY\b",
+            r"\bWITH\b",
+            r"\bCREATE\b",
+            r"\bTABLE\b",
+            r"\bVIEW\b",
+            r"\bINSERT\b",
+            r"\bUPDATE\b",
+            r"\bDELETE\b",
+            r"\bMERGE\b",
+            r"\bCASE\b",
+        ]
+
         for keyword in sql_keywords:
-            if re.search(rf'\b{keyword}\b', text_lower):
+            if re.search(keyword, cleaned_text, re.IGNORECASE):
                 return True
+
+        # Check if it contains DBT macros that would indicate SQL context
+        dbt_patterns = [
+            r"{{\s*ref\s*\(",
+            r"{{\s*source\s*\(",
+            r"{{\s*config\s*\(",
+            r"{{\s*var\s*\(",
+            r"{{\s*env_var\s*\(",
+            r"{{\s*dbt_utils\.",
+        ]
+
+        for pattern in dbt_patterns:
+            if re.search(pattern, text):
+                return True
+            
+        # Check for inline Jinja mixed with SQL - typical in DBT files
+        if re.search(r"{%.*?%}", text) and re.search(r"\b(select|from|where)\b", text, re.IGNORECASE):
+            return True
         
+        # For DBT files, if they contain some SQL-like content, be more permissive
+        if re.search(r"\b(with|as|select|from)\b", text, re.IGNORECASE):
+            return True
+
         return False
     
-    def extract_dependencies(self, sql_code: str, file_path: Optional[str] = None) -> Dict[str, Any]:
+    def extract_dependencies(self, sql, file_path=None, dialect_hint=None, extract_only=False):
         """
         Extract table dependencies from DBT SQL code
         
         Args:
-            sql_code: SQL code to analyze
-            file_path: Path to the file (optional)
+            sql: A string with DBT SQL code.
+            file_path: An optional string with the path to the file.
+            dialect_hint: An optional hint about what the dialect might be.
+            extract_only: If True, only use regex extraction, skip parsing.
             
         Returns:
-            Dictionary with dependency information
+            A dictionary with the following keys:
+            - model_name: The name of the DBT model.
+            - refs: A list of dictionaries with "model" and optionally "project" keys.
+            - sources: A list of dictionaries with "source" and "table" keys.
+            - tables: A list of table names from parsed SQL.
+            - errors: A list of error messages.
         """
-        # Initialize dependency result
+        # First check if this is a YAML/YML file
+        if file_path and (file_path.endswith('.yml') or file_path.endswith('.yaml')):
+            return self._extract_yaml_dependencies(sql, file_path)
+
+        # Initialize the result
         result = {
-            "source_tables": [],
-            "target_table": None,
+            "model_name": None,
+            "refs": [],
+            "sources": [],
+            "tables": [],
             "errors": [],
-            "file_path": file_path
         }
+
+        # Extract model name
+        model_name = self._extract_model_name(sql, file_path)
+        if model_name:
+            result["model_name"] = model_name
+
+        # Extract ref dependencies - both from the SQL and from any CTEs
+        refs = self._extract_refs(sql)
+        if refs:
+            result["refs"] = refs
+
+        # Extract source dependencies
+        sources = self._extract_sources(sql)
+        if sources:
+            result["sources"] = sources
         
-        # Skip non-SQL files like YML or MD
-        if not self._looks_like_sql(sql_code):
+        # Also extract CTE dependencies via regex
+        cte_deps = self._extract_cte_dependencies(sql)
+        if cte_deps:
+            # Add any missing refs
+            for ref in cte_deps.get("refs", []):
+                if ref not in result["refs"]:
+                    result["refs"].append(ref)
+                
+            # Add any missing sources
+            for source in cte_deps.get("sources", []):
+                if source not in result["sources"]:
+                    result["sources"].append(source)
+                
+        # If extract_only is true (e.g., for macro files), return regex results
+        if extract_only:
             return result
+        
+        # If it's identified as macro-only by the logic, return regex results
+        if self._is_macro_only_file(sql):
+            result["errors"].append("Macro-only file identified, returning regex-based dependencies.")
+            return result
+
+        # If there's no SQL content detected, return regex results
+        if not self._looks_like_sql(sql):
+            result["errors"].append("Input doesn't appear to be SQL code, returning regex-based dependencies.")
+            return result
+
+        # Proceed with parsing only if it looks like SQL and is not macro-only
+        try:
+            ast, errors = self.parse_sql(sql, file_path, dialect_hint)
             
-        # Extract DBT refs and sources directly from the Jinja syntax
-        refs = self._extract_refs(sql_code)
-        sources = self._extract_sources(sql_code)
-        
-        # Combine refs and sources as source tables
-        source_tables = refs + sources
-        
-        # Try to extract target table from model name or file path
-        target_table = self._extract_model_name(sql_code, file_path)
-        if target_table:
-            logger.info(f"Extracted target table from DBT model: {target_table}")
-        
-        # Add extracted dependencies to result
-        result["source_tables"] = source_tables
-        result["target_table"] = target_table
-        
-        # Try to parse the SQL code with SQLGlot for additional dependencies
-        cleaned_sql = self._preprocess_sql(sql_code)
-        if cleaned_sql:
-            ast, errors = self.parse_sql(cleaned_sql)
             if errors:
+                # Append parsing errors but don't overwrite regex results unless parsing was successful
                 result["errors"].extend(errors)
             
             if ast:
-                # Extract tables from parsed SQL
-                parsed_target, parsed_sources = self._extract_tables_from_ast(ast)
-                
-                # If we couldn't extract the target table earlier, use the parsed one
-                if not result["target_table"] and parsed_target:
-                    result["target_table"] = parsed_target
-                    logger.info(f"Using parsed target table: {parsed_target}")
-                
-                # Add any additional source tables found in the SQL
-                for src in parsed_sources:
-                    if src not in result["source_tables"]:
-                        result["source_tables"].append(src)
-        
+                # If parsing succeeded, use AST-based table extraction
+                # This might be more accurate than simple regex
+                tables = self._extract_tables_from_ast(ast)
+                if tables:
+                    result["tables"] = tables
+            else:
+                # If parsing failed, rely on simple regex extraction for tables
+                result["errors"].append("Parsing failed, relying on regex for table extraction.")
+                tables_from_regex = self._extract_table_refs_from_text(sql) 
+                result["tables"] = tables_from_regex
+            
+        except Exception as e:
+            result["errors"].append(f"Error during AST-based dependency extraction: {str(e)}")
+            # Fallback to regex tables if AST extraction fails
+            if not result.get("tables"):
+                 tables_from_regex = self._extract_table_refs_from_text(sql)
+                 result["tables"] = tables_from_regex
+
         return result
     
-    def _extract_refs(self, sql_code: str) -> List[str]:
+    def _extract_refs(self, sql_code: str) -> List[Dict[str, str]]:
         """
         Extract DBT ref() dependencies
         
@@ -220,7 +491,7 @@ class DBTDialect(BaseSQLDialect):
             sql_code: SQL code containing DBT refs
             
         Returns:
-            List of table names referenced with ref()
+            List of dictionaries with "model" and optionally "project" keys
         """
         refs = []
         
@@ -233,8 +504,10 @@ class DBTDialect(BaseSQLDialect):
         matches_no_quotes = re.findall(ref_pattern_no_quotes, sql_code)
         
         # Combine both results
-        refs.extend(matches)
-        refs.extend(matches_no_quotes)
+        for ref in matches:
+            refs.append({"model": ref})
+        for ref in matches_no_quotes:
+            refs.append({"model": ref})
         
         # Log what we found to help with debugging
         if refs:
@@ -242,7 +515,7 @@ class DBTDialect(BaseSQLDialect):
         
         return refs
     
-    def _extract_sources(self, sql_code: str) -> List[str]:
+    def _extract_sources(self, sql_code: str) -> List[Dict[str, str]]:
         """
         Extract DBT source() dependencies
         
@@ -250,7 +523,7 @@ class DBTDialect(BaseSQLDialect):
             sql_code: SQL code containing DBT sources
             
         Returns:
-            List of table names referenced with source()
+            List of dictionaries with "source" and "table" keys
         """
         sources = []
         
@@ -260,7 +533,7 @@ class DBTDialect(BaseSQLDialect):
         
         # Format as schema.table
         for schema, table in matches:
-            sources.append(f"{schema}.{table}")
+            sources.append({"source": schema, "table": table})
         
         # Log what we found to help with debugging
         if sources:
@@ -299,35 +572,36 @@ class DBTDialect(BaseSQLDialect):
         
         return None
     
-    def _extract_tables_from_ast(self, ast: Any) -> Tuple[Optional[str], List[str]]:
+    def _extract_tables_from_ast(self, ast: Any) -> List[str]:
         """
-        Extract target and source tables from a parsed SQL AST
+        Extract tables from a parsed SQL AST
         
         Args:
             ast: SQLGlot AST
             
         Returns:
-            Tuple of (target_table, source_tables)
+            List of table names
         """
-        target_table = None
-        source_tables = set()
+        tables = set()
         
-        # Extract target table from CREATE or INSERT statements
+        # Extract tables from CREATE or INSERT statements
         if isinstance(ast, Create):
             table_ref = ast.find(Table)
             if table_ref:
-                target_table = self._extract_table_name(table_ref)
+                table_name = self._extract_table_name(table_ref)
+                if table_name:
+                    tables.add(table_name)
         
-        # Extract source tables by traversing the AST
+        # Extract tables by traversing the AST
         def extract_tables(node):
             if node is None:
                 return
             
-            # If it's a table reference, add it to source tables
+            # If it's a table reference, add it to the set
             if isinstance(node, Table):
                 table_name = self._extract_table_name(node)
-                if table_name and table_name != target_table:
-                    source_tables.add(table_name)
+                if table_name:
+                    tables.add(table_name)
             
             # Process child nodes
             if hasattr(node, 'args'):
@@ -341,7 +615,7 @@ class DBTDialect(BaseSQLDialect):
         # Start extraction
         extract_tables(ast)
         
-        return target_table, list(source_tables)
+        return list(tables)
     
     def _extract_table_name(self, table_node: Table) -> Optional[str]:
         """
@@ -354,6 +628,10 @@ class DBTDialect(BaseSQLDialect):
             Table name as string
         """
         try:
+            # If table_node is a string (which might happen after preprocessing)
+            if isinstance(table_node, str):
+                return table_node
+            
             # Extract from direct attributes
             if hasattr(table_node, 'name'):
                 table_name = table_node.name
@@ -403,108 +681,404 @@ class DBTDialect(BaseSQLDialect):
         
         # Skip non-SQL files like YML or MD
         if not self._looks_like_sql(sql_code):
+            result["errors"].append("Input doesn't appear to be SQL code")
             return result
         
-        # Extract table-level dependencies
-        deps = self.extract_dependencies(sql_code, file_path)
-        result["target_table"] = deps["target_table"]
-        result["source_tables"] = deps["source_tables"]
-        result["errors"] = deps["errors"]
-        
-        # Try to preprocess and parse the SQL
-        cleaned_sql = self._preprocess_sql(sql_code)
-        if not cleaned_sql:
-            return result
-            
-        ast, errors = self.parse_sql(cleaned_sql)
-        if errors:
-            result["errors"].extend(errors)
-        
-        if not ast:
-            return result
-        
-        # Extract column mappings
+        # Extract model name from file path to use as target table
+        if file_path:
+            model_name = self._extract_model_name(sql_code, file_path)
+            if model_name:
+                result["target_table"] = model_name
+
+        # Try to extract the SQL AST for column-level lineage
         try:
-            # Find the main SELECT statement
-            select_node = None
-            if isinstance(ast, Create) and hasattr(ast, 'args') and 'expression' in ast.args:
-                select_node = ast.args['expression']
-            elif isinstance(ast, Select):
-                select_node = ast
+            ast, errors = self.parse_sql(sql_code, file_path)
+            if errors:
+                result["errors"].extend(errors)
             
-            if select_node and hasattr(select_node, 'args') and 'expressions' in select_node.args:
-                column_mappings = {}
+            if ast:
+                # If the AST was parsed, extract source tables and relationships
+                from sqlglot.expressions import Table, Select
                 
-                # Process each column expression
-                for expr in select_node.args['expressions']:
-                    # Get target column name
-                    target_column = None
-                    if hasattr(expr, 'alias'):
-                        target_column = expr.alias
-                    elif hasattr(expr, 'args') and 'alias' in expr.args:
-                        target_column = expr.args['alias']
-                    elif isinstance(expr, Column):
-                        if hasattr(expr, 'name'):
-                            target_column = expr.name
-                        elif hasattr(expr, 'args') and 'this' in expr.args:
-                            target_column = expr.args['this']
-                    
-                    if not target_column:
-                        continue
-                    
-                    # Find source columns
-                    source_columns = []
-                    self._find_source_columns(expr, source_columns)
-                    
-                    if source_columns:
-                        column_mappings[target_column] = source_columns
+                # Use SQLGlotLineageExtractor for consistent extraction
+                from tools.sql_tools.lineage.sqlglot_lineage import SQLGlotLineageExtractor
+                lineage_extractor = SQLGlotLineageExtractor()
+                table_lineage = lineage_extractor.extract_table_lineage(ast, file_path)
                 
-                result["column_level_lineage"] = column_mappings
+                # Add source tables from the table lineage
+                if table_lineage.get("source_tables"):
+                    result["source_tables"] = table_lineage["source_tables"]
+                
+                # If we didn't get a target table from the model name, try to infer it
+                if not result["target_table"] and table_lineage.get("target_table"):
+                    result["target_table"] = table_lineage["target_table"]
+                
+                # If we still don't have a target table, try to infer it from the file name
+                if not result["target_table"] and file_path:
+                    # Extract the filename without extension
+                    import os
+                    base_name = os.path.basename(file_path)
+                    if base_name.endswith('.sql'):
+                        base_name = base_name[:-4]
+                    result["target_table"] = base_name
+                
+                # Extract column-level lineage if possible
+                column_lineage = lineage_extractor.extract_column_lineage(ast, file_path)
+                if column_lineage:
+                    result["column_level_lineage"] = column_lineage
+            else:
+                # Fallback to dependency extraction for source tables
+                deps = self.extract_dependencies(sql_code, file_path)
+                
+                # Add sources and refs from dependencies
+                source_tables = []
+                
+                # Add sources (e.g. source('raw', 'customers') -> raw.customers)
+                for source in deps.get("sources", []):
+                    source_tables.append({
+                        "name": source.get("table"),
+                        "schema": source.get("source"),
+                        "source_type": "dbt_source"
+                    })
+                
+                # Add refs (e.g. ref('stg_customers') -> stg_customers)
+                for ref in deps.get("refs", []):
+                    source_tables.append({
+                        "name": ref.get("model"),
+                        "source_type": "dbt_ref"
+                    })
+                
+                # Add any tables found through regex/parsing
+                for table in deps.get("tables", []):
+                    if isinstance(table, str):
+                        parts = table.split(".")
+                        if len(parts) == 1:
+                            source_tables.append({
+                                "name": parts[0],
+                                "schema": None
+                            })
+                        elif len(parts) >= 2:
+                            source_tables.append({
+                                "name": parts[-1],
+                                "schema": parts[-2]
+                            })
+                
+                result["source_tables"] = source_tables
+        
         except Exception as e:
-            result["errors"].append(f"Error extracting column lineage: {str(e)}")
+            result["errors"].append(f"Error extracting lineage: {str(e)}")
+            logger.error(f"Error in extract_lineage: {str(e)}", exc_info=True)
         
         return result
     
-    def _find_source_columns(self, node: Any, columns: List[Dict[str, str]]) -> None:
-        """
-        Recursively find source columns in an expression
+    def _extract_yaml_dependencies(self, content, file_path):
+        """Extract dependencies from a DBT YAML/YML file.
         
         Args:
-            node: SQLGlot AST node
-            columns: List to populate with source columns
+            content: A string with the file content.
+            file_path: The path to the file.
+            
+        Returns:
+            A dictionary with extracted dependencies.
         """
-        if node is None:
-            return
+        result = {
+            "model_name": None,
+            "refs": [],
+            "sources": [],
+            "tables": [],
+            "errors": [],
+        }
         
-        # If it's a column reference, add it to the list
-        if isinstance(node, Column):
-            column_name = None
-            table_name = None
+        try:
+            # Parse the YAML content
+            yaml_data = yaml.safe_load(content)
+            if not yaml_data:
+                result["errors"].append("Empty or invalid YAML file")
+                return result
+                
+            # Extract sources
+            if 'sources' in yaml_data:
+                for source in yaml_data['sources']:
+                    source_name = source.get('name')
+                    if not source_name:
+                        continue
+                        
+                    tables = source.get('tables', [])
+                    for table in tables:
+                        table_name = table.get('name')
+                        if table_name:
+                            result["sources"].append({
+                                "source": source_name,
+                                "table": table_name
+                            })
             
-            # Extract column name
-            if hasattr(node, 'name'):
-                column_name = node.name
-            elif hasattr(node, 'args') and 'this' in node.args:
-                column_name = node.args['this']
+            # Extract models
+            if 'models' in yaml_data:
+                for model in yaml_data['models']:
+                    model_name = model.get('name')
+                    if model_name:
+                        # If this is the first model, use it as the file's model name
+                        if not result["model_name"]:
+                            result["model_name"] = model_name
+                            
+                    # Check for patches with depends_on
+                    if 'patches' in model:
+                        for patch in model['patches']:
+                            depends_on = patch.get('depends_on', {})
+                            refs = depends_on.get('refs', [])
+                            for ref in refs:
+                                if isinstance(ref, str):
+                                    result["refs"].append({"model": ref})
+                                elif isinstance(ref, list) and len(ref) >= 1:
+                                    if len(ref) == 1:
+                                        result["refs"].append({"model": ref[0]})
+                                    else:
+                                        result["refs"].append({
+                                            "project": ref[0],
+                                            "model": ref[1]
+                                        })
+                    
+                    # Check for depends_on in the model itself
+                    depends_on = model.get('depends_on', {})
+                    if depends_on:
+                        refs = depends_on.get('refs', [])
+                        for ref in refs:
+                            if isinstance(ref, str):
+                                result["refs"].append({"model": ref})
+                            elif isinstance(ref, list) and len(ref) >= 1:
+                                if len(ref) == 1:
+                                    result["refs"].append({"model": ref[0]})
+                                else:
+                                    result["refs"].append({
+                                        "project": ref[0],
+                                        "model": ref[1]
+                                    }) 
+        except Exception as e:
+            result["errors"].append(f"Error parsing YAML: {str(e)}")
             
-            # Extract table name
-            if hasattr(node, 'table'):
-                table_name = node.table
-            elif hasattr(node, 'args') and 'table' in node.args:
-                table_name = node.args['table']
-            
-            # Add to source columns if we found a name
-            if column_name:
-                columns.append({
-                    "table": table_name,
-                    "column": column_name
-                })
+        return result 
+
+    def _is_macro_only_file(self, sql):
+        """
+        Check if a file contains only macro definitions
         
-        # Process child nodes
-        if hasattr(node, 'args'):
-            for key, value in node.args.items():
-                if isinstance(value, list):
-                    for item in value:
-                        self._find_source_columns(item, columns)
+        Args:
+            sql: SQL code to check
+            
+        Returns:
+            True if the file contains only macro definitions, False otherwise
+        """
+        # Remove comments to get a cleaner view
+        clean_sql = re.sub(r"--.*?$", "", sql, flags=re.MULTILINE)
+        clean_sql = re.sub(r"/\*.*?\*/", "", clean_sql, flags=re.DOTALL)
+        clean_sql = re.sub(r"{#.*?#}", "", clean_sql, flags=re.DOTALL)
+        clean_sql = re.sub(r'\x1b\[[0-9;]*m', '', clean_sql)  # Remove ANSI escape sequences
+        clean_sql = clean_sql.strip()
+        
+        if not clean_sql:
+            return False # Empty after cleaning
+
+        # Count macro definitions
+        macro_defs = re.findall(r"{%\s*macro\s+[^%]*%}", clean_sql)
+        
+        # Check if the file is mostly macro definitions
+        if macro_defs:
+            # Remove macro code blocks completely to see what's left
+            non_macro_content = re.sub(r"{%\s*macro\s+.*?{%\s*endmacro\s*%}", "", clean_sql, flags=re.DOTALL)
+            # Remove any remaining jinja comments/statements
+            non_macro_content = re.sub(r"({%.*?%}|{{.*?}}|{#.*?#})", "", non_macro_content, flags=re.DOTALL)
+            non_macro_content = non_macro_content.strip()
+            
+            # If there's very little non-macro content (e.g., just whitespace or comments), it's a macro-only file
+            # Also explicitly check if it only contains macro definitions
+            if len(non_macro_content) < 20:
+                 # Check if the remaining content looks like SQL fragments
+                if not re.search(r'\b(SELECT|CREATE|INSERT|UPDATE|DELETE|WITH|ALTER|MERGE)\b', non_macro_content, re.IGNORECASE):
+                    return True
+                
+        # Check if it *only* contains Jinja (macros, statements, expressions)
+        jinja_only_pattern = r"^(\s*({%.*?%}|{{.*?}}|{#.*?#})\s*)+$"
+        if re.match(jinja_only_pattern, clean_sql, re.DOTALL):
+            return True
+        
+        return False
+
+    def _reconstruct_dbt_sql(self, sql_code):
+        """
+        Reconstruct SQL from DBT's CTE pattern. Handles common DBT structures.
+        Attempts to find CTE definitions and a final SELECT statement.
+
+        Args:
+            sql_code: Preprocessed SQL code to reconstruct.
+
+        Returns:
+            Tuple: (Reconstructed SQL string or None, list of errors encountered)
+        """
+        errors = []
+        logger.debug("Starting CTE reconstruction.")
+        try:
+            # --- Find Final SELECT --- 
+            final_select_start_index = -1
+            select_matches = list(re.finditer(r'(?i)\bSELECT\b', sql_code))
+            for match in reversed(select_matches):
+                idx = match.start()
+                open_paren_count = sql_code[:idx].count('(')
+                close_paren_count = sql_code[:idx].count(')')
+                if open_paren_count <= close_paren_count:
+                    final_select_start_index = idx
+                    break
+            logger.debug(f"Final SELECT index identified at: {final_select_start_index}")
+
+            # --- Handle different structures based on final SELECT --- 
+            if final_select_start_index == -1:
+                # Case 1: No clear final SELECT. Assume CTE-only or single SELECT.
+                is_cte_like = re.search(r'(?i)\bAS\s*\(', sql_code)
+                is_select_like = re.match(r'(?i)^\s*SELECT\b', sql_code.strip())
+
+                if is_cte_like:
+                    logger.debug("No final SELECT found, attempting CTE-only reconstruction with dummy SELECT.")
+                    errors.append("Found CTE definitions but no clear final SELECT. Attempting parse with dummy SELECT.")
+                    cte_part_cleaned = sql_code.strip()
+                    if not cte_part_cleaned.lower().startswith('with'):
+                        cte_part_cleaned = "WITH " + cte_part_cleaned
+                    # Clean commas: ensure comma only between `) AS (` and `cte_name AS (`
+                    cte_part_cleaned = re.sub(r'\)\s*,\s*(?=[a-zA-Z_][a-zA-Z0-9_]*\s+AS\s*\()', r'),\n', cte_part_cleaned)
+                    cte_part_cleaned = cte_part_cleaned.rstrip().rstrip(',') # Remove trailing comma for sure
+                    
+                    # Find first CTE name for dummy select
+                    first_cte_name_match = re.search(r'(?i)\b(?:WITH|,)\s*([a-zA-Z_][a-zA-Z0-9_]*)\s+AS\s*\(', cte_part_cleaned)
+                    if first_cte_name_match:
+                        cte_name = first_cte_name_match.group(1)
+                        if cte_name:
+                            dummy_select = f"\nSELECT * FROM {cte_name}" # No semicolon needed for sqlglot usually
+                            reconstructed_sql = cte_part_cleaned + dummy_select
+                            logger.debug(f"Reconstructed CTE-only SQL (len {len(reconstructed_sql)}):\n{reconstructed_sql[:500]}...")
+                            return reconstructed_sql, errors
+                        else:
+                             errors.append("Could not extract first CTE name reliably for dummy SELECT.")
+                             return None, errors
+                    else:
+                        errors.append("Could not find any CTE name pattern for dummy SELECT.")
+                        return None, errors
+                elif is_select_like:
+                     logger.debug("No final SELECT found, but looks like a SELECT statement. Returning as is.")
+                     return sql_code.strip(), errors
                 else:
-                    self._find_source_columns(value, columns) 
+                    errors.append("Could not identify final SELECT or CTE structure.")
+                    logger.debug("Failed to identify structure as CTE-like or SELECT-like.")
+                    return None, errors
+            else:
+                # Case 2: Found a potential final SELECT.
+                logger.debug("Potential final SELECT found. Splitting CTE and SELECT parts.")
+                final_select_sql = sql_code[final_select_start_index:].strip()
+                cte_part = sql_code[:final_select_start_index].strip()
+                
+                # --- Clean and Assemble CTE Part --- 
+                reconstructed_cte_part = ""
+                if cte_part:
+                    if re.search(r'(?i)\bAS\s*\(', cte_part):
+                        logger.debug("CTE part identified. Cleaning and adding WITH if needed.")
+                        reconstructed_cte_part = cte_part
+                        if not reconstructed_cte_part.lower().startswith('with'):
+                            reconstructed_cte_part = "WITH " + reconstructed_cte_part
+                        
+                        # Correct comma separation
+                        reconstructed_cte_part = re.sub(r'\)\s*,\s*(?=[a-zA-Z_][a-zA-Z0-9_]*\s+AS\s*\()', r'),\n', reconstructed_cte_part)
+                        # Remove any comma potentially lingering right before the final select part
+                        reconstructed_cte_part = reconstructed_cte_part.rstrip().rstrip(',') 
+                    else:
+                        errors.append(f"Ignoring potential non-CTE block before final SELECT: {cte_part[:100]}...")
+                        logger.debug("Block before final SELECT doesn't look like CTEs, ignoring.")
+
+                # --- Assemble Final SQL --- 
+                if reconstructed_cte_part:
+                    reconstructed_sql = reconstructed_cte_part.strip() + "\n\n" + final_select_sql # Ensure good separation
+                else:
+                    reconstructed_sql = final_select_sql
+
+                # Final cleanup
+                reconstructed_sql = re.sub(r';\s*;+', ';', reconstructed_sql).strip().rstrip(';') # Remove multiple/trailing semicolons
+                
+                logger.debug(f"Reconstructed SQL with CTEs and final SELECT (len {len(reconstructed_sql)}):\n{reconstructed_sql[:500]}...")
+                # Basic validation
+                if not re.search(r'(?i)\b(SELECT|WITH|CREATE|INSERT|UPDATE|DELETE|MERGE)\b', reconstructed_sql):
+                    errors.append(f"Reconstructed SQL lacks core SQL command: {reconstructed_sql[:100]}...")
+                    logger.warning("Reconstructed SQL failed basic validation (no command found).")
+                    return None, errors
+
+                return reconstructed_sql, errors
+
+        except Exception as e:
+            errors.append(f"Critical error during CTE reconstruction: {str(e)}")
+            logger.error(f"CTE Reconstruction failed critically: {e}", exc_info=True)
+            return None, errors
+        
+    def _extract_table_refs_from_text(self, sql_code):
+        """
+        Extract table references from SQL text without parsing
+        
+        Args:
+            sql_code: SQL code to extract table references from
+            
+        Returns:
+            List of table references found
+        """
+        tables = []
+        
+        # Look for table names after FROM
+        from_pattern = r'(?i)from\s+([a-zA-Z0-9_\.]+)'
+        from_matches = re.findall(from_pattern, sql_code)
+        tables.extend(from_matches)
+        
+        # Look for table names after JOIN
+        join_pattern = r'(?i)join\s+([a-zA-Z0-9_\.]+)'
+        join_matches = re.findall(join_pattern, sql_code)
+        tables.extend(join_matches)
+        
+        # Look for DBT refs
+        ref_pattern = r'__dbt_ref_([a-zA-Z0-9_]+)'
+        ref_matches = re.findall(ref_pattern, sql_code)
+        tables.extend([f"__dbt_ref_{m}" for m in ref_matches])
+        
+        # Look for DBT sources
+        source_pattern = r'__dbt_source_([a-zA-Z0-9_]+)_([a-zA-Z0-9_]+)'
+        source_matches = re.findall(source_pattern, sql_code)
+        tables.extend([f"__dbt_source_{s[0]}_{s[1]}" for s in source_matches])
+        
+        return tables
+
+    def _extract_cte_dependencies(self, sql_code):
+        """
+        Extract dependencies from CTEs in a DBT SQL file
+        
+        Args:
+            sql_code: SQL code containing CTEs
+            
+        Returns:
+            Dictionary with refs and sources found in CTEs
+        """
+        result = {
+            "refs": [],
+            "sources": [],
+        }
+        
+        # Extract dependencies from CTE definitions
+        cte_pattern = r'(?i)(\w+)\s+as\s*\(\s*(.*?)\s*\)'
+        ctes = re.findall(cte_pattern, sql_code, re.DOTALL)
+        
+        for _, cte_sql in ctes:
+            # Extract refs from CTE SQL
+            refs = self._extract_refs(cte_sql)
+            if refs:
+                for ref in refs:
+                    if ref not in result["refs"]:
+                        result["refs"].append(ref)
+        
+            # Extract sources from CTE SQL
+            sources = self._extract_sources(cte_sql)
+            if sources:
+                for source in sources:
+                    if source not in result["sources"]:
+                        result["sources"].append(source)
+        
+        return result
