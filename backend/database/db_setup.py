@@ -249,6 +249,7 @@ def setup_lineage_db():
             root_table_id TEXT NOT NULL,
             lineage_json JSON NOT NULL,
             tech_stack TEXT NOT NULL,
+            github_path TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (root_table_id) REFERENCES tables(table_id)
         )

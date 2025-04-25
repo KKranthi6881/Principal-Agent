@@ -61,6 +61,10 @@ export const LineageGraph = ({ data, width, height }) => {
   const [isMouseDown, setIsMouseDown] = useState(false);
   const [lastMousePosition, setLastMousePosition] = useState({ x: 0, y: 0 });
   
+  // Add fullscreen state
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [previousState, setPreviousState] = useState(null);
+  
   // Add state for slider values
   const [horizontalSliderValue, setHorizontalSliderValue] = useState(0);
   const [verticalSliderValue, setVerticalSliderValue] = useState(0);
@@ -944,12 +948,104 @@ export const LineageGraph = ({ data, width, height }) => {
   
   // Calculate viewport size
   const calculateViewportSize = () => {
-    if (!containerRef.current) return { width: 1000, height: 800 };
-    
+    const container = containerRef.current;
+    if (!container) {
+      // Return reasonable defaults if container not available
+      return { width: width || 800, height: height || 400 };
+    }
     return {
-      width: containerRef.current.clientWidth,
-      height: containerRef.current.clientHeight
+      width: container.clientWidth,
+      height: container.clientHeight
     };
+  };
+  
+  // Add graph panning handler
+  const handleGraphPanning = (e) => {
+    // Only handle left mouse button and ignore clicks on buttons/controls
+    if (e.button !== 0 || e.target.closest('button') || e.target.closest('.chakra-slider-thumb')) {
+      return;
+    }
+    
+    e.preventDefault();
+    e.stopPropagation();
+    
+    setIsMouseDown(true);
+    setLastMousePosition({
+      x: e.clientX,
+      y: e.clientY
+    });
+    
+    const handleMouseMove = (moveEvent) => {
+      if (!isMouseDown) return;
+      moveEvent.preventDefault();
+      
+      const dx = moveEvent.clientX - lastMousePosition.x;
+      const dy = moveEvent.clientY - lastMousePosition.y;
+      
+      setOffset(prev => ({
+        x: prev.x + dx,
+        y: prev.y + dy
+      }));
+      
+      setLastMousePosition({
+        x: moveEvent.clientX,
+        y: moveEvent.clientY
+      });
+    };
+    
+    const handleMouseUp = () => {
+      setIsMouseDown(false);
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+    };
+    
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', handleMouseUp);
+  };
+  
+  // Toggle fullscreen mode using modal
+  const toggleFullscreen = () => {
+    if (!isFullscreen) {
+      // Save current state before going fullscreen
+      const currentState = {
+        scale,
+        offset: { ...offset },
+        expandedModels: { ...expandedModels }
+      };
+      setPreviousState(currentState);
+      console.log('Entering fullscreen mode, saving state:', currentState);
+      
+      // First set fullscreen flag
+      setIsFullscreen(true);
+      
+      // Then fit content with a delay to ensure modal is rendered
+      setTimeout(() => {
+        try {
+          fitToView();
+        } catch (error) {
+          console.error('Error fitting to view in fullscreen:', error);
+        }
+      }, 500);
+    } else {
+      // Exit fullscreen mode
+      console.log('Exiting fullscreen mode');
+      setIsFullscreen(false);
+      
+      // Restore previous state with a delay
+      if (previousState) {
+        setTimeout(() => {
+          try {
+            setScale(previousState.scale);
+            setOffset(previousState.offset);
+          } catch (error) {
+            console.error('Error restoring state after fullscreen:', error);
+            // Fallback to defaults
+            setScale(1);
+            setOffset({ x: 0, y: 0 });
+          }
+        }, 300);
+      }
+    }
   };
   
   // Fit view to show all models
@@ -986,710 +1082,80 @@ export const LineageGraph = ({ data, width, height }) => {
     // Ensure a minimum 60% zoom level for readability
     newScale = Math.max(newScale, 0.6);
     
-    // Calculate center point of models
-    const centerX = (minX + maxX) / 2;
-    const centerY = (minY + maxY) / 2;
-    
-    // Calculate offset to center the models
-    const newOffsetX = (containerWidth / 2) - (centerX * newScale);
-    const newOffsetY = (containerHeight / 2) - (centerY * newScale);
-    
-    // Update state
-    setScale(newScale);
-    setOffset({ x: newOffsetX, y: newOffsetY });
+
+// Handle scroll wheel for zooming
+const handleZoom = (e) => {
+  e.preventDefault();
+  e.stopPropagation();
+  
+  // Calculate zoom delta based on wheel direction
+  const delta = e.deltaY < 0 ? 0.1 : -0.1;
+  
+  // Calculate new scale with min/max limits
+  const newScale = Math.max(0.1, Math.min(2, scale + delta * scale));
+  
+  // Get container and pointer positions
+  const container = containerRef.current;
+  if (!container) return;
+  
+  const rect = container.getBoundingClientRect();
+  const x = e.clientX - rect.left;
+  const y = e.clientY - rect.top;
+  
+  // Calculate new offset to zoom centered on mouse position
+  const newOffset = {
+    x: offset.x - (x - offset.x) * (delta),
+    y: offset.y - (y - offset.y) * (delta)
   };
   
-  // Auto fit on mount and when layout changes
-  useEffect(() => {
-    // Wait for layout to be calculated
-    if (Object.keys(layout).length === 0) return;
-    
-    // Fit view with a small delay to ensure rendering is complete
-    const timer = setTimeout(() => {
-      fitToView();
-    }, 300);
-    
-    return () => clearTimeout(timer);
-  }, [layout, layoutMode]);
+  // Update state
+  setScale(newScale);
+  setOffset(newOffset);
+};
+
+// Add new panning handler for the entire graph
+const handleGraphPanning = (e) => {
+  // Only handle left button clicks and ignore clicks on buttons
+  if (e.button !== 0 || e.target.closest('button')) return;
   
-  // Fit view on first mount and when lineage panel is opened
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      fitToView();
-    }, 500);
-    
-    return () => clearTimeout(timer);
-  }, []);
+  e.preventDefault();
+  e.stopPropagation();
   
-  // Add a function to expand and focus on a specific model
-  const expandAndFocusModel = (modelId) => {
-    // Toggle the expanded state
-    setExpandedModels(prev => ({
-      ...prev,
-      [modelId]: !prev[modelId]
+  setIsMouseDown(true);
+  setLastMousePosition({
+    x: e.clientX,
+    y: e.clientY
+  });
+  
+  const handleMouseMove = (moveEvent) => {
+    if (!isMouseDown) return;
+    moveEvent.preventDefault();
+    
+    const dx = moveEvent.clientX - lastMousePosition.x;
+    const dy = moveEvent.clientY - lastMousePosition.y;
+    
+    setOffset(prev => ({
+      x: prev.x + dx,
+      y: prev.y + dy
     }));
     
-    // Give time for the layout to update before focusing
-    setTimeout(() => {
-      // Only focus if we're expanding the model
-      if (!expandedModels[modelId]) {
-        focusOnModel(modelId);
-      }
-    }, 300);
-  };
-  
-  // Add a function to focus on a specific model without changing zoom level
-  const focusOnModel = (modelId) => {
-    const modelLayout = layout[modelId];
-    if (!modelLayout) return;
-    
-    const { width: containerWidth, height: containerHeight } = calculateViewportSize();
-    
-    // Calculate center point of the model
-    const modelCenterX = modelLayout.x + modelLayout.width / 2;
-    const modelCenterY = modelLayout.y + modelLayout.height / 2;
-    
-    // Calculate new offset to center the model (keep current scale)
-    const newOffsetX = (containerWidth / 2) - (modelCenterX * scale);
-    const newOffsetY = (containerHeight / 2) - (modelCenterY * scale);
-    
-    // Update offset without changing scale
-    setOffset({ x: newOffsetX, y: newOffsetY });
-  };
-  
-  // Reset layout
-  const resetLayout = () => {
-    // Set zoom level back to 1
-    setScale(1);
-    
-    // Calculate the viewport size
-    const { width, height } = calculateViewportSize();
-    
-    // Center the layout at the origin
-    setOffset({
-      x: width / 2,
-      y: height / 2
-    });
-  };
-  
-  // Update handleDragStart to account for panning mode
-  const handleDragStart = (modelId, e) => {
-    e.stopPropagation();
-
-    // If in panning mode, don't allow model dragging
-    if (isPanningMode) return;
-    
-    setIsDragging(true);
-    setDragModelId(modelId);
-    
-    // Use let instead of const to allow reassignment
-    let initialX = e.clientX;
-    let initialY = e.clientY;
-    
-    const handleMouseMove = (moveEvent) => {
-      const dx = (moveEvent.clientX - initialX) / scale;
-      const dy = (moveEvent.clientY - initialY) / scale;
-      
-      setLayout(prev => ({
-        ...prev,
-        [modelId]: {
-          ...prev[modelId],
-          x: prev[modelId].x + dx,
-          y: prev[modelId].y + dy
-        }
-      }));
-      
-      // Update initial positions for next movement
-      initialX = moveEvent.clientX;
-      initialY = moveEvent.clientY;
-    };
-    
-    const handleMouseUp = () => {
-      setIsDragging(false);
-      setDragModelId(null);
-      
-      document.removeEventListener('mousemove', handleMouseMove);
-      document.removeEventListener('mouseup', handleMouseUp);
-    };
-    
-    document.addEventListener('mousemove', handleMouseMove);
-    document.addEventListener('mouseup', handleMouseUp);
-  };
-  
-  // Add new panning handler for the entire graph
-  const handleGraphPanning = (e) => {
-    e.preventDefault();
-    setIsMouseDown(true);
     setLastMousePosition({
-      x: e.clientX,
-      y: e.clientY
+      x: moveEvent.clientX,
+      y: moveEvent.clientY
     });
-    
-    const handleMouseMove = (moveEvent) => {
-      if (!isMouseDown) return;
-      
-      const dx = moveEvent.clientX - lastMousePosition.x;
-      const dy = moveEvent.clientY - lastMousePosition.y;
-      
-      setOffset(prev => ({
-        x: prev.x + dx,
-        y: prev.y + dy
-      }));
-      
-      setLastMousePosition({
-        x: moveEvent.clientX,
-        y: moveEvent.clientY
-      });
-    };
-    
-    const handleMouseUp = () => {
-      setIsMouseDown(false);
-      
-      document.removeEventListener('mousemove', handleMouseMove);
-      document.removeEventListener('mouseup', handleMouseUp);
-    };
-    
-    document.addEventListener('mousemove', handleMouseMove);
-    document.addEventListener('mouseup', handleMouseUp);
   };
   
-  // Add a function to highlight connected columns
-  const getConnectedColumns = (columnId) => {
-    if (!columnId || !graphData.column_lineage) {
-      return { 
-        connected: new Set(),
-        sources: new Set(),
-        targets: new Set()
-      };
-    }
+  const handleMouseUp = () => {
+    setIsMouseDown(false);
     
-    const connected = new Set();
-    const sources = new Set();
-    const targets = new Set();
-    
-    graphData.column_lineage.forEach(link => {
-      if (link.source === columnId) {
-        connected.add(link.target);
-        targets.add(link.target);
-      }
-      if (link.target === columnId) {
-        connected.add(link.source);
-        sources.add(link.source);
-      }
-    });
-    
-    return { connected, sources, targets };
+    document.removeEventListener('mousemove', handleMouseMove);
+    document.removeEventListener('mouseup', handleMouseUp);
   };
+  
+  document.addEventListener('mousemove', handleMouseMove);
+  document.addEventListener('mouseup', handleMouseUp);
+};
 
-  // Calculate the connected columns when activeColumnLink changes
-  const connectedColumnsInfo = useMemo(() => {
-    return getConnectedColumns(activeColumnLink);
-  }, [activeColumnLink, graphData.column_lineage]);
-
-  // Enhance the getColumnRelationshipInfo function to always return useful data
-  const getColumnRelationshipInfo = (columnId) => {
-    if (!columnId || !graphData.column_lineage) {
-      return {
-        relationships: [],
-        hasRelationships: false,
-        message: "No relationship data available"
-      };
-    }
-    
-    const relationships = [];
-    const currentColumn = graphData.columns.find(c => c.id === columnId);
-    const currentModel = currentColumn ? graphData.models.find(m => m.id === currentColumn.modelId) : null;
-    
-    // If no current column/model info, provide appropriate feedback
-    if (!currentColumn || !currentModel) {
-      return {
-        relationships: [],
-        hasRelationships: false,
-        message: "Could not find column information"
-      };
-    }
-    
-    // Count incoming and outgoing relationships
-    let incomingCount = 0;
-    let outgoingCount = 0;
-    
-    graphData.column_lineage.forEach(link => {
-      if (link.source === columnId || link.target === columnId) {
-        const isSource = link.source === columnId;
-        const otherColumnId = isSource ? link.target : link.source;
-        const otherColumn = graphData.columns.find(c => c.id === otherColumnId);
-        
-        if (otherColumn) {
-          const otherModel = graphData.models.find(m => m.id === otherColumn.modelId);
-          if (otherModel) {
-            // Count the relationship direction
-            if (isSource) {
-              outgoingCount++;
-            } else {
-              incomingCount++;
-            }
-            
-            relationships.push({
-              direction: isSource ? 'target' : 'source',
-              columnName: otherColumn.name,
-              modelName: otherModel.name,
-              modelType: otherModel.type || "unknown",
-              columnId: otherColumnId,
-              dataType: otherColumn.dataType || 'unknown',
-              description: otherColumn.description || `No description available for ${otherColumn.name}`
-            });
-          }
-        }
-      }
-    });
-    
-    // Create a helpful message even when no relationships are found
-    let message = null;
-    if (relationships.length === 0) {
-      // Check if the model has any relationships at all
-      const modelHasAnyRelationships = graphData.column_lineage.some(link => {
-        const sourceColumn = graphData.columns.find(c => c.id === link.source);
-        const targetColumn = graphData.columns.find(c => c.id === link.target);
-        return (sourceColumn && sourceColumn.modelId === currentModel.id) || 
-               (targetColumn && targetColumn.modelId === currentModel.id);
-      });
-      
-      if (modelHasAnyRelationships) {
-        message = `No relationships found for this specific column (${currentColumn.name})`;
-      } else {
-        message = `No column relationships defined for this model (${currentModel.name})`;
-      }
-    } else {
-      // Provide information about the relationship count and direction
-      message = `Found ${relationships.length} relationship${relationships.length !== 1 ? 's' : ''}`;
-      if (incomingCount > 0 && outgoingCount > 0) {
-        message += ` (${incomingCount} incoming, ${outgoingCount} outgoing)`;
-      } else if (incomingCount > 0) {
-        message += ` (${incomingCount} incoming)`;
-      } else if (outgoingCount > 0) {
-        message += ` (${outgoingCount} outgoing)`;
-      }
-    }
-    
-    return {
-      relationships,
-      hasRelationships: relationships.length > 0,
-      incomingCount,
-      outgoingCount,
-      currentColumn,
-      currentModel,
-      message
-    };
-  };
-  
-  // Calculate the layout of models based on the data
-  useEffect(() => {
-    console.log("Calculating layout for models:", graphData.models?.length);
-    
-    const calculateLevels = () => {
-      // Skip if no models
-      if (!graphData.models || graphData.models.length === 0) return {};
-      
-      // Create an adjacency list from the edges
-      const adjList = {};
-      graphData.models.forEach(model => {
-        adjList[model.id] = { in: [], out: [] };
-      });
-      
-      graphData.edges.forEach(edge => {
-        if (adjList[edge.source]) adjList[edge.source].out.push(edge.target);
-        if (adjList[edge.target]) adjList[edge.target].in.push(edge.source);
-      });
-      
-      // Find nodes with no incoming edges (sources)
-      const sources = graphData.models
-        .filter(model => adjList[model.id].in.length === 0)
-        .map(model => model.id);
-      
-      // If no sources, pick a random node
-      if (sources.length === 0 && graphData.models.length > 0) {
-        sources.push(graphData.models[0].id);
-      }
-      
-      // BFS traversal to assign levels
-      const levels = {};
-      const visited = new Set();
-      const queue = sources.map(id => ({ id, level: 0 }));
-      
-      while (queue.length > 0) {
-        const { id, level } = queue.shift();
-        
-        if (visited.has(id)) continue;
-        visited.add(id);
-        
-        // Set the level for this node
-        if (!levels[level]) levels[level] = [];
-        levels[level].push(id);
-        
-        // Add outgoing nodes to the queue
-        adjList[id].out.forEach(targetId => {
-          // Check that all dependencies are visited before adding to queue
-          const canAddToQueue = adjList[targetId].in.every(depId => 
-            visited.has(depId) || depId === id
-          );
-          
-          if (canAddToQueue) {
-            queue.push({ id: targetId, level: level + 1 });
-          }
-        });
-      }
-      
-      // Handle any nodes not visited (disconnected)
-      graphData.models.forEach(model => {
-        if (!visited.has(model.id)) {
-          const level = Object.keys(levels).length;
-          if (!levels[level]) levels[level] = [];
-          levels[level].push(model.id);
-        }
-      });
-      
-      return levels;
-    };
-    
-    // Calculate model layout based on levels
-    const calculateModelLayout = (levels) => {
-      // Find the max number of nodes in any level
-      let maxNodesInLevel = 0;
-      Object.values(levels).forEach(nodes => {
-        maxNodesInLevel = Math.max(maxNodesInLevel, nodes.length);
-      });
-      
-      // Determine spacing based on number of models
-      const totalModels = graphData.models.length;
-      
-      // Dynamic spacing based on model count - INCREASED spacing values
-      let baseSpacing;
-      if (totalModels > 12) {
-        baseSpacing = 400; // Increased from 300 to 400
-      } else if (totalModels > 8) {
-        baseSpacing = 500; // Increased from 350 to 500
-      } else if (totalModels > 4) {
-        baseSpacing = 600; // Increased from 450 to 600
-      } else {
-        baseSpacing = 700; // Increased from 500 to 700
-      }
-      
-      // Reduce horizontal spacing if we have many models per level, but increase minimum
-      const horizontalSpacing = maxNodesInLevel > 4 ? Math.max(baseSpacing * 0.8, 350) : baseSpacing;
-      
-      // Calculate the layout for each model
-      const newLayout = {};
-      
-      // Define fixed height for collapsed model boxes - make smaller
-      const collapsedHeight = 60; 
-      
-      // Check if manual layout exists
-      const hasManualPositions = Object.keys(layout).length > 0;
-      
-      Object.entries(levels).forEach(([level, nodeIds]) => {
-        const levelNum = parseInt(level);
-        
-        nodeIds.forEach((nodeId, idx) => {
-          const model = graphData.models.find(m => m.id === nodeId);
-          if (!model) return;
-          
-          // If model already has position in layout and we're maintaining manual positions,
-          // preserve its x/y coordinates
-          if (hasManualPositions && layout[nodeId] && dragModelId !== null) {
-            const existingLayout = layout[nodeId];
-            
-            // Count columns for this model to calculate expanded height
-            const modelColumns = graphData.columns?.filter(col => col.modelId === nodeId) || [];
-            const columnCount = modelColumns.length;
-            
-            // Calculate expanded height based on number of columns with more space
-            const expandedHeight = collapsedHeight + Math.min(Math.max(columnCount * 40, 100), 400);
-            
-            newLayout[nodeId] = {
-              x: existingLayout.x,
-              y: existingLayout.y,
-              width: 280,
-              height: expandedModels[nodeId] ? expandedHeight : collapsedHeight
-            };
-          } else {
-            // Calculate position based on layout mode
-            let x, y;
-            
-            if (layoutMode === 'horizontal') {
-              // In horizontal layout, levels go left to right, nodes are stacked vertically in each level
-              x = levelNum * horizontalSpacing;
-              // Add more vertical spacing for better separation
-              y = idx * (baseSpacing + (maxNodesInLevel > 4 ? 100 : 200));
-            } else {
-              // In vertical layout, levels go top to bottom, nodes are arranged horizontally in each level
-              // Add more horizontal spacing for better separation
-              x = idx * (horizontalSpacing + (maxNodesInLevel > 4 ? 100 : 200));
-              y = levelNum * baseSpacing;
-            }
-            
-            // Count columns for this model to calculate expanded height
-            const modelColumns = graphData.columns?.filter(col => col.modelId === nodeId) || [];
-            const columnCount = modelColumns.length;
-            
-            // Calculate expanded height based on number of columns with more space
-            const expandedHeight = collapsedHeight + Math.min(Math.max(columnCount * 40, 100), 400);
-            
-            newLayout[nodeId] = {
-              x,
-              y,
-              width: 280,
-              height: expandedModels[nodeId] ? expandedHeight : collapsedHeight
-            };
-          }
-        });
-      });
-      
-      // Check for overlaps and resolve them
-      const resolveOverlaps = () => {
-        let hasOverlap = true;
-        const padding = 20; // Minimum space between boxes
-        const iterations = 0;
-        const maxIterations = 5;
-        
-        while (hasOverlap && iterations < maxIterations) {
-          hasOverlap = false;
-          
-          // Compare each pair of models
-          const modelIds = Object.keys(newLayout);
-          for (let i = 0; i < modelIds.length; i++) {
-            const modelA = newLayout[modelIds[i]];
-            
-            for (let j = i + 1; j < modelIds.length; j++) {
-              const modelB = newLayout[modelIds[j]];
-              
-              // Check if they overlap
-              const overlapX = 
-                modelA.x < modelB.x + modelB.width + padding && 
-                modelA.x + modelA.width + padding > modelB.x;
-                
-              const overlapY = 
-                modelA.y < modelB.y + modelB.height + padding && 
-                modelA.y + modelA.height + padding > modelB.y;
-                
-              if (overlapX && overlapY) {
-                hasOverlap = true;
-                
-                // Determine the smallest movement needed to resolve overlap
-                const moveRight = modelB.x + modelB.width + padding - modelA.x;
-                const moveLeft = modelA.x + modelA.width + padding - modelB.x;
-                const moveDown = modelB.y + modelB.height + padding - modelA.y;
-                const moveUp = modelA.y + modelA.height + padding - modelB.y;
-                
-                // Find the smallest required move
-                const minMove = Math.min(moveRight, moveLeft, moveDown, moveUp);
-                
-                // Apply the movement to model B
-                if (minMove === moveRight) {
-                  newLayout[modelIds[i]].x += moveRight;
-                } else if (minMove === moveLeft) {
-                  newLayout[modelIds[j]].x += moveLeft;
-                } else if (minMove === moveDown) {
-                  newLayout[modelIds[i]].y += moveDown;
-                } else if (minMove === moveUp) {
-                  newLayout[modelIds[j]].y += moveUp;
-                }
-              }
-            }
-          }
-        }
-      };
-      
-      // Run the overlap resolution if we have generated a new layout
-      if (!hasManualPositions || dragModelId === null) {
-        resolveOverlaps();
-      }
-      
-      return newLayout;
-    };
-    
-    // Calculate and set the layout
-    try {
-      const levels = calculateLevels();
-      console.log("Calculated levels:", levels);
-      const newLayout = calculateModelLayout(levels);
-      console.log("New layout:", newLayout);
-      setLayout(newLayout);
-    } catch (err) {
-      console.error("Error calculating layout:", err);
-      setHasError(true);
-      setErrorMessage(`Layout error: ${err.message}`);
-    }
-  }, [graphData.models, graphData.edges, graphData.columns, layoutMode, expandedModels, layout, dragModelId]);
-  
-  // Add a function to manually initialize layout with fixed positions
-  const initializeManualLayout = () => {
-    console.log("Manually initializing layout");
-    const manualLayout = {};
-    const startX = 100;
-    const startY = 100;
-    const spacing = 300;
-    
-    // Create a simple horizontal layout
-    graphData.models.forEach((model, index) => {
-      manualLayout[model.id] = {
-        x: startX + (index * spacing),
-        y: startY,
-        width: 250,
-        height: 70 + (expandedModels[model.id] ? 65 : 0)
-      };
-    });
-    
-    console.log("Manual layout created:", manualLayout);
-    setLayout(manualLayout);
-    
-    // Fit to view after a short delay
-    setTimeout(fitToView, 300);
-  };
-  
-  // Add state for table navigator drawer
-  const { isOpen, onOpen, onClose } = useDisclosure();
-  const [searchTerm, setSearchTerm] = useState('');
-  
-  // Group models by type for better organization in the navigator
-  const modelsByType = useMemo(() => {
-    const result = {};
-    
-    if (!graphData.models) return result;
-    
-    graphData.models.forEach(model => {
-      const type = model.type || 'other';
-      if (!result[type]) {
-        result[type] = [];
-      }
-      result[type].push(model);
-    });
-    
-    return result;
-  }, [graphData.models]);
-  
-  // Filter models based on search term
-  const filteredModels = useMemo(() => {
-    if (!searchTerm.trim()) return modelsByType;
-    
-    const result = {};
-    
-    Object.entries(modelsByType).forEach(([type, models]) => {
-      const filtered = models.filter(model => 
-        model.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        model.path?.toLowerCase().includes(searchTerm.toLowerCase())
-      );
-      
-      if (filtered.length > 0) {
-        result[type] = filtered;
-      }
-    });
-    
-    return result;
-  }, [modelsByType, searchTerm]);
-  
-  // Function to navigate to a specific model
-  const navigateToModel = (modelId) => {
-    // Expand the model if it's collapsed
-    if (!expandedModels[modelId]) {
-      setExpandedModels(prev => ({
-        ...prev,
-        [modelId]: true
-      }));
-    }
-    
-    // Focus on the model
-    focusOnModel(modelId);
-    
-    // Close the drawer
-    onClose();
-  };
-  
-  // Add fullscreen state with modal
-  const [isFullscreen, setIsFullscreen] = useState(false);
-  // Save previous state to restore when exiting fullscreen
-  const [previousState, setPreviousState] = useState(null);
-  
-  // Toggle fullscreen mode using modal
-  const toggleFullscreen = () => {
-    if (!isFullscreen) {
-      // Save current state before going fullscreen
-      setPreviousState({
-        scale,
-        offset: { ...offset },
-        expandedModels: { ...expandedModels }
-      });
-      
-      // When entering fullscreen, automatically fit to view after a short delay
-      setIsFullscreen(true);
-      setTimeout(() => {
-        fitToView();
-      }, 300);
-    } else {
-      // Restore previous state when exiting fullscreen
-      setIsFullscreen(false);
-      if (previousState) {
-        setTimeout(() => {
-          setScale(previousState.scale);
-          setOffset(previousState.offset);
-        }, 100);
-      }
-    }
-  };
-  
-  // Function to handle horizontal scroll
-  const handleHorizontalScroll = (val) => {
-    // Calculate the delta from the previous value
-    const delta = val - horizontalSliderValue;
-    // Update the offset based on the delta
-    setOffset(prev => ({ 
-      x: prev.x + delta, 
-      y: prev.y 
-    }));
-    // Store the new value
-    setHorizontalSliderValue(val);
-  };
-  
-  // Function to handle vertical scroll
-  const handleVerticalScroll = (val) => {
-    // Calculate the delta from the previous value
-    const delta = val - verticalSliderValue;
-    // Update the offset based on the delta
-    setOffset(prev => ({ 
-      x: prev.x, 
-      y: prev.y + delta 
-    }));
-    // Store the new value
-    setVerticalSliderValue(val);
-  };
-  
-  // Function to reset sliders after they're released
-  const resetSliders = () => {
-    setHorizontalSliderValue(0);
-    setVerticalSliderValue(0);
-  };
-  
-  // Render the LineageGraph content
-  const renderLineageContent = () => {
-    return (
-      <Box 
-        ref={containerRef}
-        position="relative"
-        width={width || "100%"}
-        height={height || (isFullscreen ? "calc(100vh - 120px)" : "400px")}
-        borderWidth={isFullscreen ? "0" : "1px"}
-        borderRadius={isFullscreen ? "0" : "md"}
-        borderColor="gray.200"
-        overflow="hidden"
-        boxShadow={isFullscreen ? "none" : "sm"}
-        bg="white"
-        onMouseDown={handleGraphPanning}
-        style={{
-          cursor: isMouseDown ? "grabbing" : "grab",
-          transition: "height 0.3s ease"
-        }}
-      >
-        {/* Table navigation drawer */}
-        <Drawer isOpen={isOpen} placement="left" onClose={onClose} size="xs">
           <DrawerOverlay />
           <DrawerContent>
             <DrawerCloseButton />
@@ -1975,7 +1441,12 @@ export const LineageGraph = ({ data, width, height }) => {
                   style={{
                     cursor: 'move'
                   }}
-                  onMouseDown={(e) => handleDragStart(model.id, e)}
+                  onMouseDown={handleGraphPanning}
+                  onWheel={handleZoom}
+                  style={{
+                    cursor: isMouseDown ? "grabbing" : "grab",
+                    transition: "height 0.3s ease"
+                  }}
                 >
                   {/* Model Header - Clickable to expand/collapse */}
                   <Box 
@@ -2315,3 +1786,4 @@ export const EnhancedLineageViewer = ({ data, isMaximized }) => {
     </Box>
   );
 };
+

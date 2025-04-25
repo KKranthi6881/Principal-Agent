@@ -461,54 +461,12 @@ const RepositoryPage = () => {
       
       console.log(`Fetching content for file: ${path} from repo: ${repo}`);
       
-      // Parse the URL to extract owner and repo components
-      let owner, repoName;
+      // Use the normalized repo URL to fetch content
       const normalizedRepo = normalizeGitHubUrl(repo);
+      const response = await fetch(`/api/github/content?repo=${encodeURIComponent(normalizedRepo)}&path=${encodeURIComponent(path)}`);
       
-      try {
-        const urlObj = new URL(normalizedRepo);
-        const pathParts = urlObj.pathname.split('/');
-        if (pathParts.length >= 3) {
-          owner = pathParts[1];
-          repoName = pathParts[2].replace('.git', '');
-          console.log(`Extracted owner=${owner}, repo=${repoName} for file content`);
-        }
-      } catch (e) {
-        console.error('Failed to parse repo URL for file content:', e);
-      }
-      
-      // Try multiple approaches to fetch the file content
-      let response;
-      
-      // First try using owner/repo parameters if available
-      if (owner && repoName) {
-        const ownerRepoPath = `/api/github/content?owner=${encodeURIComponent(owner)}&repo=${encodeURIComponent(repoName)}&path=${encodeURIComponent(path)}`;
-        console.log('Trying to fetch content using owner/repo path:', ownerRepoPath);
-        
-        response = await fetch(ownerRepoPath);
-        if (response.ok) {
-          console.log('Successfully fetched file content using owner/repo parameters');
-        } else {
-          console.log(`Failed with owner/repo approach: ${response.status}`);
-          
-          // Fall back to using the normalized repo URL
-          const normalizedPath = `/api/github/content?repo=${encodeURIComponent(normalizedRepo)}&path=${encodeURIComponent(path)}`;
-          console.log('Trying with normalized repo URL:', normalizedPath);
-          
-          response = await fetch(normalizedPath);
-          if (!response.ok) {
-            throw new Error(`Failed to fetch file content: ${response.status} ${response.statusText}`);
-          }
-        }
-      } else {
-        // Use the normalized repo URL approach
-        const normalizedPath = `/api/github/content?repo=${encodeURIComponent(normalizedRepo)}&path=${encodeURIComponent(path)}`;
-        console.log('Trying with normalized repo URL:', normalizedPath);
-        
-        response = await fetch(normalizedPath);
-        if (!response.ok) {
-          throw new Error(`Failed to fetch file content: ${response.status} ${response.statusText}`);
-        }
+      if (!response.ok) {
+        throw new Error(`Failed to fetch file content: ${response.status} ${response.statusText}`);
       }
       
       const data = await response.json();
@@ -517,6 +475,7 @@ const RepositoryPage = () => {
       // For SQL files, try to fetch lineage data
       const fileExtension = getFileExtension(path);
       if (['sql', 'yml', 'yaml'].includes(fileExtension)) {
+        // Fetch lineage data if it's a SQL or YAML file
         fetchLineageData(repo, path);
       } else {
         setLineageData(null);
@@ -536,7 +495,7 @@ const RepositoryPage = () => {
       setLoading(false);
     }
   };
-
+  
   // Fetch lineage data for the selected file
   const fetchLineageData = async (repo, path) => {
     if (!repo || !path) return;
@@ -551,12 +510,15 @@ const RepositoryPage = () => {
         if (normalizedRepo.startsWith('http')) {
           const repoUrl = new URL(normalizedRepo);
           // Extract owner/repo from URL path (remove leading slash)
-          const repoPath = repoUrl.pathname.substring(1); 
+          const repoPath = repoUrl.pathname.substring(1);
           githubPath = `${repoPath}/${path}`;
         } else {
           // If already in owner/repo format
           githubPath = `${normalizedRepo}/${path}`;
         }
+        
+        // Remove .git suffix if present
+        githubPath = githubPath.replace(/\.git\//, '/');
       } catch (error) {
         console.error('Error parsing repo URL:', error);
         // Fallback to simple concatenation
@@ -578,22 +540,40 @@ const RepositoryPage = () => {
       }
       
       const data = await response.json();
+      console.log('Lineage API response:', data);
       
-      if (data && data.definition) {
-        setLineageData(data.definition);
-        toast({
-          title: 'Lineage Data Available',
-          description: 'Click the "Show Lineage" button to visualize data relationships',
-          status: 'info',
-          duration: 3000,
-          isClosable: true,
-        });
+      if (data && data.success && data.lineage_json) {
+        console.log('Lineage data received:', data.lineage_json);
+        // Transform the data for the LineageGraph component
+        const transformedData = transformLineageData(data.lineage_json);
+        
+        if (transformedData) {
+          setLineageData(transformedData);
+          toast({
+            title: 'Lineage Data Available',
+            description: 'Click the "Show Lineage" button to visualize data relationships',
+            status: 'info',
+            duration: 3000,
+            isClosable: true,
+          });
+        } else {
+          // We got data but it didn't transform correctly
+          setLineageData(null);
+          setShowLineage(false);
+          toast({
+            title: 'Lineage Visualization Error',
+            description: 'Could not create valid lineage visualization from the data',
+            status: 'warning',
+            duration: 3000,
+            isClosable: true,
+          });
+        }
       } else {
         setLineageData(null);
         setShowLineage(false);
         toast({
           title: 'No Lineage Data Available',
-          description: 'No lineage data found for this file',
+          description: data?.message || 'No lineage data found for this file',
           status: 'info',
           duration: 3000,
           isClosable: true,
@@ -603,53 +583,156 @@ const RepositoryPage = () => {
       console.error('Error fetching lineage data:', error);
       setLineageData(null);
       setShowLineage(false);
+      toast({
+        title: 'Error',
+        description: `Failed to fetch lineage data: ${error.message}`,
+        status: 'error',
+        duration: 5000,
+        isClosable: true,
+      });
     }
   };
 
   // Transform lineage data to format expected by LineageGraph
   const transformLineageData = (lineageJson) => {
-    // Transform tables to models
-    const models = lineageJson.tables.map(table => ({
-      id: table.id,
-      name: table.name,
-      path: table.github_path || '',
-      type: table.tech_stack || 'unknown',
-      highlight: table.id === lineageJson.root_table.id
-    }));
-
-    // Transform relationships to edges
-    const edges = lineageJson.relationships.map(rel => ({
-      id: rel.id,
-      from: rel.source.table_id,
-      to: rel.target.table_id,
-      type: rel.type
-    }));
-
-    // Transform columns
-    const columns = lineageJson.columns.map(col => ({
-      id: col.id,
-      name: col.name,
-      modelId: col.table_id,
-      dataType: col.data_type || 'unknown',
-      type: col.is_primary_key ? 'primary_key' : col.is_foreign_key ? 'foreign_key' : 'regular'
-    }));
-
-    // Column lineage connections
-    const columnConnections = lineageJson.relationships
-      .filter(rel => rel.source.column_id && rel.target.column_id)
-      .map(rel => ({
-        id: `col_${rel.id}`,
-        fromColumn: rel.source.column_id,
-        toColumn: rel.target.column_id,
-        type: rel.type
+    console.log('Transforming lineage data with keys:', Object.keys(lineageJson));
+    
+    try {
+      // First, add the root table to make sure it's included
+      const allTables = [...(Array.isArray(lineageJson.tables) ? lineageJson.tables : [])];
+      
+      // Add root table if it's not already in the tables array
+      if (lineageJson.root_table && !allTables.some(t => t.id === lineageJson.root_table.id)) {
+        allTables.push(lineageJson.root_table);
+      }
+      
+      // Log the table information for debugging
+      console.log('Root table:', lineageJson.root_table);
+      console.log('All tables count:', allTables.length);
+      console.log('Sample tables:', allTables.slice(0, 3));
+      
+      // If we don't have any tables, create at least one for the root
+      if (allTables.length === 0 && lineageJson.root_table) {
+        allTables.push({
+          id: 'root-table',
+          name: lineageJson.root_table.name || 'Root Table',
+          github_path: lineageJson.root_table.github_path || '',
+          tech_stack: lineageJson.root_table.tech_stack || 'unknown',
+        });
+      }
+      
+      // Transform tables to models (safely handle missing data)
+      const models = allTables.map(table => ({
+        id: table.id || `table-${Math.random().toString(36).substring(2, 9)}`,
+        name: table.name || 'Unknown',
+        path: table.github_path || '',
+        type: table.tech_stack || 'unknown',
+        highlight: lineageJson.root_table && table.id === lineageJson.root_table.id
       }));
-
-    return {
-      models,
-      edges,
-      columns,
-      column_lineage: columnConnections
-    };
+      
+      // Create a set of valid model IDs to filter edges
+      const modelIds = new Set(models.map(model => model.id));
+      console.log('Valid model IDs count:', modelIds.size);
+      
+      // If we have relationships, use them; otherwise create a simple self-referential edge
+      let edges = [];
+      
+      if (Array.isArray(lineageJson.relationships) && lineageJson.relationships.length > 0) {
+        // Log relationships for debugging
+        console.log('Relationships count:', lineageJson.relationships.length);
+        console.log('Sample relationship:', lineageJson.relationships[0]);
+        
+        // Transform relationships to edges (safely handle missing data)
+        edges = lineageJson.relationships
+          .filter(rel => {
+            // Only include relationships where both source and target tables exist in our models
+            return rel.source && rel.target && 
+                  rel.source.table_id && rel.target.table_id && 
+                  modelIds.has(rel.source.table_id) && modelIds.has(rel.target.table_id);
+          })
+          .map(rel => ({
+            id: rel.id || `edge-${Math.random().toString(36).substring(2, 9)}`,
+            source: rel.source.table_id, // Changed from 'from' to 'source'
+            target: rel.target.table_id, // Changed from 'to' to 'target'
+            type: rel.type || 'depends_on'
+          }));
+      } else if (models.length > 0) {
+        // Create at least one edge if we have models but no relationships
+        // This ensures we have something to display
+        if (models.length === 1) {
+          // Self-reference for single model
+          edges = [{
+            id: 'self-edge',
+            source: models[0].id, // Changed from 'from' to 'source'
+            target: models[0].id, // Changed from 'to' to 'target'
+            type: 'self'
+          }];
+        } else if (models.length > 1) {
+          // Connect first two models
+          edges = [{
+            id: 'default-edge',
+            source: models[0].id, // Changed from 'from' to 'source'
+            target: models[1].id, // Changed from 'to' to 'target'
+            type: 'depends_on'
+          }];
+        }
+      }
+      
+      // Transform columns if they exist and belong to valid models
+      const columns = Array.isArray(lineageJson.columns) ? lineageJson.columns
+        .filter(col => col.table_id && modelIds.has(col.table_id))
+        .map(col => ({
+          id: col.id || `col-${Math.random().toString(36).substring(2, 9)}`,
+          name: col.name || 'Unknown',
+          modelId: col.table_id,
+          dataType: col.data_type || 'unknown',
+          type: col.is_primary_key ? 'primary_key' : col.is_foreign_key ? 'foreign_key' : 'regular'
+        })) : [];
+      
+      // Create a set of valid column IDs for filtering column connections
+      const columnIds = new Set(columns.map(col => col.id));
+      
+      // Column lineage connections if they exist
+      const columnConnections = Array.isArray(lineageJson.relationships) ? 
+        lineageJson.relationships
+          .filter(rel => {
+            return rel.source?.column_id && rel.target?.column_id && 
+                  columnIds.has(rel.source.column_id) && columnIds.has(rel.target.column_id);
+          })
+          .map(rel => ({
+            id: `col_${rel.id || Math.random().toString(36).substring(2, 9)}`,
+            fromColumn: rel.source.column_id,
+            toColumn: rel.target.column_id,
+            type: rel.type || 'depends_on'
+          })) : [];
+      
+      // Validate that we have valid models and edges
+      const validData = models.length > 0 && edges.length > 0;
+      
+      console.log('Transformed data:', {
+        models: models.length,
+        edges: edges.length,
+        columns: columns.length,
+        column_lineage: columnConnections.length,
+        valid: validData
+      });
+      
+      if (!validData) {
+        console.error('Invalid lineage data: insufficient valid models or edges');
+        return null;
+      }
+      
+      // Always return at least this minimum structure
+      return {
+        models,
+        edges,
+        columns,
+        column_lineage: columnConnections
+      };
+    } catch (error) {
+      console.error('Error transforming lineage data:', error);
+      return null;
+    }
   };
 
   // Toggle folder expansion with additional debug
@@ -1038,9 +1121,74 @@ const RepositoryPage = () => {
                   boxSize={4}
                 />
                 
-                <Text ml={2} fontSize="sm" noOfLines={1} fontWeight={isSelected ? "bold" : "normal"}>
+                <Text fontSize="sm" noOfLines={1} fontWeight={isSelected ? "bold" : "normal"}>
                   {nodeName}
                 </Text>
+                
+                {/* Add lineage icon for SQL and YAML files */}
+                {!isDirectory && ['sql', 'yml', 'yaml'].includes(getFileExtension(nodeName)) && (
+                  <Tooltip label="View data lineage">
+                    <IconButton
+                      icon={<Icon as={IoGitNetwork} />}
+                      size="xs"
+                      variant="ghost"
+                      colorScheme="blue"
+                      ml="auto"
+                      onClick={(e) => {
+                        e.stopPropagation(); // Prevent triggering the parent click handler
+                        if (selectedConnector) {
+                          // First select the file to ensure content is loaded
+                          fetchFileContent(selectedConnector.repo_url, node.path);
+                          setSelectedFile({
+                            ...node,
+                            path: node.path,
+                            name: nodeName,
+                            type: 'file'
+                          });
+                          
+                          // Then fetch lineage data and show it
+                          fetchLineageData(selectedConnector.repo_url, node.path);
+                          setShowLineage(true);
+                        }
+                      }}
+                      aria-label="View lineage"
+                    />
+                  </Tooltip>
+                )}
+                
+                {/* Add lineage icon for SQL and YAML files */}
+                {!isDirectory && ['sql', 'yml', 'yaml'].includes(getFileExtension(nodeName)) && (
+                  <Tooltip label="View data lineage">
+                    <IconButton
+                      icon={<Icon as={IoGitNetwork} />}
+                      size="xs"
+                      variant="ghost"
+                      colorScheme="blue"
+                      ml="auto"
+                      onClick={(e) => {
+                        e.stopPropagation(); // Prevent triggering the parent click handler
+                        if (selectedConnector) {
+                          // First select the file to ensure content is loaded
+                          fetchFileContent(selectedConnector.repo_url, node.path);
+                          setSelectedFile({
+                            ...node,
+                            path: node.path,
+                            name: nodeName,
+                            type: 'file'
+                          });
+                          
+                          // Then fetch lineage data if available
+                          fetchLineageData(selectedConnector.repo_url, node.path)
+                            .then(() => {
+                              // Show lineage visualization
+                              setShowLineage(true);
+                            });
+                        }
+                      }}
+                      aria-label="View lineage"
+                    />
+                  </Tooltip>
+                )}
               </HStack>
               
               {/* If directory is expanded and has children, show them */}
@@ -1258,6 +1406,16 @@ const RepositoryPage = () => {
                         </Heading>
                         <HStack>
                           <Button
+                            leftIcon={<Icon as={IoCode} />}
+                            size="xs"
+                            colorScheme="blue"
+                            onClick={() => {
+                              console.log('Current lineage data:', lineageData);
+                            }}
+                          >
+                            Debug Data
+                          </Button>
+                          <Button
                             leftIcon={<Icon as={IoDocument} />}
                             size="xs"
                             colorScheme="gray"
@@ -1267,8 +1425,27 @@ const RepositoryPage = () => {
                           </Button>
                         </HStack>
                       </Flex>
-                      <Box height="calc(100% - 40px)" borderRadius="md" overflow="hidden">
-                        <LineageGraph data={lineageData} width="100%" height="100%" />
+                      <Box height="calc(100% - 40px)" borderRadius="md" overflow="hidden" position="relative">
+                        {lineageData && Object.keys(lineageData).length > 0 ? (
+                          <LineageGraph data={lineageData} width="100%" height="100%" />
+                        ) : (
+                          <Box 
+                            position="absolute" 
+                            top="50%" 
+                            left="50%" 
+                            transform="translate(-50%, -50%)"
+                            textAlign="center"
+                            p={4}
+                            borderRadius="md"
+                            bg="red.50"
+                            border="1px"
+                            borderColor="red.200"
+                          >
+                            <Icon as={IoWarning} color="red.500" boxSize={8} mb={2} />
+                            <Text fontWeight="bold" color="red.600" mb={2}>Lineage Visualization Error</Text>
+                            <Text color="red.600">Could not render the lineage graph with the available data.</Text>
+                          </Box>
+                        )}
                       </Box>
                     </Box>
                   ) : (
@@ -1289,38 +1466,26 @@ const RepositoryPage = () => {
                           right="10px"
                           zIndex="1"
                         >
-                          <Tooltip label="Click to view data lineage">
-                            <IconButton
-                              icon={<Icon as={IoGitNetwork} />}
-                              colorScheme="blue"
-                              size="md"
-                              onClick={() => setShowLineage(true)}
-                              opacity="0.8"
-                              _hover={{ opacity: 1 }}
-                              boxShadow="md"
-                            />
-                          </Tooltip>
+                          <IconButton
+                            icon={<Icon as={IoGitNetwork} />}
+                            colorScheme="blue"
+                            size="sm"
+                            onClick={() => setShowLineage(true)}
+                            aria-label="Show lineage"
+                          />
                         </Box>
                       )}
+                      
                       <SyntaxHighlighter
-                        language={getFileExtension(selectedFile.path)}
+                        language={getFileExtension(selectedFile?.name || '')}
                         style={docco}
+                        showLineNumbers
                         customStyle={{ 
-                          margin: 0, 
-                          padding: '1rem',
-                          fontSize: '14px',
-                          lineHeight: '1.5',
-                          borderRadius: '4px',
-                          backgroundColor: '#fafafa'
+                          backgroundColor: 'transparent',
+                          fontSize: '0.9em',
+                          fontFamily: 'monospace',
+                          padding: '20px'
                         }}
-                        showLineNumbers={true}
-                        wrapLines={true}
-                        lineProps={lineNumber => ({
-                          style: { 
-                            display: 'block', 
-                            backgroundColor: lineNumber % 2 === 0 ? '#f8f8f8' : 'transparent'
-                          },
-                        })}
                       >
                         {fileContent}
                       </SyntaxHighlighter>

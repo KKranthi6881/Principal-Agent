@@ -1095,8 +1095,9 @@ class LineageDB:
         in the GitHub repository.
         
         Args:
-            github_path: Path to the file in GitHub
-            
+            github_path: Path to the file in GitHub. Can be either a full path with owner/repo
+                   or just the relative path within the repository.
+        
         Returns:
             Dictionary with lineage information or None if not found
         """
@@ -1104,34 +1105,96 @@ class LineageDB:
         cursor = conn.cursor()
         
         try:
-            # First try to find by exact github_path
-            cursor.execute(
-                """SELECT ld.*, t.table_name, t.tech_stack 
-                   FROM lineage_definitions ld
-                   JOIN tables t ON ld.root_table_id = t.table_id
-                   WHERE ld.github_path = ?
-                   ORDER BY ld.updated_at DESC
-                   LIMIT 1""",
-                (github_path,)
-            )
-            result = cursor.fetchone()
+            # Extract relative path if github_path is in the format owner/repo/path
+            # For example, if github_path is 'dbt-labs/dbt-cloud-snowflake-demo-template/models/staging/tpch/stg_tpch_orders.sql'
+            # we need to extract 'models/staging/tpch/stg_tpch_orders.sql'
+            import os
+            import re
             
-            # If not found, try to find by partial match (filename in path)
-            if not result:
-                # Extract the filename from the path
-                import os
-                filename = os.path.basename(github_path)
-                
+            # First check if github_path is in owner/repo/path format
+            relative_path = github_path
+            # Match owner/repo/path or owner/repo.git/path pattern
+            match = re.match(r'^[^/]+/[^/]+(?:\.git)?/(.+)$', github_path)
+            if match:
+                relative_path = match.group(1)
+            
+            filename = os.path.basename(github_path)
+            logger.info(f"Looking up lineage for path: {github_path}, extracted relative path: {relative_path}")
+            
+            # Check if github_path column exists in lineage_definitions table
+            cursor.execute("PRAGMA table_info(lineage_definitions)")
+            columns = [column[1] for column in cursor.fetchall()]
+            
+            result = None
+            
+            # If the github_path column exists, use it for querying
+            if 'github_path' in columns:
+                # Try to find by the extracted relative path
                 cursor.execute(
                     """SELECT ld.*, t.table_name, t.tech_stack 
                        FROM lineage_definitions ld
                        JOIN tables t ON ld.root_table_id = t.table_id
-                       WHERE ld.github_path LIKE ? OR t.github_path LIKE ?
-                       ORDER BY ld.updated_at DESC
+                       WHERE ld.github_path = ?
+                       ORDER BY ld.created_at DESC
                        LIMIT 1""",
-                    (f'%{filename}%', f'%{filename}%')
+                    (relative_path,)
                 )
                 result = cursor.fetchone()
+                
+                # If not found by exact match, try with the original path
+                if not result:
+                    cursor.execute(
+                        """SELECT ld.*, t.table_name, t.tech_stack 
+                           FROM lineage_definitions ld
+                           JOIN tables t ON ld.root_table_id = t.table_id
+                           WHERE ld.github_path = ?
+                           ORDER BY ld.created_at DESC
+                           LIMIT 1""",
+                        (github_path,)
+                    )
+                    result = cursor.fetchone()
+                
+                # If still not found, try by filename
+                if not result:
+                    cursor.execute(
+                        """SELECT ld.*, t.table_name, t.tech_stack 
+                           FROM lineage_definitions ld
+                           JOIN tables t ON ld.root_table_id = t.table_id
+                           WHERE ld.github_path LIKE ? 
+                           ORDER BY ld.created_at DESC
+                           LIMIT 1""",
+                        (f'%{filename}%',)
+                    )
+                    result = cursor.fetchone()
+            
+            # Fall back to searching in the tables.github_path
+            if not 'github_path' in columns or not result:
+                cursor.execute(
+                    """SELECT ld.*, t.table_name, t.tech_stack 
+                       FROM lineage_definitions ld
+                       JOIN tables t ON ld.root_table_id = t.table_id
+                       WHERE t.github_path = ?
+                       ORDER BY ld.created_at DESC
+                       LIMIT 1""",
+                    (github_path,)
+                )
+                result = cursor.fetchone()
+                
+                # If not found, try by partial match
+                if not result:
+                    import os
+                    filename = os.path.basename(github_path)
+                    
+                    cursor.execute(
+                        """SELECT ld.*, t.table_name, t.tech_stack 
+                           FROM lineage_definitions ld
+                           JOIN tables t ON ld.root_table_id = t.table_id
+                           WHERE t.github_path LIKE ? 
+                           ORDER BY ld.created_at DESC
+                           LIMIT 1""",
+                        (f'%{filename}%',)
+                    )
+                    result = cursor.fetchone()
             
             if result:
                 lineage_def = dict(result)
@@ -1139,7 +1202,76 @@ class LineageDB:
                 # Parse the JSON
                 lineage_def["lineage_json"] = json.loads(lineage_def["lineage_json"])
                 
-                return lineage_def
+                # Filter the lineage to only include tables directly related to this file
+                if lineage_def["lineage_json"] and github_path:
+                    try:
+                        # Extract just the relative path if github_path includes owner/repo
+                        relative_path = github_path
+                        import re
+                        match = re.match(r'^[^/]+/[^/]+(?:\.git)?/(.+)$', github_path)
+                        if match:
+                            relative_path = match.group(1)
+                        
+                        # Find the root table for this specific file
+                        root_table = None
+                        all_tables = lineage_def["lineage_json"].get('tables', [])
+                        
+                        # First try to find by exact github_path match
+                        for table in all_tables:
+                            if table.get('github_path') == relative_path:
+                                root_table = table
+                                break
+                        
+                        # If not found, try by filename
+                        if not root_table:
+                            import os
+                            filename = os.path.basename(relative_path)
+                            for table in all_tables:
+                                if table.get('github_path') and os.path.basename(table['github_path']) == filename:
+                                    root_table = table
+                                    break
+                        
+                        if root_table:
+                            # Set this as the root table in the lineage definition
+                            lineage_def["lineage_json"]["root_table"] = root_table
+                            
+                            # Find directly related tables (one level up and down)
+                            related_table_ids = set([root_table['id']])
+                            
+                            # Get related tables from relationships
+                            relationships = lineage_def["lineage_json"].get('relationships', [])
+                            for rel in relationships:
+                                # If root table is source, add target
+                                if rel.get('source', {}).get('table_id') == root_table['id']:
+                                    related_table_ids.add(rel.get('target', {}).get('table_id'))
+                                
+                                # If root table is target, add source
+                                if rel.get('target', {}).get('table_id') == root_table['id']:
+                                    related_table_ids.add(rel.get('source', {}).get('table_id'))
+                            
+                            # Filter tables to only include related ones
+                            filtered_tables = [t for t in all_tables if t['id'] in related_table_ids]
+                            lineage_def["lineage_json"]["tables"] = filtered_tables
+                            
+                            # Filter relationships to only include those between related tables
+                            filtered_relationships = [r for r in relationships 
+                                                   if r.get('source', {}).get('table_id') in related_table_ids 
+                                                   and r.get('target', {}).get('table_id') in related_table_ids]
+                            lineage_def["lineage_json"]["relationships"] = filtered_relationships
+                            
+                            # Filter columns to only include those from related tables
+                            if 'columns' in lineage_def["lineage_json"]:
+                                filtered_columns = [c for c in lineage_def["lineage_json"]["columns"] 
+                                                 if c.get('table_id') in related_table_ids]
+                                lineage_def["lineage_json"]["columns"] = filtered_columns
+                            
+                            logger.info(f"Filtered lineage data for {github_path} from {len(all_tables)} tables to {len(filtered_tables)} related tables")
+                    except Exception as e:
+                        logger.error(f"Error filtering lineage data: {str(e)}")
+                        # Return the full lineage data if filtering fails
+                        pass
+            
+            return lineage_def
             
             return None
         except Exception as e:
