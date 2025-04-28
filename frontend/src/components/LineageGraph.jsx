@@ -1116,41 +1116,78 @@ export const LineageGraph = ({ data, width, height }) => {
     document.addEventListener('mouseup', handleMouseUp);
   };
   
-  // Add new panning handler for the entire graph
+  // Simple and reliable panning handler
   const handleGraphPanning = (e) => {
+    // Only proceed if it's the left mouse button
+    if (e.button !== 0) return;
+    
+    // Prevent default behaviors like text selection
     e.preventDefault();
+    
+    // Capture starting position and current offset
+    const startX = e.clientX;
+    const startY = e.clientY;
+    const startOffset = {...offset};
+    
+    // Change cursor to grabbing
+    document.body.style.cursor = 'grabbing';
+    
+    // Mark as actively panning
     setIsMouseDown(true);
-    setLastMousePosition({
-      x: e.clientX,
-      y: e.clientY
-    });
     
-    const handleMouseMove = (moveEvent) => {
-      if (!isMouseDown) return;
+    function onMouseMove(moveEvent) {
+      // Simple delta calculation from start position
+      const deltaX = moveEvent.clientX - startX;
+      const deltaY = moveEvent.clientY - startY;
       
-      const dx = moveEvent.clientX - lastMousePosition.x;
-      const dy = moveEvent.clientY - lastMousePosition.y;
-      
-      setOffset(prev => ({
-        x: prev.x + dx,
-        y: prev.y + dy
-      }));
-      
-      setLastMousePosition({
-        x: moveEvent.clientX,
-        y: moveEvent.clientY
+      // Update offset based on original position + movement delta
+      setOffset({
+        x: startOffset.x + deltaX,
+        y: startOffset.y + deltaY
       });
-    };
+    }
     
-    const handleMouseUp = () => {
+    function onMouseUp() {
+      // Reset cursor
+      document.body.style.cursor = '';
+      containerRef.current.style.cursor = 'grab';
+      
+      // Mark as no longer panning
       setIsMouseDown(false);
       
-      document.removeEventListener('mousemove', handleMouseMove);
-      document.removeEventListener('mouseup', handleMouseUp);
-    };
+      // Remove all event listeners
+      document.removeEventListener('mousemove', onMouseMove);
+      document.removeEventListener('mouseup', onMouseUp);
+    }
     
-    document.addEventListener('mousemove', handleMouseMove);
-    document.addEventListener('mouseup', handleMouseUp);
+    // Add listeners to document to catch events outside container
+    document.addEventListener('mousemove', onMouseMove);
+    document.addEventListener('mouseup', onMouseUp);
+  };
+  
+  // Add wheel zoom handler for more intuitive mouse-wheel zooming
+  const handleWheelZoom = (e) => {
+    e.preventDefault();
+    
+    // Get zoom direction and adjust zoom intensity for smoother experience
+    const zoomIntensity = 0.1;
+    const delta = e.deltaY < 0 ? 1 : -1; // Invert for natural zoom direction
+    
+    // Calculate new scale with limits
+    const newScale = Math.min(Math.max(scale * (1 + delta * zoomIntensity), 0.1), 5);
+    
+    // Get mouse position relative to container for zoom-toward-cursor effect
+    const rect = containerRef.current.getBoundingClientRect();
+    const mouseX = e.clientX - rect.left;
+    const mouseY = e.clientY - rect.top;
+    
+    // Calculate new offsets to zoom centered on mouse position
+    const newOffsetX = mouseX - (mouseX - offset.x) * (newScale / scale);
+    const newOffsetY = mouseY - (mouseY - offset.y) * (newScale / scale);
+    
+    // Update state
+    setScale(newScale);
+    setOffset({ x: newOffsetX, y: newOffsetY });
   };
   
   // Add a function to highlight connected columns
@@ -1683,9 +1720,13 @@ export const LineageGraph = ({ data, width, height }) => {
         boxShadow={isFullscreen ? "none" : "sm"}
         bg="white"
         onMouseDown={handleGraphPanning}
+        onWheel={handleWheelZoom}
+        className="lineage-graph-container"
         style={{
-          cursor: isMouseDown ? "grabbing" : "grab",
-          transition: "height 0.3s ease"
+          cursor: "grab", 
+          transition: "height 0.3s ease",
+          willChange: 'transform',
+          userSelect: 'none' // Prevent text selection during panning
         }}
       >
         {/* Table navigation drawer */}
@@ -1919,7 +1960,8 @@ export const LineageGraph = ({ data, width, height }) => {
           style={{
             transform: `translate(${offset.x}px, ${offset.y}px) scale(${scale})`,
             transformOrigin: '0 0',
-            transition: isDragging ? 'none' : 'transform 0.2s ease'
+            transition: isMouseDown ? 'none' : 'transform 0.1s ease',
+            willChange: 'transform' // Hardware acceleration hint for smoother panning
           }}
         >
           {/* SVG Container for edges and column connections */}
