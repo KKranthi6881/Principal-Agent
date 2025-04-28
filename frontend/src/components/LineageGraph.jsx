@@ -1189,6 +1189,38 @@ export const LineageGraph = ({ data, width, height }) => {
     setScale(newScale);
     setOffset({ x: newOffsetX, y: newOffsetY });
   };
+
+  // Function to handle zoom button clicks with proper centering
+  const handleZoomButton = (zoomIn) => {
+    if (!containerRef.current || !contentRef.current) return;
+    
+    // Get container and content dimensions
+    const containerRect = containerRef.current.getBoundingClientRect();
+    const contentRect = contentRef.current.getBoundingClientRect();
+    
+    // Calculate center of the current view
+    const viewCenterX = containerRect.width / 2;
+    const viewCenterY = containerRect.height / 2;
+    
+    // Determine new scale
+    const zoomFactor = zoomIn ? 0.1 : -0.1;
+    const newScale = Math.min(Math.max(scale + zoomFactor, 0.1), 5);
+    
+    // Adjust offset to keep the center point steady
+    // This is the key part that prevents the white screen
+    const scaleRatio = newScale / scale;
+    const newOffsetX = viewCenterX - (viewCenterX - offset.x) * scaleRatio;
+    const newOffsetY = viewCenterY - (viewCenterY - offset.y) * scaleRatio;
+    
+    // Update state with new scale and adjusted offset
+    setScale(newScale);
+    setOffset({ x: newOffsetX, y: newOffsetY });
+    
+    // If zooming far out, ensure we can still see the content
+    if (newScale < 0.3) {
+      setTimeout(fitToView, 50); // Short delay to let state update
+    }
+  };
   
   // Add a function to highlight connected columns
   const getConnectedColumns = (columnId) => {
@@ -1646,7 +1678,7 @@ export const LineageGraph = ({ data, width, height }) => {
   // Save previous state to restore when exiting fullscreen
   const [previousState, setPreviousState] = useState(null);
   
-  // Toggle fullscreen mode using modal
+  // Enhanced fullscreen toggle with improved visibility handling
   const toggleFullscreen = () => {
     if (!isFullscreen) {
       // Save current state before going fullscreen
@@ -1656,19 +1688,34 @@ export const LineageGraph = ({ data, width, height }) => {
         expandedModels: { ...expandedModels }
       });
       
-      // When entering fullscreen, automatically fit to view after a short delay
+      // First set fullscreen state
       setIsFullscreen(true);
+      
+      // Use a longer delay to ensure modal is fully rendered before fitting content
       setTimeout(() => {
-        fitToView();
-      }, 300);
+        // Store current offset and scale before resetting
+        const tempScale = scale;
+        const tempOffset = {...offset};
+        
+        // Start with a reset to ensure proper initialization in fullscreen mode
+        setScale(0.8); // Start with a slightly zoomed out view in fullscreen
+        setOffset({ x: 0, y: 0 }); // Center the content
+        
+        // Give the DOM time to update, then fit content to view
+        setTimeout(() => {
+          fitToView();
+        }, 100);
+      }, 400); // Increased delay to ensure modal is ready
     } else {
-      // Restore previous state when exiting fullscreen
+      // Exit fullscreen and restore previous state
       setIsFullscreen(false);
+      
       if (previousState) {
+        // Slight delay to ensure we're out of fullscreen before restoring state
         setTimeout(() => {
           setScale(previousState.scale);
           setOffset(previousState.offset);
-        }, 100);
+        }, 200);
       }
     }
   };
@@ -1880,7 +1927,7 @@ export const LineageGraph = ({ data, width, height }) => {
                 <IconButton
                   size="sm"
                   icon={<Icon as={TbZoomOut} />}
-                  onClick={() => setScale(prev => Math.max(0.1, prev - 0.1))}
+                  onClick={() => handleZoomButton(false)}
                   aria-label="Zoom Out"
                   variant="outline"
                 />
@@ -1894,7 +1941,7 @@ export const LineageGraph = ({ data, width, height }) => {
                 <IconButton
                   size="sm"
                   icon={<Icon as={TbZoomIn} />}
-                  onClick={() => setScale(prev => Math.min(2, prev + 0.1))}
+                  onClick={() => handleZoomButton(true)}
                   aria-label="Zoom In"
                   variant="outline"
                 />
@@ -2297,7 +2344,7 @@ export const LineageGraph = ({ data, width, height }) => {
     );
   };
 
-  // Now return either the modal or inline component based on fullscreen state
+  // Enhanced fullscreen modal with improved content rendering
   if (isFullscreen) {
     return (
       <Modal 
@@ -2305,23 +2352,55 @@ export const LineageGraph = ({ data, width, height }) => {
         onClose={toggleFullscreen} 
         size="full"
         motionPreset="slideInBottom"
+        blockScrollOnMount={false} // Allow scrolling the page
+        trapFocus={false} // Don't trap focus which can interfere with interactions
       >
-        <ModalOverlay />
-        <ModalContent>
-          <ModalHeader>
+        <ModalOverlay bg="rgba(0, 0, 0, 0.6)" />
+        <ModalContent 
+          display="flex" 
+          flexDirection="column"
+          height="100vh" // Ensure the modal takes full height
+          width="100vw" // Ensure the modal takes full width
+          margin={0} // Remove default margins
+          borderRadius={0} // Remove rounded corners in fullscreen
+        >
+          <ModalHeader
+            py={2} // Reduce padding to maximize content space
+            borderBottomWidth="1px"
+            borderBottomColor="gray.200"
+          >
             <Flex justifyContent="space-between" alignItems="center">
               <Text>Data Lineage Visualization</Text>
-              <IconButton
-                icon={<Icon as={TbMinimize} />}
-                onClick={toggleFullscreen}
-                aria-label="Exit Fullscreen"
-                colorScheme="purple"
-                size="sm"
-              />
+              <HStack spacing={2}>
+                <IconButton
+                  icon={<Icon as={TbZoomIn} />}
+                  onClick={() => handleZoomButton(true)}
+                  aria-label="Zoom In"
+                  size="sm"
+                  variant="ghost"
+                />
+                <Text fontSize="sm">{Math.round(scale * 100)}%</Text>
+                <IconButton
+                  icon={<Icon as={TbZoomOut} />}
+                  onClick={() => handleZoomButton(false)}
+                  aria-label="Zoom Out"
+                  size="sm"
+                  variant="ghost"
+                />
+                <IconButton
+                  icon={<Icon as={TbMinimize} />}
+                  onClick={toggleFullscreen}
+                  aria-label="Exit Fullscreen"
+                  colorScheme="blue"
+                  size="sm"
+                />
+              </HStack>
             </Flex>
           </ModalHeader>
-          <ModalBody p={0}>
-            {renderLineageContent()}
+          <ModalBody p={0} flex="1" overflow="hidden"> {/* Make body take remaining space */}
+            <Box position="relative" width="100%" height="100%">
+              {renderLineageContent()}
+            </Box>
           </ModalBody>
         </ModalContent>
       </Modal>
