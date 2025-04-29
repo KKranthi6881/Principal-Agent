@@ -823,6 +823,15 @@ export const LineageGraph = ({ data, width, height }) => {
       const midX = (startX + endX) / 2;
       const midY = (startY + endY) / 2;
       
+      // Get relationship type for this connection
+      let relationshipType = "default";
+      if (activeColumnNetwork?.relationshipTypes) {
+        // Check both directions since we don't know which is source/target in the UI
+        relationshipType = activeColumnNetwork.relationshipTypes[`${sourceCol.id}-${targetCol.id}`] || 
+                          activeColumnNetwork.relationshipTypes[`${targetCol.id}-${sourceCol.id}`] || 
+                          "default";
+      }
+      
       // Improved active connection detection:
       // Check if any columns in this connection are in the active column's network
       let connectionStatus = "default";
@@ -850,27 +859,58 @@ export const LineageGraph = ({ data, width, height }) => {
         }
       }
       
-      // Apply styling based on connection status
+      // Apply styling based on connection status and relationship type
       let connectionColor, opacity, strokeWidth, strokeDasharray;
       
-      switch (connectionStatus) {
-        case "active":
-          connectionColor = modernColors.connection.active;
-          opacity = 1;
-          strokeWidth = 2;
-          strokeDasharray = "none";
-          break;
-        case "related":
-          connectionColor = "#3182CE"; // Blue
-          opacity = 0.7;
-          strokeWidth = 1.5;
-          strokeDasharray = "4,4";
-          break;
-        default:
-          connectionColor = modernColors.connection.default;
-          opacity = activeColumnLink ? 0.2 : 0.6; // Dim non-related connections when a column is active
-          strokeWidth = 1;
-          strokeDasharray = "4,4";
+      // Active connections always have priority styling
+      if (connectionStatus === "active") {
+        connectionColor = modernColors.connection.active; // Orange
+        opacity = 1;
+        strokeWidth = 2;
+        strokeDasharray = "none";
+      } 
+      // Related connections are second priority
+      else if (connectionStatus === "related") {
+        connectionColor = "#3182CE"; // Blue
+        opacity = 0.7;
+        strokeWidth = 1.5;
+        strokeDasharray = "4,4";
+      }
+      // Default connections are styled by relationship type
+      else {
+        // Base opacity lower when a column is active
+        opacity = activeColumnLink ? 0.2 : 0.6;
+        
+        // Style based on relationship type
+        switch (relationshipType) {
+          case "derived_from":
+            connectionColor = "#3B82F6"; // Blue
+            strokeWidth = 1.5;
+            strokeDasharray = "none";
+            opacity = Math.min(opacity + 0.1, 1.0); // Slightly more visible
+            break;
+          case "joined_with":
+            connectionColor = "#8B5CF6"; // Purple
+            strokeWidth = 1.5;
+            strokeDasharray = "5,3";
+            opacity = Math.min(opacity + 0.1, 1.0);
+            break;
+          case "aggregated_from":
+            connectionColor = "#10B981"; // Green
+            strokeWidth = 1.5;
+            strokeDasharray = "none";
+            opacity = Math.min(opacity + 0.1, 1.0);
+            break;
+          case "inferred":
+            connectionColor = "#94A3B8"; // Gray
+            strokeWidth = 1;
+            strokeDasharray = "3,3";
+            break;
+          default:
+            connectionColor = modernColors.connection.default;
+            strokeWidth = 1;
+            strokeDasharray = "4,4";
+        }
       }
       
       // Determine arrow direction based on layout and model positions
@@ -895,10 +935,7 @@ export const LineageGraph = ({ data, width, height }) => {
             strokeWidth={strokeWidth}
             opacity={opacity}
             strokeDasharray={strokeDasharray}
-            style={{ 
-              transition: "all 0.2s ease",
-              filter: connectionStatus !== "default" ? 'drop-shadow(0 1px 2px rgba(0,0,0,0.1))' : 'none' 
-            }}
+            style={{ transition: "all 0.2s ease", filter: connectionStatus !== "default" ? 'drop-shadow(0 1px 2px rgba(0,0,0,0.1))' : 'none' }}
           />
           
           {/* Arrow head */}
@@ -1222,32 +1259,38 @@ export const LineageGraph = ({ data, width, height }) => {
     }
   };
   
-  // Add a function to highlight connected columns
+  // Add a function to highlight connected columns with relationship types
   const getConnectedColumns = (columnId) => {
     if (!columnId || !graphData.column_lineage) {
       return { 
         connected: new Set(),
         sources: new Set(),
-        targets: new Set()
+        targets: new Set(),
+        relationshipTypes: {}
       };
     }
     
     const connected = new Set();
     const sources = new Set();
     const targets = new Set();
+    const relationshipTypes = {};
     
     graphData.column_lineage.forEach(link => {
       if (link.source === columnId) {
         connected.add(link.target);
         targets.add(link.target);
+        // Track relationship type from source to target
+        relationshipTypes[`${link.source}-${link.target}`] = link.type || 'depends_on';
       }
       if (link.target === columnId) {
         connected.add(link.source);
         sources.add(link.source);
+        // Track relationship type from source to target
+        relationshipTypes[`${link.source}-${link.target}`] = link.type || 'depends_on';
       }
     });
     
-    return { connected, sources, targets };
+    return { connected, sources, targets, relationshipTypes };
   };
 
   // Calculate the connected columns when activeColumnLink changes

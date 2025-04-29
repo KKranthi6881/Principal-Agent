@@ -660,39 +660,85 @@ const GitHubConnectors = () => {
   
   // Start vector sync
   const startVectorSync = async () => {
+    if (!selectedVectorConnector) return;
+    
+    setIsSyncing(true);
+    setSyncResult(null);
+    
     try {
-      setIsSyncing(true);
-      setSyncResult(null);
-      
-      // Create sync request payload
-      const payload = {
+      // Build the request
+      const request = {
         connector_id: selectedVectorConnector.id,
+        repo_url: selectedVectorConnector.repo_url || '', // Use repo_url if available
         embedding_provider: selectedEmbeddingProvider,
-        force_full_sync: forceFullSync
+        force_full_sync: forceFullSync,
+        branch: selectedVectorConnector.default_branch || 'main'
       };
       
-      // Make API call to start vector sync
+      // If repo_url is not available, construct it from other fields
+      if (!request.repo_url && selectedVectorConnector.github_type === 'public') {
+        // Handle different repository formats
+        if (selectedVectorConnector.repositories && selectedVectorConnector.repositories.length > 0) {
+          const firstRepo = selectedVectorConnector.repositories[0];
+          if (firstRepo.includes('/')) {
+            // It's already in owner/repo format
+            request.repo_url = `https://github.com/${firstRepo}`;
+          } else if (selectedVectorConnector.owner) {
+            // We have owner and repo separately
+            request.repo_url = `https://github.com/${selectedVectorConnector.owner}/${firstRepo}`;
+          }
+        } else if (selectedVectorConnector.owner) {
+          // For older connectors that might not have repositories defined
+          request.repo_url = `https://github.com/${selectedVectorConnector.owner}/${selectedVectorConnector.name.replace(/\s+/g, '-').toLowerCase()}`;
+        }
+      }
+      
+      // Make sure we have a repo URL
+      if (!request.repo_url) {
+        throw new Error("No repository URL available for sync");
+      }
+      
+      // Call the API
       const response = await fetch('/api/github/sync', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json'
         },
-        body: JSON.stringify(payload)
+        body: JSON.stringify(request)
       });
       
       const data = await response.json();
       
       if (!response.ok) {
-        throw new Error(data.detail || 'Failed to start sync process');
+        // Handle specific error cases
+        if (data.detail && data.detail.includes("OpenAI API key is required")) {
+          throw new Error("OpenAI API key is missing. Please add an OpenAI provider in Settings > LLM Providers.");
+        } else if (data.detail && data.detail.includes("Ollama")) {
+          throw new Error("Ollama connection error. Make sure Ollama is running on your machine.");
+        } else {
+          throw new Error(data.detail || `API error: ${response.status}`);
+        }
       }
       
       // Set sync result
       setSyncResult({
         success: true,
-        message: 'Vector sync started successfully. Files will be processed in the background.',
         syncId: data.sync_id,
+        message: `Sync started with ID ${data.sync_id}. Check status in background tasks.`,
+        status: data.status,
         files_indexed: data.files_indexed || 0
       });
+      
+      toast({
+        title: 'Vector Sync Started',
+        description: `Sync process started for repository. This may take some time to complete.`,
+        status: 'info',
+        duration: 5000,
+        isClosable: true,
+      });
+      
+      // Immediately fetch sync statuses to update UI
+      fetchSyncStatuses();
       
       // After successful vector sync, check for lineage tasks
       const tasks = await lineageMonitoring.fetchLineageTasks();
@@ -712,17 +758,45 @@ const GitHubConnectors = () => {
         }, 2000);
       }
       
-      // Refresh sync statuses
-      await fetchSyncStatuses();
-      
     } catch (error) {
-      console.error('Error starting sync:', error);
+      console.error('Error starting vector sync:', error);
+      
+      // Create a more user-friendly error message with instructions
+      let errorMessage = error.message;
+      let detailedInstructions = "";
+      
+      if (error.message.includes("OpenAI API key")) {
+        errorMessage = "OpenAI API key is required for OpenAI embeddings";
+        detailedInstructions = `
+          To configure an OpenAI provider:
+          1. Go to Settings > LLM Providers
+          2. Click "Add Provider"
+          3. Select "OpenAI" as the provider
+          4. Enter your API key from openai.com
+          5. Click Save
+        `;
+      } else if (error.message.includes("Ollama")) {
+        errorMessage = "Error connecting to Ollama. Please make sure Ollama is running on your machine.";
+        detailedInstructions = `
+          To use Ollama:
+          1. Ensure Ollama is installed and running on your machine
+          2. Verify Ollama is accessible at http://localhost:11434
+        `;
+      }
+      
       setSyncResult({
         success: false,
-        message: `Error: ${error.message}`,
-        detailedInstructions: error.message.includes('OpenAI API key') 
-          ? 'Please configure your OpenAI API key in Settings > LLM Providers before using this feature.' 
-          : null
+        message: errorMessage,
+        detailedInstructions: detailedInstructions,
+        status: 'failed'
+      });
+      
+      toast({
+        title: 'Error Starting Vector Sync',
+        description: errorMessage,
+        status: 'error',
+        duration: 5000,
+        isClosable: true,
       });
     } finally {
       setIsSyncing(false);

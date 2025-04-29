@@ -90,16 +90,126 @@ class SQLGlotLineageExtractor(BaseLineageExtractor):
                 "error": str(e)
             }
     
+    def extract_column_lineage(self, sql_ast: Any, file_path: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Extract column-level lineage from SQL AST
+        
+        Args:
+            sql_ast: SQLGlot AST
+            file_path: Original file path
+            
+        Returns:
+            Dictionary with column lineage information
+        """
+        try:
+            # Initialize result
+            result = {
+                "source_columns": [],
+                "target_columns": [],
+                "column_relationships": [], 
+                "file_path": file_path,
+                "metadata": {}
+            }
+            
+            # Check for CREATE or INSERT statements to determine target columns
+            target_table_name = None
+            target_table_schema = None
+            
+            if isinstance(sql_ast, Create):
+                target_obj = sql_ast.find(Table)
+                if target_obj:
+                    target_table_info = self._extract_table_info(target_obj)
+                    target_table_name = target_table_info.get("name")
+                    target_table_schema = target_table_info.get("schema")
+                    
+                    # Extract column definitions from CREATE TABLE statement
+                    if hasattr(sql_ast, 'args') and 'columns' in sql_ast.args:
+                        for col_def in sql_ast.args['columns']:
+                            col_info = self._extract_column_info(col_def)
+                            if col_info:
+                                # Set the table name for this column
+                                col_info["table"] = target_table_name
+                                col_info["schema"] = target_table_schema
+                                result["target_columns"].append(col_info)
+                    
+                    # For CREATE TABLE AS SELECT, extract column lineage
+                    select_stmt = sql_ast.find(Select)
+                    if select_stmt:
+                        self._extract_select_column_mappings(select_stmt, result, target_table_name, target_table_schema)
+            
+            elif isinstance(sql_ast, Insert):
+                # For INSERT statements, get target table
+                target_obj = sql_ast.find(Table)
+                if target_obj:
+                    target_table_info = self._extract_table_info(target_obj)
+                    target_table_name = target_table_info.get("name")
+                    target_table_schema = target_table_info.get("schema")
+                    
+                    # For INSERT, extract column mappings
+                    select_stmt = sql_ast.find(Select)
+                    if select_stmt:
+                        # Check if the INSERT statement specifies target columns
+                        target_columns = []
+                        if hasattr(sql_ast, 'args') and 'columns' in sql_ast.args:
+                            for col in sql_ast.args['columns']:
+                                target_columns.append(self._extract_column_name(col))
+                        
+                        self._extract_select_column_mappings(select_stmt, result, target_table_name, target_table_schema, target_columns)
+            
+            # Extract from SELECT statement if it's the main statement (e.g., a view)
+            if isinstance(sql_ast, Select):
+                # If we have a SELECT as the main statement, it's likely a view
+                # We'll infer target table name from file name if possible
+                inferred_target = None
+                if file_path:
+                    import os
+                    base_name = os.path.basename(file_path)
+                    if base_name.endswith('.sql'):
+                        inferred_target = base_name[:-4]  # Remove .sql extension
+                        
+                # Use the inferred target or a generic name
+                target_name = inferred_target or "view_output"
+                self._extract_select_column_mappings(sql_ast, result, target_name, None)
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error extracting column lineage: {str(e)}")
+            return {
+                "source_columns": [],
+                "target_columns": [],
+                "column_relationships": [],
+                "file_path": file_path,
+                "error": str(e)
+            }
+    
     def _extract_source_tables(self, node: Any, tables: List[Any]) -> None:
         """
-        Recursively extract source tables from an AST node
+        Extract source tables from a SQL AST
         
         Args:
             node: SQLGlot AST node
-            tables: List to populate with source table nodes
+            tables: List to populate with source tables
         """
         if node is None:
             return
+            
+        # Special handling for DBT source() macros in SQL comments or string literals
+        if hasattr(node, 'comments') and node.comments:
+            for comment in node.comments:
+                if 'source(' in comment:
+                    # Try to extract source reference from comment
+                    try:
+                        # Pattern: source('schema_name', 'table_name')
+                        import re
+                        source_match = re.search(r"source\(['\"]([^'\"]+)['\"],\s*['\"]([^'\"]+)['\"]\)", comment)
+                        if source_match:
+                            schema_name, table_name = source_match.groups()
+                            source_table = sqlglot.exp.Table(this=table_name, db=schema_name)
+                            source_table.set_source_type('dbt_source')
+                            tables.append(source_table)
+                    except Exception as e:
+                        pass
         
         # If it's a table reference, add it to the list
         if isinstance(node, Table):
@@ -498,6 +608,82 @@ class SQLGlotLineageExtractor(BaseLineageExtractor):
             }
         return None
     
+    def _extract_select_column_mappings(self, select_stmt: Select, result: Dict[str, Any], 
+                                  target_table_name: str, target_schema: str = None,
+                                  target_column_names: List[str] = None) -> None:
+        """
+        Extract column mappings from a SELECT statement, establishing relationships between
+        source and target columns.
+        
+        Args:
+            select_stmt: The SELECT statement to analyze
+            result: Dictionary to populate with column mappings
+            target_table_name: Name of the target table
+            target_schema: Schema of the target table (optional)
+            target_column_names: List of target column names if specified (optional)
+        """
+        try:
+            # Get SELECT expressions (columns)
+            columns = []
+            if hasattr(select_stmt, 'expressions'):
+                columns = select_stmt.expressions
+            
+            # If we don't have specific target column names, we'll infer them
+            # from the SELECT column aliases or expressions
+            if not target_column_names:
+                target_column_names = []
+                for col in columns:
+                    # Try to get alias first
+                    if hasattr(col, 'alias') and col.alias:
+                        target_column_names.append(col.alias)
+                    # Fallback to column name
+                    else:
+                        target_column_names.append(self._extract_column_name(col))
+            
+            # Process each column expression in the SELECT statement
+            for i, col in enumerate(columns):
+                # Only process if we have a corresponding target column name
+                if i < len(target_column_names):
+                    target_column_name = target_column_names[i]
+                    
+                    # Create target column info
+                    target_col_info = {
+                        "name": target_column_name,
+                        "table": target_table_name,
+                        "schema": target_schema,
+                        "alias": None,
+                        "data_type": None  # We might not know the data type here
+                    }
+                    
+                    # Add to target columns if not already there
+                    if target_col_info not in result["target_columns"]:
+                        result["target_columns"].append(target_col_info)
+                    
+                    # Find source column references for this expression
+                    source_references = []
+                    self._find_column_references(col, source_references)
+                    
+                    # Add source references to the overall source columns list
+                    for src_ref in source_references:
+                        if src_ref not in result["source_columns"]:
+                            result["source_columns"].append(src_ref)
+                        
+                        # Create a column relationship
+                        relationship = {
+                            "source_column": src_ref["column"],
+                            "source_table": src_ref["table"],
+                            "target_column": target_column_name,
+                            "target_table": target_table_name,
+                            "relationship_type": "derived_from"
+                        }
+                        
+                        # Add relationship if not already present
+                        if relationship not in result["column_relationships"]:
+                            result["column_relationships"].append(relationship)
+        
+        except Exception as e:
+            logger.error(f"Error extracting column mappings: {str(e)}")
+
     def _extract_source_columns(self, select_stmt: Select, result: Dict[str, Any]) -> None:
         """Extract source columns and relationships from a SELECT statement"""
         columns = []

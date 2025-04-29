@@ -1,0 +1,438 @@
+{
+  "tables": [
+    {
+      "id": "b1feada2-1629-4207-a73b-0730dd245fa8",
+      "name": "target_table",
+      "schema": "public",
+      "database": null,
+      "type": "table",
+      "github_path": "models/target_table.sql",
+      "description": "A target table for testing"
+    },
+    {
+      "id": "d0d3c768-8cae-432a-8672-9945921a8306",
+      "name": "intermediate_table",
+      "schema": "public",
+      "database": null,
+      "type": "table",
+      "github_path": "models/intermediate_table.sql",
+      "description": "An intermediate table for testing"
+    },
+    {
+      "id": "c391025d-b8bc-435b-91f5-aceb62a725db",
+      "name": "source_table",
+      "schema": "public",
+      "database": null,
+      "type": "table",
+      "github_path": "models/source_table.sql",
+      "description": "A source table for testing"
+    }
+  ],
+  "columns": [
+    {
+      "id": "37d6fdcc-1e60-4a7b-ba41-15d2a13d74f2",
+      "name": "id",
+      "table_id": "d0d3c768-8cae-432a-8672-9945921a8306",
+      "data_type": "integer",
+      "is_primary_key": true,
+      "is_foreign_key": false,
+      "description": "Primary key for intermediate table"
+    },
+    {
+      "id": "ea2d0e75-8a75-44e1-9f47-f0aab66170ff",
+      "name": "name",
+      "table_id": "d0d3c768-8cae-432a-8672-9945921a8306",
+      "data_type": "varchar",
+      "is_primary_key": false,
+      "is_foreign_key": false,
+      "description": "Name column in intermediate table"
+    },
+    {
+      "id": "3aa14af4-55f9-409c-bfb4-52c2794015f9",
+      "name": "modified_value",
+      "table_id": "d0d3c768-8cae-432a-8672-9945921a8306",
+      "data_type": "decimal",
+      "is_primary_key": false,
+      "is_foreign_key": false,
+      "description": "Modified value column in intermediate table"
+    },
+    {
+      "id": "d7a50151-6600-49a4-b760-46fdc6172d42",
+      "name": "id",
+      "table_id": "c391025d-b8bc-435b-91f5-aceb62a725db",
+      "data_type": "integer",
+      "is_primary_key": true,
+      "is_foreign_key": false,
+      "description": "Primary key for source table"
+    },
+    {
+      "id": "b4660f11-d9ed-4e92-8bb2-5e7666ba541d",
+      "name": "name",
+      "table_id": "c391025d-b8bc-435b-91f5-aceb62a725db",
+      "data_type": "varchar",
+      "is_primary_key": false,
+      "is_foreign_key": false,
+      "description": "Name column in source table"
+    },
+    {
+      "id": "919d26e7-b682-4e07-bc3a-d7b82deac731",
+      "name": "value",
+      "table_id": "c391025d-b8bc-435b-91f5-aceb62a725db",
+      "data_type": "decimal",
+      "is_primary_key": false,
+      "is_foreign_key": false,
+      "description": "Value column in source table"
+    }
+  ],
+  "relationships": [
+    {
+      "id": "4eb8b45f-48e4-403b-a07f-14e1ab4a5af3",
+      "type": "depends_on",
+      "source": {
+        "table_id": "c391025d-b8bc-435b-91f5-aceb62a725db",
+        "table_name": "source_table",
+        "column_id": null,
+        "column_name": null
+      },
+      "target": {
+        "table_id": "d0d3c768-8cae-432a-8672-9945921a8306",
+        "table_name": "intermediate_table",
+        "column_id": null,
+        "column_name": null
+      },
+      "github_path": "models/intermediate_table.sql"
+    },
+    {
+      "id": "920784ce-74cb-4803-a820-d136539b39bb",
+      "type": "direct",
+      "source": {
+        "table_id": "c391025d-b8bc-435b-91f5-aceb62a725db",
+        "table_name": "source_table",
+        "column_id": "d7a50151-6600-49a4-b760-46fdc6172d42",
+        "column_name": "id"
+      },
+      "target": {
+        "table_id": "d0d3c768-8cae-432a-8672-9945921a8306",
+        "table_name": "intermediate_table",
+        "column_id": "37d6fdcc-1e60-4a7b-ba41-15d2a13d74f2",
+        "column_name": "id"
+      },
+      "github_path": "models/intermediate_table.sql"
+    },
+    {
+      "id": "a3f3b1d4-baa0-45c0-80ce-ef41cd6c2311",
+      "type": "direct",
+      "source": {
+        "table_id": "c391025d-b8bc-435b-91f5-aceb62a725db",
+        "table_name": "source_table",
+        "column_id": "b4660f11-d9ed-4e92-8bb2-5e7666ba541d",
+        "column_name": "name"
+      },
+      "target": {
+        "table_id": "d0d3c768-8cae-432a-8672-9945921a8306",
+        "table_name": "intermediate_table",
+        "column_id": "ea2d0e75-8a75-44e1-9f47-f0aab66170ff",
+        "column_name": "name"
+      },
+      "github_path": "models/intermediate_table.sql"
+    },
+    {
+      "id": "1ef8ae80-b419-44d2-8137-3a7dfecd5042",
+      "type": "transformed",
+      "source": {
+        "table_id": "c391025d-b8bc-435b-91f5-aceb62a725db",
+        "table_name": "source_table",
+        "column_id": "919d26e7-b682-4e07-bc3a-d7b82deac731",
+        "column_name": "value"
+      },
+      "target": {
+        "table_id": "d0d3c768-8cae-432a-8672-9945921a8306",
+        "table_name": "intermediate_table",
+        "column_id": "3aa14af4-55f9-409c-bfb4-52c2794015f9",
+        "column_name": "modified_value"
+      },
+      "github_path": "models/intermediate_table.sql"
+    },
+    {
+      "id": "17d41ded-672e-4516-8b53-570e3bc521d6",
+      "type": "depends_on",
+      "source": {
+        "table_id": "d0d3c768-8cae-432a-8672-9945921a8306",
+        "table_name": "intermediate_table",
+        "column_id": null,
+        "column_name": null
+      },
+      "target": {
+        "table_id": "b1feada2-1629-4207-a73b-0730dd245fa8",
+        "table_name": "target_table",
+        "column_id": null,
+        "column_name": null
+      },
+      "github_path": "models/target_table.sql"
+    },
+    {
+      "id": "f2bb3afa-d467-49a9-b70e-34e9457b2e01",
+      "type": "direct",
+      "source": {
+        "table_id": "d0d3c768-8cae-432a-8672-9945921a8306",
+        "table_name": "intermediate_table",
+        "column_id": "37d6fdcc-1e60-4a7b-ba41-15d2a13d74f2",
+        "column_name": "id"
+      },
+      "target": {
+        "table_id": "b1feada2-1629-4207-a73b-0730dd245fa8",
+        "table_name": "target_table",
+        "column_id": "1253081e-2e7c-4ee6-abce-f27f6b89d4bc",
+        "column_name": "id"
+      },
+      "github_path": "models/target_table.sql"
+    },
+    {
+      "id": "18f1a2ee-ae8e-4b46-a624-10e1706d1467",
+      "type": "transformed",
+      "source": {
+        "table_id": "d0d3c768-8cae-432a-8672-9945921a8306",
+        "table_name": "intermediate_table",
+        "column_id": "ea2d0e75-8a75-44e1-9f47-f0aab66170ff",
+        "column_name": "name"
+      },
+      "target": {
+        "table_id": "b1feada2-1629-4207-a73b-0730dd245fa8",
+        "table_name": "target_table",
+        "column_id": "89d25054-cf58-4df3-b3cc-d49692227f39",
+        "column_name": "full_name"
+      },
+      "github_path": "models/target_table.sql"
+    },
+    {
+      "id": "3ead0cb1-901e-4525-b7b0-f77b88de695f",
+      "type": "aggregated",
+      "source": {
+        "table_id": "d0d3c768-8cae-432a-8672-9945921a8306",
+        "table_name": "intermediate_table",
+        "column_id": "3aa14af4-55f9-409c-bfb4-52c2794015f9",
+        "column_name": "modified_value"
+      },
+      "target": {
+        "table_id": "b1feada2-1629-4207-a73b-0730dd245fa8",
+        "table_name": "target_table",
+        "column_id": "8d48d7e0-c89b-4f81-9e80-317702829d00",
+        "column_name": "calculated_value"
+      },
+      "github_path": "models/target_table.sql"
+    }
+  ],
+  "root_table": {
+    "id": "b1feada2-1629-4207-a73b-0730dd245fa8",
+    "name": "target_table",
+    "schema": "public",
+    "database": null,
+    "type": "table",
+    "github_path": "models/target_table.sql",
+    "description": "A target table for testing"
+  },
+  "metadata": {
+    "tech_stack": "tsql",
+    "generated_at": 1745880254.5352058
+  },
+  "column_lineage": [
+    {
+      "source": "d7a50151-6600-49a4-b760-46fdc6172d42",
+      "target": "37d6fdcc-1e60-4a7b-ba41-15d2a13d74f2",
+      "type": "direct"
+    },
+    {
+      "source": "b4660f11-d9ed-4e92-8bb2-5e7666ba541d",
+      "target": "ea2d0e75-8a75-44e1-9f47-f0aab66170ff",
+      "type": "direct"
+    },
+    {
+      "source": "919d26e7-b682-4e07-bc3a-d7b82deac731",
+      "target": "3aa14af4-55f9-409c-bfb4-52c2794015f9",
+      "type": "transformed"
+    },
+    {
+      "source": "37d6fdcc-1e60-4a7b-ba41-15d2a13d74f2",
+      "target": "1253081e-2e7c-4ee6-abce-f27f6b89d4bc",
+      "type": "direct"
+    },
+    {
+      "source": "ea2d0e75-8a75-44e1-9f47-f0aab66170ff",
+      "target": "89d25054-cf58-4df3-b3cc-d49692227f39",
+      "type": "transformed"
+    },
+    {
+      "source": "3aa14af4-55f9-409c-bfb4-52c2794015f9",
+      "target": "8d48d7e0-c89b-4f81-9e80-317702829d00",
+      "type": "aggregated"
+    }
+  ],
+  "models": [
+    {
+      "id": "b1feada2-1629-4207-a73b-0730dd245fa8",
+      "name": "target_table",
+      "schema": "public",
+      "database": null,
+      "type": "table",
+      "github_path": "models/target_table.sql",
+      "description": "A target table for testing"
+    },
+    {
+      "id": "d0d3c768-8cae-432a-8672-9945921a8306",
+      "name": "intermediate_table",
+      "schema": "public",
+      "database": null,
+      "type": "table",
+      "github_path": "models/intermediate_table.sql",
+      "description": "An intermediate table for testing"
+    },
+    {
+      "id": "c391025d-b8bc-435b-91f5-aceb62a725db",
+      "name": "source_table",
+      "schema": "public",
+      "database": null,
+      "type": "table",
+      "github_path": "models/source_table.sql",
+      "description": "A source table for testing"
+    }
+  ],
+  "edges": [
+    {
+      "id": "4eb8b45f-48e4-403b-a07f-14e1ab4a5af3",
+      "type": "depends_on",
+      "source": {
+        "table_id": "c391025d-b8bc-435b-91f5-aceb62a725db",
+        "table_name": "source_table",
+        "column_id": null,
+        "column_name": null
+      },
+      "target": {
+        "table_id": "d0d3c768-8cae-432a-8672-9945921a8306",
+        "table_name": "intermediate_table",
+        "column_id": null,
+        "column_name": null
+      },
+      "github_path": "models/intermediate_table.sql"
+    },
+    {
+      "id": "920784ce-74cb-4803-a820-d136539b39bb",
+      "type": "direct",
+      "source": {
+        "table_id": "c391025d-b8bc-435b-91f5-aceb62a725db",
+        "table_name": "source_table",
+        "column_id": "d7a50151-6600-49a4-b760-46fdc6172d42",
+        "column_name": "id"
+      },
+      "target": {
+        "table_id": "d0d3c768-8cae-432a-8672-9945921a8306",
+        "table_name": "intermediate_table",
+        "column_id": "37d6fdcc-1e60-4a7b-ba41-15d2a13d74f2",
+        "column_name": "id"
+      },
+      "github_path": "models/intermediate_table.sql"
+    },
+    {
+      "id": "a3f3b1d4-baa0-45c0-80ce-ef41cd6c2311",
+      "type": "direct",
+      "source": {
+        "table_id": "c391025d-b8bc-435b-91f5-aceb62a725db",
+        "table_name": "source_table",
+        "column_id": "b4660f11-d9ed-4e92-8bb2-5e7666ba541d",
+        "column_name": "name"
+      },
+      "target": {
+        "table_id": "d0d3c768-8cae-432a-8672-9945921a8306",
+        "table_name": "intermediate_table",
+        "column_id": "ea2d0e75-8a75-44e1-9f47-f0aab66170ff",
+        "column_name": "name"
+      },
+      "github_path": "models/intermediate_table.sql"
+    },
+    {
+      "id": "1ef8ae80-b419-44d2-8137-3a7dfecd5042",
+      "type": "transformed",
+      "source": {
+        "table_id": "c391025d-b8bc-435b-91f5-aceb62a725db",
+        "table_name": "source_table",
+        "column_id": "919d26e7-b682-4e07-bc3a-d7b82deac731",
+        "column_name": "value"
+      },
+      "target": {
+        "table_id": "d0d3c768-8cae-432a-8672-9945921a8306",
+        "table_name": "intermediate_table",
+        "column_id": "3aa14af4-55f9-409c-bfb4-52c2794015f9",
+        "column_name": "modified_value"
+      },
+      "github_path": "models/intermediate_table.sql"
+    },
+    {
+      "id": "17d41ded-672e-4516-8b53-570e3bc521d6",
+      "type": "depends_on",
+      "source": {
+        "table_id": "d0d3c768-8cae-432a-8672-9945921a8306",
+        "table_name": "intermediate_table",
+        "column_id": null,
+        "column_name": null
+      },
+      "target": {
+        "table_id": "b1feada2-1629-4207-a73b-0730dd245fa8",
+        "table_name": "target_table",
+        "column_id": null,
+        "column_name": null
+      },
+      "github_path": "models/target_table.sql"
+    },
+    {
+      "id": "f2bb3afa-d467-49a9-b70e-34e9457b2e01",
+      "type": "direct",
+      "source": {
+        "table_id": "d0d3c768-8cae-432a-8672-9945921a8306",
+        "table_name": "intermediate_table",
+        "column_id": "37d6fdcc-1e60-4a7b-ba41-15d2a13d74f2",
+        "column_name": "id"
+      },
+      "target": {
+        "table_id": "b1feada2-1629-4207-a73b-0730dd245fa8",
+        "table_name": "target_table",
+        "column_id": "1253081e-2e7c-4ee6-abce-f27f6b89d4bc",
+        "column_name": "id"
+      },
+      "github_path": "models/target_table.sql"
+    },
+    {
+      "id": "18f1a2ee-ae8e-4b46-a624-10e1706d1467",
+      "type": "transformed",
+      "source": {
+        "table_id": "d0d3c768-8cae-432a-8672-9945921a8306",
+        "table_name": "intermediate_table",
+        "column_id": "ea2d0e75-8a75-44e1-9f47-f0aab66170ff",
+        "column_name": "name"
+      },
+      "target": {
+        "table_id": "b1feada2-1629-4207-a73b-0730dd245fa8",
+        "table_name": "target_table",
+        "column_id": "89d25054-cf58-4df3-b3cc-d49692227f39",
+        "column_name": "full_name"
+      },
+      "github_path": "models/target_table.sql"
+    },
+    {
+      "id": "3ead0cb1-901e-4525-b7b0-f77b88de695f",
+      "type": "aggregated",
+      "source": {
+        "table_id": "d0d3c768-8cae-432a-8672-9945921a8306",
+        "table_name": "intermediate_table",
+        "column_id": "3aa14af4-55f9-409c-bfb4-52c2794015f9",
+        "column_name": "modified_value"
+      },
+      "target": {
+        "table_id": "b1feada2-1629-4207-a73b-0730dd245fa8",
+        "table_name": "target_table",
+        "column_id": "8d48d7e0-c89b-4f81-9e80-317702829d00",
+        "column_name": "calculated_value"
+      },
+      "github_path": "models/target_table.sql"
+    }
+  ],
+  "root_table_id": "b1feada2-1629-4207-a73b-0730dd245fa8"
+}

@@ -409,6 +409,8 @@ async def process_repository_for_lineage(connector_id: str, repo_url: str, tech_
                     
                     # Process column lineage from SQL files
                     if column_lineage and "target_columns" in column_lineage:
+                        # First, add all target columns to the database
+                        column_id_map = {}  # Map column names to their IDs for relationship creation
                         for column_info in column_lineage.get("target_columns", []):
                             column_name = column_info.get("name")
                             if not column_name:
@@ -424,9 +426,88 @@ async def process_repository_for_lineage(connector_id: str, repo_url: str, tech_
                                     is_primary_key=column_info.get("is_primary_key", False),
                                     is_foreign_key=column_info.get("is_foreign_key", False)
                                 )
+                                # Store ID for relationship creation
+                                column_id_map[column_name] = column_id
                                 logger.info(f"Added column {column_name} to table {target_table} from SQL extraction")
                             except Exception as col_e:
                                 logger.warning(f"Failed to add column {column_name}: {str(col_e)}")
+                                
+                        # Now process column relationships if any
+                        if "column_relationships" in column_lineage:
+                            for rel in column_lineage.get("column_relationships", []):
+                                source_column = rel.get("source_column")
+                                source_table_name = rel.get("source_table")
+                                target_column = rel.get("target_column")
+                                
+                                if not source_column or not target_column:
+                                    continue
+                                    
+                                # Try to find the target column ID
+                                target_column_id = column_id_map.get(target_column)
+                                if not target_column_id:
+                                    logger.warning(f"Cannot find target column ID for {target_column}")
+                                    continue
+                                    
+                                # Find source table
+                                source_table_obj = None
+                                if source_table_name:
+                                    source_table_obj = lineage_db.get_table_by_name(source_table_name, tech_stack)
+                                
+                                # If source table not found by name, try to find it from source tables we've processed
+                                if not source_table_obj:
+                                    for src_info in table_lineage.get("source_tables", []):
+                                        if isinstance(src_info, dict) and src_info.get("name") == source_table_name:
+                                            source_table_obj = lineage_db.get_table_by_name(src_info.get("name"), tech_stack)
+                                            break
+                                
+                                if not source_table_obj:
+                                    logger.warning(f"Cannot find source table for column relationship: {source_table_name}")
+                                    continue
+                                    
+                                # Find the source column in the table
+                                source_columns = lineage_db.get_columns_for_table(source_table_obj["table_id"])
+                                source_column_id = None
+                                
+                                for src_col in source_columns:
+                                    if src_col["column_name"] == source_column:
+                                        source_column_id = src_col["column_id"]
+                                        break
+                                
+                                if not source_column_id:
+                                    # Source column doesn't exist yet, create it
+                                    try:
+                                        source_column_id = lineage_db.add_column(
+                                            table_id=source_table_obj["table_id"],
+                                            column_name=source_column,
+                                            data_type=None  # We may not know the data type
+                                        )
+                                        logger.info(f"Added source column {source_column} to table {source_table_name}")
+                                    except Exception as src_col_e:
+                                        logger.warning(f"Failed to add source column {source_column}: {str(src_col_e)}")
+                                        continue
+                                
+                                # Check if we have column IDs for both source and target
+                                if source_column_id and target_column_id:
+                                    # Use a more specific relationship type if available
+                                    rel_type = rel.get("relationship_type", "depends_on")
+                                    
+                                    try:  
+                                        relationship_id = lineage_db.add_relationship(
+                                            source_table_id=source_table_obj["table_id"],
+                                            target_table_id=table_id,
+                                            relationship_type=rel_type,
+                                            source_column_id=source_column_id,
+                                            target_column_id=target_column_id,
+                                            github_path=relative_path
+                                        )
+                                        
+                                        # Detailed logging to help diagnose relationship issues
+                                        logger.info(f"Added column relationship: {source_table_name}.{source_column} -> {target_table}.{target_column} "  
+                                                  f"[IDs: {source_column_id} -> {target_column_id}] [Type: {rel_type}]")
+                                    except Exception as rel_e:
+                                        logger.warning(f"Failed to add column relationship: {str(rel_e)} - "  
+                                                    f"Source: {source_table_name}.{source_column} ({source_column_id}), " 
+                                                    f"Target: {target_table}.{target_column} ({target_column_id})")
                     
                     # Process column information from YAML files in dialect_lineage
                     if dialect_lineage and "columns" in dialect_lineage:
@@ -544,6 +625,7 @@ async def process_repository_for_lineage(connector_id: str, repo_url: str, tech_
                                     # Generate and store comprehensive lineage
                                     lineage_id = lineage_db.generate_comprehensive_lineage(
                                         root_table_id=table_id,
+                                        tech_stack=tech_stack,
                                         github_path=github_path
                                     )
                                     logger.info(f"Generated comprehensive lineage for {table_dict['table_name']} with ID {lineage_id}")
