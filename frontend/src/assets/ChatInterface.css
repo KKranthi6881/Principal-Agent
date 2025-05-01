@@ -92,6 +92,53 @@ details[open] .section-header {
   background-color: #f9f9f9;
 }
 
+/* Enhanced Table styling */
+.section-content table, .md-table table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 16px 0;
+  border: 1px solid #e2e8f0;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+}
+
+.section-content th, .section-content td,
+.md-table th, .md-table td {
+  border: 1px solid #e2e8f0;
+  padding: 10px 12px;
+  text-align: left;
+  vertical-align: top;
+  word-break: normal;
+  line-height: 1.5;
+}
+
+.section-content th, .md-table th {
+  background-color: #f7fafc;
+  font-weight: 600;
+  color: #4a5568;
+}
+
+.section-content tr:nth-child(even), .md-table tr:nth-child(even) {
+  background-color: #f9fafb;
+}
+
+/* Table header styling */
+.md-table thead tr {
+  border-bottom: 2px solid #cbd5e0;
+}
+
+/* Table nowrap option for specific columns */
+.md-table td.nowrap, .md-table th.nowrap {
+  white-space: nowrap;
+}
+
+/* Better mobile responsive tables */
+@media screen and (max-width: 768px) {
+  .md-table {
+    overflow-x: auto;
+    display: block;
+  }
+}
+
 /* Code block styling */
 .section-content pre {
   background-color: #f8f8f8;
@@ -102,4 +149,4 @@ details[open] .section-header {
 
 .section-content code {
   font-family: 'Courier New', Courier, monospace;
-} 
+}

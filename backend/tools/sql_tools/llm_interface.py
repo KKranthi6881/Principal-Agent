@@ -530,6 +530,109 @@ class SQLLLMInterface:
                 
         return None
 
+    def extract_lineage(self, sql_code: str, dialect: Optional[str] = None, file_path: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Extract lineage information from SQL code using the analyze_lineage method
+        
+        Args:
+            sql_code: SQL code to analyze
+            dialect: SQL dialect to use
+            file_path: Path to the SQL file
+            
+        Returns:
+            Dictionary with extracted lineage information
+        """
+        return self.analyze_lineage(sql_code, dialect, file_path)
+
+    def analyze_lineage(self, sql_code: str, dialect: Optional[str] = None, file_path: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Analyze SQL code to extract lineage information
+        
+        Args:
+            sql_code: SQL code to analyze
+            dialect: SQL dialect to use
+            file_path: Path to the SQL file
+            
+        Returns:
+            Dictionary with extracted lineage information
+        """
+        try:
+            # Preprocess SQL code
+            clean_sql = self._preprocess_sql_code(sql_code)
+            
+            # Set the system prompt for lineage extraction
+            system_prompt = """
+            You are an expert SQL analyst specializing in data lineage extraction. Your task is to analyze SQL code and 
+            identify all table and column level dependencies.
+            """
+            
+            # Create the user prompt for this specific SQL code
+            user_prompt = f"""
+            Analyze the following SQL code to extract data lineage information. Focus on identifying 
+            source-to-target relationships between tables and columns.
+            
+            ```sql
+            {clean_sql}
+            ```
+            
+            Extract and return lineage information in JSON format with the following structure:
+            
+            ```json
+            {{
+                "table_lineage": [
+                    {{
+                        "source": "source_table_name",
+                        "target": "target_table_name",
+                        "relationship": "join/reference/etc"
+                    }}
+                ],
+                "column_lineage": [
+                    {{
+                        "source_table": "source_table_name",
+                        "source_column": "source_column_name",
+                        "target_table": "target_table_name",
+                        "target_column": "target_column_name",
+                        "transformation": "copy/calculation/aggregation/etc"
+                    }}
+                ],
+                "dialect_used": "detected_dialect",
+                "file_path": "path_to_file",
+                "github_url": "github_url_if_available"
+            }}
+            ```
+            
+            Only include relationships that are explicitly defined in the code. If you can't confidently determine a relationship, omit it.
+            """
+            
+            # Get response from LLM
+            response = self._call_llm(system_prompt, user_prompt, temp=0.0, response_format={"type": "json_object"})
+            
+            # Parse the response
+            if isinstance(response, str):
+                try:
+                    result = json.loads(response)
+                except json.JSONDecodeError:
+                    # Try to extract JSON from the string if it's wrapped in markdown or other text
+                    import re
+                    json_match = re.search(r'```json\s*([\s\S]*?)\s*```', response)
+                    if json_match:
+                        try:
+                            result = json.loads(json_match.group(1))
+                        except:
+                            result = {"error": "Failed to parse JSON from response"}
+                    else:
+                        result = {"error": "Failed to parse JSON from response"}
+            else:
+                result = response
+                
+            # Add file_path if provided
+            if file_path and isinstance(result, dict):
+                result["file_path"] = file_path
+                
+            return result
+        except Exception as e:
+            return {"error": f"Error analyzing lineage: {str(e)}"}
+
     def search_for_table(self, table_name: str, limit: int = 5) -> Dict[str, Any]:
         """
         Search for SQL files containing the specified table

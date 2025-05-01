@@ -385,6 +385,53 @@ class EnhancedGitHubVectorStore:
         except Exception as e:
             logger.error(f"Error getting document count: {e}")
             return 0
+    
+    def get_all_documents(self):
+        """
+        Retrieve all documents in the vector store
+        
+        Returns:
+            List of Document objects with page_content and metadata
+        """
+        try:
+            # Get all documents from the collection
+            results = self.collection.get()
+            
+            documents = []
+            if results and "documents" in results and "metadatas" in results and "ids" in results:
+                # Zip them together to form Document objects
+                for doc_content, metadata, doc_id in zip(
+                    results["documents"], results["metadatas"], results["ids"]
+                ):
+                    # Create a simple Document-like object
+                    doc = SimpleDocument(
+                        page_content=doc_content,
+                        metadata=metadata,
+                        id=doc_id
+                    )
+                    documents.append(doc)
+                    
+            return documents
+        except Exception as e:
+            logger.error(f"Error retrieving all documents: {str(e)}")
+            return []
+
+
+class SimpleDocument:
+    """A simple document class that mimics the interface of LangChain Document"""
+    
+    def __init__(self, page_content, metadata=None, id=None):
+        """
+        Initialize a SimpleDocument
+        
+        Args:
+            page_content: The content of the document
+            metadata: Document metadata as a dictionary
+            id: Document ID
+        """
+        self.page_content = page_content
+        self.metadata = metadata or {}
+        self.id = id
 
 
 def add_code_files_batch(ids, contents, metadatas, embedding_provider=None):

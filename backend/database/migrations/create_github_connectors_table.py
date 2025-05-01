@@ -31,7 +31,8 @@ def run_migration():
         active BOOLEAN DEFAULT 1,   -- Whether this connector is active
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        repo_url TEXT               -- Direct GitHub repository URL
+        repo_url TEXT               -- Direct GitHub repository URL,
+        tech_stack TEXT DEFAULT 'postgresql'
     )
     ''')
     
@@ -44,8 +45,11 @@ def run_migration():
         if 'repo_url' not in columns:
             print("Adding repo_url column to github_connectors table...")
             cursor.execute("ALTER TABLE github_connectors ADD COLUMN repo_url TEXT")
+        if 'tech_stack' not in columns:
+            print("Adding tech_stack column to github_connectors table...")
+            cursor.execute("ALTER TABLE github_connectors ADD COLUMN tech_stack TEXT DEFAULT 'postgresql'")
     except Exception as e:
-        print(f"Error checking/adding repo_url column: {str(e)}")
+        print(f"Error checking/adding repo_url column or tech_stack column: {str(e)}")
     
     # Create indexes for better query performance
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_github_connectors_name ON github_connectors(name)')

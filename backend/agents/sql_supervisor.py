@@ -29,7 +29,7 @@ if backend_dir not in sys.path:
 
 from .base.supervisor import SupervisorAgent
 from .sql_agents.lineage_agent import LineageAgent
-from .sql_agents.dependency_agent import DependencyAgent
+#from .sql_agents.dependency_agent import DependencyAgent
 from .sql_agents.code_summarizer import CodeSummarizerAgent
 from .sql_agents.description_summarizer import DescriptionSummarizerAgent
 
@@ -136,9 +136,6 @@ Available agents and their actions with required parameters:
   - trace_table_lineage(table_name: str, direction: str = "upstream", max_depth: int = 5)
   - trace_column_lineage(table_name: str, column_name: str, direction: str = "upstream", max_depth: int = 5)
   - analyze_lineage(sql_code: str, task: str = "Analyze the SQL code") - Use this when you have SQL code to analyze
-- dependency_agent:
-  - analyze_dependencies(table_name: str, include_columns: bool = True)
-  - analyze_impact(table_name: str, column_name: str = None)
 - code_summarizer:
   - summarize_file(file_path: str)
   - describe_column(table_name: str, column_name: str)
@@ -230,7 +227,7 @@ Your response:
         # Create specialized agents
         self.agents = {
             "lineage_agent": LineageAgent(model=self.model, sql_tools=self.sql_tools),
-            "dependency_agent": DependencyAgent(model=self.model, sql_tools=self.sql_tools, github_tools=self.github_tools),
+            #"dependency_agent": DependencyAgent(model=self.model, sql_tools=self.sql_tools, github_tools=self.github_tools),
             "code_summarizer": CodeSummarizerAgent(model=self.model, sql_tools=self.sql_tools),
             "description_summarizer": DescriptionSummarizerAgent(model=self.model, sql_tools=self.sql_tools)
         }
@@ -344,7 +341,7 @@ Your response:
             self.planning_prompt.format_messages(**planning_input)
         )
         
-        # Parse the response
+        # Get the planning content
         planning_content = planning_response.content
         
         # Try to parse the JSON from the response
@@ -528,6 +525,26 @@ Your response:
                         
                     # Run the agent with updated params
                     result = agent.run(input_data)
+                
+                # Special case for code_summarizer
+                elif agent_name == "code_summarizer" and action == "summarize_file" and "file_path" in params:
+                    # Preprocess the file path to handle relative paths better
+                    file_path = params.get("file_path", "")
+                    
+                    # Log that we're preprocessing the path
+                    logger.info(f"Preprocessing file path for code_summarizer: {file_path}")
+                    
+                    # Try to clean up the path
+                    if file_path:
+                        # Remove any quotation marks that might be present
+                        file_path = file_path.strip('"\'')
+                        
+                        # Update the parameters
+                        params["file_path"] = file_path
+                        logger.info(f"Using preprocessed file path: {file_path}")
+                    
+                    # Run the agent with action and params directly instead of as input_data
+                    result = agent.run(action=action, params=params)
                 
                 # Normal case - run through the agent
                 else:
@@ -818,6 +835,7 @@ Your response:"""
         
         # Store the answer in the database
         if self.database:
+            # Save the user's question
             self.database.add_message(
                 thread_id=thread_id,
                 user_id=user_id,
@@ -1161,15 +1179,39 @@ Your response:"""
             try:
                 history = self.database.get_thread_history(thread_id)
                 
-                # Format the history as context
-                context_messages = []
-                for msg in history[-10:]:  # Get the last 10 messages for context
+                # Format the history as structured context with conversation pairs
+                context_pairs = []
+                current_pair = {}
+                
+                # Process the last 5 conversation exchanges (10 messages max)
+                for msg in history[-10:]:
                     if msg.get("role") == "user":
-                        context_messages.append(f"User: {msg.get('content', '')}")
+                        # Start a new conversation pair
+                        if current_pair and "question" in current_pair and "answer" in current_pair:
+                            context_pairs.append(current_pair)
+                            current_pair = {}
+                        current_pair["question"] = msg.get('content', '')
                     else:
-                        context_messages.append(f"Assistant: {msg.get('content', '')}")
-                        
-                context = "\n\n".join(context_messages)
+                        if "question" in current_pair:
+                            current_pair["answer"] = msg.get('content', '')
+                            context_pairs.append(current_pair)
+                            current_pair = {}
+                
+                # Add the last pair if not added
+                if current_pair and "question" in current_pair:
+                    context_pairs.append(current_pair)
+                
+                # Format context as structured exchanges
+                formatted_context = []
+                for i, pair in enumerate(context_pairs[-5:]):  # Take last 5 conversation pairs
+                    exchange_num = i + 1
+                    formatted_context.append(f"Exchange {exchange_num}:")
+                    formatted_context.append(f"User: {pair.get('question', '')}")
+                    if "answer" in pair:
+                        formatted_context.append(f"Assistant: {pair.get('answer', '')}")
+                    formatted_context.append("")  # Add blank line between exchanges
+                    
+                context = "\n".join(formatted_context)
                 return context
             except Exception as e:
                 logger.error(f"Error getting conversation history: {str(e)}")

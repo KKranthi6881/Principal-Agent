@@ -52,10 +52,9 @@ class DescriptionSummarizerAgent(Agent):
         
         # Set up the prompt templates
         self.table_description_prompt = ChatPromptTemplate.from_template("""
-            You are a Data Dictionary Expert. Your job is to create comprehensive descriptions for SQL tables
-            based on their structure, code, and context.
+            You are a Data Dictionary Expert tasked with creating consistent, concise descriptions for SQL tables.
             
-            Table: {table_name}
+            Table Name: {table_name}
             
             SQL Code:
             ```sql
@@ -64,23 +63,32 @@ class DescriptionSummarizerAgent(Agent):
             
             Additional Context:
             {context}
+
+            # INSTRUCTIONS
+            1. Analyze the table structure, code patterns, and naming conventions
+            2. Generate a clear, concise description focusing on BUSINESS VALUE first
+            3. Include technical details that would help developers and analysts
+            4. ALWAYS provide GitHub URLs when available
+            5. Be CONSISTENT in formatting and level of detail
+            6. Keep descriptions CRISP and to the point - avoid unnecessary words
             
-            Please provide a detailed description of this table in JSON format with the following structure:
+            # OUTPUT FORMAT
+            Provide your description in this exact JSON format:
             
-            ```
+            ```json
             {
-                "table_name": "The table name",
-                "business_name": "Business-friendly name for this table",
-                "technical_description": "Technical description of the table structure and purpose",
-                "business_description": "Business-focused description of what this table represents",
-                "domain": "Business domain this table belongs to",
+                "table_name": "The exact table name",
+                "business_name": "Business-friendly table name (1-3 words)",
+                "technical_description": "Clear technical description (1-2 sentences)",
+                "business_description": "Business-focused description (2-3 sentences)",
+                "domain": "Business domain this table belongs to (1-2 words)",
                 "primary_key": ["column1", "column2"],
                 "update_frequency": "How often this table is updated",
                 "main_columns": [
                     {
                         "column": "column_name",
-                        "business_name": "Business-friendly name",
-                        "description": "Description of the column's purpose",
+                        "business_name": "Clear business name",
+                        "description": "Concise purpose description",
                         "data_type": "Inferred data type"
                     }
                 ],
@@ -88,18 +96,24 @@ class DescriptionSummarizerAgent(Agent):
                     {
                         "related_table": "table_name",
                         "relationship_type": "parent/child/reference",
-                        "description": "Description of the relationship"
+                        "description": "Short relationship description"
+                    }
+                ],
+                "github_urls": [
+                    {
+                        "file": "Filename",
+                        "url": "Complete GitHub URL"
                     }
                 ]
             }
             ```
             
-            Infer as much information as possible from the provided code and context.
+            If you cannot determine a value with high confidence, use "Unknown" as the value.
+            ALWAYS include the "github_urls" section even if it's empty.
         """)
         
         self.column_description_prompt = ChatPromptTemplate.from_template("""
-            You are a Data Dictionary Expert. Your job is to create comprehensive descriptions for SQL columns
-            based on their structure, code, and context.
+            You are a Data Dictionary Expert tasked with creating consistent, concise descriptions for SQL columns.
             
             Table: {table_name}
             Column: {column_name}
@@ -112,34 +126,94 @@ class DescriptionSummarizerAgent(Agent):
             Column Lineage:
             {lineage}
             
-            Please provide a detailed description of this column in JSON format with the following structure:
+            # INSTRUCTIONS
+            1. Analyze how this column is created, used, and transformed
+            2. Generate a CONCISE description focusing on BUSINESS VALUE first
+            3. Include technical details that would help developers and analysts
+            4. ALWAYS provide GitHub URLs when available
+            5. Be CONSISTENT in formatting and level of detail
+            6. Keep descriptions CRISP and to the point - avoid unnecessary words
             
-            ```
+            # OUTPUT FORMAT
+            Provide your description in this exact JSON format:
+            
+            ```json
             {
-                "column_name": "The column name",
-                "table_name": "The table name",
-                "business_name": "Business-friendly name for this column",
-                "technical_description": "Technical description including data type, constraints, etc.",
-                "business_description": "Business-focused description of what this column represents",
+                "column_name": "The exact column name",
+                "table_name": "The exact table name",
+                "business_name": "Business-friendly name (1-3 words)",
+                "technical_description": "Technical description (1-2 sentences)",
+                "business_description": "Business-focused description (1-2 sentences)",
                 "data_type": "Inferred data type",
                 "nullable": true/false,
+                "primary_key": true/false,
                 "constraints": ["constraint1", "constraint2"],
-                "sample_values": ["example1", "example2"],
-                "source": "Where this data originates from",
+                "source": "Origin of this data",
                 "transformations": [
-                    "Description of transformation 1",
-                    "Description of transformation 2"
+                    "Transformation 1 - be specific and concise",
+                    "Transformation 2 - be specific and concise"
                 ],
                 "business_rules": [
-                    "Business rule 1",
-                    "Business rule 2"
+                    "Business rule 1 - be specific",
+                    "Business rule 2 - be specific"
+                ],
+                "github_urls": [
+                    {
+                        "file": "Filename",
+                        "url": "Complete GitHub URL"
+                    }
                 ]
             }
             ```
             
-            Infer as much information as possible from the provided code and lineage.
-            If you cannot determine a value with confidence, use "Unknown" or skip the field.
+            If you cannot determine a value with high confidence, use "Unknown" as the value.
+            ALWAYS include the "github_urls" section even if it's empty.
         """)
+        
+    def _build_github_url(self, repo_url: str, file_path: str) -> str:
+        """
+        Build a properly formatted URL for a file that points to the application's repository UI
+        
+        Args:
+            repo_url: Repository URL
+            file_path: File path
+            
+        Returns:
+            URL that points to the application's repository UI
+        """
+        if not repo_url:
+            return ""
+
+        # Extract repository info
+        repo_name = ""
+        owner = ""
+        
+        # Remove .git suffix if present
+        if repo_url.endswith('.git'):
+            repo_url = repo_url[:-4]
+        
+        # Ensure the repo URL doesn't have trailing slash
+        if repo_url.endswith('/'):
+            repo_url = repo_url[:-1]
+        
+        # Try to extract owner and repo
+        import re
+        github_url_match = re.match(r'https://github.com/([^/]+)/([^/]+)', repo_url)
+        if github_url_match:
+            owner = github_url_match.group(1)
+            repo_name = github_url_match.group(2)
+        else:
+            # If we couldn't extract owner/repo, use GitHub URL as fallback
+            if file_path and file_path.startswith('/'):
+                file_path = file_path[1:]
+            return f"{repo_url}/blob/main/{file_path}"
+        
+        # Remove leading slash from file path if present
+        if file_path and file_path.startswith('/'):
+            file_path = file_path[1:]
+            
+        # Build the application repository UI URL with file parameter for direct file opening
+        return f"http://localhost:5173/repository?repo={owner}/{repo_name}&path={file_path}&file={file_path}"
         
     def describe_table(self, table_name: str, dialect: Optional[str] = None, repo_url: Optional[str] = None):
         """

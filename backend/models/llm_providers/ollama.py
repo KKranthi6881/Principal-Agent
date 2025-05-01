@@ -72,14 +72,7 @@ class OllamaProvider(BaseLLMProvider):
             # This would be better with an actual API call to Ollama to get available models
             # For now, we'll return a static list of common models
             return [
-                {"id": "llama3.3", "name": "Meta Llama 3", "context_length": 8000, "description": "Llama 3 8B model from Meta"},
-                {"id": "llama3.2", "name": "Meta Llama 3.2 4b", "context_length": 8000, "description": "Updated version of Llama 3 8B model"},
-                {"id": "llama3.2:1b", "name": "Meta Llama 3.2 1b", "context_length": 8000, "description": "Updated version of Llama 3 8B model"},
-                {"id": "mistral-small3.1", "name": "Mistral 24B", "context_length": 128000, "description": "Mistral AI's foundation model"},
-                {"id": "mixtral", "name": "Mixtral 8x7B", "context_length": 32000, "description": "Mistral's mixture of experts model"},
-                {"id": "gemma3", "name": "Gemma3 4B", "context_length": 128000, "description": "Google's lightweight open model"},
-                {"id": "gemma3:1b", "name": "Gemma3 1B", "context_length": 128000, "description": "Google's lightweight open model"},
-                {"id": "deepseek-r1:8b", "name": "deepseek-r1:8b", "context_length": 128000, "description": "Deepseek compact model"}
+                {"id": "gemma3:12b", "name": "Gemma3 12B", "context_length": 8000, "description": "Google's lightweight open model"}
             ]
         except Exception as e:
             print(f"Error getting Ollama models: {e}")

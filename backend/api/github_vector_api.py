@@ -994,21 +994,37 @@ async def get_github_content(
             repo_url = f"https://github.com/{owner}/{repo_name}.git"
             return await fetch_repo_content(repo_url, path)
         elif repo and path:
-            # Normalize repository URL
-            normalized_repo = repo
-            
-            # Fix double .git extension
-            if normalized_repo.endswith(".git.git"):
-                normalized_repo = normalized_repo[:-4]  # Remove last .git
-            elif not normalized_repo.endswith(".git"):
-                normalized_repo = f"{normalized_repo}.git"
-            
-            # Fix duplicate github.com
-            if "github.com/github.com" in normalized_repo:
-                normalized_repo = normalized_repo.replace("github.com/github.com", "github.com")
-            
-            logger.info(f"Fetching content using normalized URL: {normalized_repo}, path: {path}")
-            return await fetch_repo_content(normalized_repo, path)
+            # For owner/repo format (like microsoft/sql-server-samples), we need to convert to a GitHub URL
+            # Check if this looks like an owner/repo pattern or a full URL
+            if '/' in repo and not repo.startswith('http') and not 'github.com' in repo:
+                # Looks like owner/repo format, use directly for local repo search
+                logger.info(f"Handling owner/repo format directly: {repo}, path: {path}")
+                try:
+                    # First try finding it in the local repos (direct owner/repo format)
+                    return await fetch_repo_content_local(repo, path)
+                except HTTPException as e:
+                    if e.status_code == 404:
+                        # If not found locally, try with full GitHub URL
+                        normalized_repo = f"https://github.com/{repo}.git"
+                        logger.info(f"Local repo not found, trying with GitHub URL: {normalized_repo}")
+                        return await fetch_repo_content(normalized_repo, path)
+                    raise
+            else:
+                # It's a full URL, normalize it
+                normalized_repo = repo
+                
+                # Fix double .git extension
+                if normalized_repo.endswith(".git.git"):
+                    normalized_repo = normalized_repo[:-4]  # Remove last .git
+                elif not normalized_repo.endswith(".git") and normalized_repo.startswith("http"):
+                    normalized_repo = f"{normalized_repo}.git"
+                
+                # Fix duplicate github.com
+                if "github.com/github.com" in normalized_repo:
+                    normalized_repo = normalized_repo.replace("github.com/github.com", "github.com")
+                
+                logger.info(f"Fetching content using normalized URL: {normalized_repo}, path: {path}")
+                return await fetch_repo_content(normalized_repo, path)
         else:
             raise HTTPException(status_code=400, detail="Either (repo and path), (owner, repo_name and path), or sync_id must be provided")
     except HTTPException as e:
@@ -1016,6 +1032,69 @@ async def get_github_content(
         raise e
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error getting file content: {str(e)}")
+
+async def fetch_repo_content_local(repo: str, path: str):
+    """Helper function to fetch content from a local repository using owner/repo format."""
+    try:
+        # Clean path parameter
+        clean_path = path.lstrip('/')
+        
+        # Parse owner and repo
+        if "/" in repo:
+            owner, repo_name = repo.split("/", 1)
+        else:
+            raise HTTPException(status_code=400, detail="Repository must be in format 'owner/repo'")
+        
+        # Find matching repo directory in the standard location
+        REPOS_DIR = os.path.join('storage', 'repos')
+        repo_dirs = glob.glob(os.path.join(REPOS_DIR, f"{owner}_{repo_name}_*"))
+        
+        if not repo_dirs:
+            logger.warning(f"Local repository not found: {owner}/{repo_name}")
+            raise HTTPException(status_code=404, detail=f"Repository {owner}/{repo_name} not found locally")
+        
+        # Use the first match
+        repo_dir = repo_dirs[0]
+        logger.info(f"Found local repository at: {repo_dir}")
+        
+        # Build the full path to the file
+        full_path = os.path.join(repo_dir, clean_path)
+        logger.info(f"Attempting to read local file at: {full_path}")
+        
+        if not os.path.exists(full_path) or not os.path.isfile(full_path):
+            logger.warning(f"File not found: {full_path}")
+            raise HTTPException(status_code=404, detail=f"File {clean_path} not found in repository")
+        
+        # Read file content
+        try:
+            with open(full_path, 'r', encoding='utf-8', errors='replace') as f:
+                content = f.read()
+            
+            # Get file size and name
+            size = os.path.getsize(full_path)
+            file_name = os.path.basename(full_path)
+            
+            logger.info(f"Successfully read local file: {path} ({size} bytes)")
+            return {
+                "content": content,
+                "size": size,
+                "path": clean_path,
+                "name": file_name
+            }
+        except UnicodeDecodeError:
+            # For binary files
+            logger.warning(f"Binary file detected: {full_path}")
+            return {
+                "content": "[Binary file not displayable in text format]",
+                "size": os.path.getsize(full_path),
+                "path": clean_path,
+                "name": os.path.basename(full_path)
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching local file content: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error fetching file content: {str(e)}")
 
 async def fetch_repo_content(repo_url: str, path: str):
     """Helper function to fetch content from a repository."""

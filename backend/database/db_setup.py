@@ -304,31 +304,23 @@ def setup_all_databases():
     # Insert default models for each provider
     models = [
         # OpenAI models
-        ('gpt-4o', 'openai', 'GPT-4o', 'Most capable OpenAI model', 128000, True),
         ('gpt-4o-mini', 'openai', 'GPT-4o Mini', 'Smaller and more cost-effective', 128000, False),
-        ('gpt-4-turbo', 'openai', 'GPT-4 Turbo', 'Fast and powerful model', 128000, False),
-        ('gpt-3.5-turbo', 'openai', 'GPT-3.5 Turbo', 'Balanced performance and cost', 16000, False),
+        ('gpt-4.1-mini', 'openai', 'GPT-4.1 Mini', 'Fast and powerful model', 1000000, True),
+        ('gpt-4.1', 'openai', 'GPT-4.1', 'Balanced performance and cost', 1000000, False),
+        ('gpt-4.1-nano', 'openai', 'GPT-4.1 Nano', 'Balanced performance and cost', 1000000, False),
         
         # Anthropic models
-        ('claude-3-5-sonnet-20240620', 'anthropic', 'Claude 3.5 Sonnet', 'Latest Claude model with improved capabilities', 200000, True),
-        ('claude-3-opus-20240229', 'anthropic', 'Claude 3 Opus', 'Most powerful Claude model', 200000, False),
-        ('claude-3-sonnet-20240229', 'anthropic', 'Claude 3 Sonnet', 'Balanced performance and capabilities', 200000, False),
-        ('claude-3-haiku-20240307', 'anthropic', 'Claude 3 Haiku', 'Fast and efficient model', 200000, False),
+        ('claude-3.7-sonnet', 'anthropic', 'Claude 3.7 Sonnet', 'Latest Claude model with improved capabilities', 200000, True),
+        ('claude-3.5-sonnet', 'anthropic', 'claude-3.5-sonnet', 'Most powerful Claude model', 200000, False),
+
         
         # Google models
-        ('gemini-1.5-pro', 'google', 'Gemini 1.5 Pro', 'Google\'s most capable model', 1000000, True),
-        ('gemini-1.5-flash', 'google', 'Gemini 1.5 Flash', 'Fast and efficient model', 1000000, False),
-        ('gemini-1.0-pro', 'google', 'Gemini 1.0 Pro', 'Previous generation model', 32000, False),
-        
-        # HuggingFace models
-        ('mistralai/Mixtral-8x7B-Instruct-v0.1', 'huggingface', 'Mixtral 8x7B', 'Powerful mixture of experts model', 32000, True),
-        ('meta-llama/Meta-Llama-3-8B-Instruct', 'huggingface', 'Llama 3 8B', 'Efficient open-source model', 8000, False),
-        ('meta-llama/Meta-Llama-3-70B-Instruct', 'huggingface', 'Llama 3 70B', 'Powerful open-source model', 8000, False),
+        ('gemini-2.5-flash-preview-04-17', 'google', 'Gemini 2.5 Flash Preview', 'Google\'s most capable model', 1000000, True),
+        ('gemini-2.0-flash', 'google', 'Gemini 2.0 Flash', 'Fast and efficient model', 1000000, False),
+    
         
         # Ollama models
-        ('llama3', 'ollama', 'Llama 3', 'Meta\'s Llama 3 model running locally', 8000, True),
-        ('mixtral', 'ollama', 'Mixtral 8x7B', 'Mixture of experts model running locally', 32000, False),
-        ('gemma', 'ollama', 'Gemma', 'Google\'s lightweight open model', 8000, False)
+        ('gemma3:12b', 'ollama', 'gemma3:12b', 'Google\'s lightweight open model', 120000, True)
     ]
     
     for model in models:

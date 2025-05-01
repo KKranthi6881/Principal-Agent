@@ -18,12 +18,12 @@ class AnthropicProvider(BaseLLMProvider):
     Provider implementation for Anthropic Claude models
     """
     
-    def __init__(self, model_name: str = "claude-3-5-sonnet-20240620", **kwargs):
+    def __init__(self, model_name: str = "claude-3.7-sonnet", **kwargs):
         """
         Initialize the Anthropic provider with model and API key
         
         Args:
-            model_name (str, optional): Name of the model to use. Defaults to "claude-3-5-sonnet-20240620".
+            model_name (str, optional): Name of the model to use. Defaults to "claude-3.7-sonnet".
             **kwargs: Additional arguments to pass to the provider
         """
         super().__init__(model_name, **kwargs)
@@ -67,34 +67,16 @@ class AnthropicProvider(BaseLLMProvider):
         """
         return [
             {
-                "id": "claude-3-5-sonnet-20240620",
-                "name": "Claude 3.5 Sonnet",
+                "id": "claude-3.7-sonnet",
+                "name": "Claude 3.7 Sonnet",
                 "context_length": 200000,
                 "description": "Most advanced and powerful Claude model, designed for complex instructions and reasoning"
             },
             {
-                "id": "claude-3-opus-20240229",
-                "name": "Claude 3 Opus",
+                "id": "claude-3.5-sonnet",
+                "name": "Claude 3.5 Sonnet",
                 "context_length": 200000,
                 "description": "Most powerful Claude model with the most advanced reasoning capabilities"
-            },
-            {
-                "id": "claude-3-sonnet-20240229",
-                "name": "Claude 3 Sonnet",
-                "context_length": 180000,
-                "description": "Balanced model with strong capabilities and reasonable cost"
-            },
-            {
-                "id": "claude-3-haiku-20240307",
-                "name": "Claude 3 Haiku",
-                "context_length": 180000,
-                "description": "Fastest and most compact Claude model, suitable for high-volume requests"
-            },
-            {
-                "id": "claude-2.1",
-                "name": "Claude 2.1",
-                "context_length": 100000,
-                "description": "Previous generation Claude model with strong capabilities"
             }
         ]
         

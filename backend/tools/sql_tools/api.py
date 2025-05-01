@@ -62,39 +62,38 @@ class SQLAnalysisAPI:
     
     def initialize_with_github(self, github_wrapper):
         """
-        Initialize the API with a GitHub wrapper
+        Initialize API with GitHub integration
         
         Args:
-            github_wrapper: Initialized GitHubAPIWrapper instance
+            github_wrapper: GitHub API wrapper for repository access
+            
+        Returns:
+            True if successful, False otherwise
         """
         try:
+            from .github_sql_finder import GitHubSQLFinder
+            from .dependency_analyzer import SQLDependencyTool
+            
             self.github_wrapper = github_wrapper
             
-            # Re-initialize GitHub SQL finder with wrapper
-            if self.github_sql_finder:
-                self.github_sql_finder = GitHubSQLFinder(
-                    self.vector_store_path, 
-                    github_wrapper=github_wrapper
-                )
-                self.github_sql_finder.initialize()
-            
-            # Initialize dependency tool
-            from .dependency_analyzer import SQLDependencyTool
-            self.dependency_tool = SQLDependencyTool(
+            # Initialize GitHub SQL finder
+            self.github_sql_finder = GitHubSQLFinder(
                 vector_store_path=self.vector_store_path,
                 github_wrapper=github_wrapper
             )
+            self.github_sql_finder.initialize()
             
-            # Initialize the dependency tool
-            if hasattr(self.dependency_tool, 'initialize'):
-                self.dependency_tool.initialize()
+            # Initialize dependency tool
+            self.dependency_tool = SQLDependencyTool(
+                vector_store_path=self.vector_store_path
+            )
             
             logger.info("Successfully initialized SQL API with GitHub wrapper")
-            
+            return True
         except Exception as e:
             logger.error(f"Error initializing SQL API with GitHub: {str(e)}")
-            raise
-
+            return False
+            
     def get_dialect_parser(self, dialect_name: str) -> Any:
         """
         Get a dialect parser based on the dialect name
@@ -899,6 +898,100 @@ class SQLAnalysisAPI:
             logger.error(traceback.format_exc())
             return {"error": f"Error tracing complete lineage: {str(e)}"}
 
+    def get_file_content(self, file_path: str) -> str:
+        """
+        Get content from a file path with enhanced path resolution.
+        
+        This method implements robust file path resolution to handle:
+        - Relative paths
+        - Partial paths (e.g., just the filename)
+        - Files within specific directories
+        
+        Args:
+            file_path: Path to the file (can be relative, partial, or full)
+            
+        Returns:
+            File content or empty string if not found
+        """
+        if not file_path:
+            return ""
+            
+        logger.info(f"Searching for file: {file_path}")
+        
+        # Normalize the path
+        import os
+        file_path = file_path.strip()
+        
+        # 1. Try direct path access first
+        if self.github_wrapper:
+            try:
+                file_info = self.github_wrapper.get_file_content_with_lines(file_path)
+                if "content" in file_info and not file_info.get("error"):
+                    logger.info(f"Found file directly: {file_path}")
+                    return file_info["content"]
+            except Exception as e:
+                logger.debug(f"Direct path access failed: {str(e)}")
+                
+        # 2. If direct access fails, try to find the file by name
+        file_name = os.path.basename(file_path)
+        
+        # 2a. If we have GitHubSQLFinder available, use the enhanced search
+        if self.github_sql_finder:
+            try:
+                # Use the enhanced search method
+                search_results = self.github_sql_finder.search_files(
+                    query=file_path,
+                    limit=5,
+                    include_content=True,
+                    file_extensions=['.sql'] if file_path.lower().endswith('.sql') else None
+                )
+                
+                if search_results.get("results") and search_results["results"]:
+                    result = search_results["results"][0]
+                    if "content" in result and result["content"]:
+                        logger.info(f"Found file via enhanced search: {result.get('file_path')} (Match type: {result.get('match_type')})")
+                        return result["content"]
+            except Exception as e:
+                logger.error(f"Error in enhanced file search: {str(e)}")
+        
+        # 3. Try to search for the file in the repository
+        try:
+            # If this is a SQL file, check if it might be a table definition
+            if file_path.lower().endswith('.sql'):
+                # Extract potential table name from filename
+                potential_table_name = os.path.splitext(file_name)[0]
+                
+                # If the table name has underscores, try both formats
+                if '_' in potential_table_name:
+                    # Format with underscores (e.g., fct_order_items)
+                    search_result = self.search_for_table(potential_table_name, limit=1)
+                    
+                    # Format without underscores (e.g., fctorderitems)
+                    if not search_result.get("files_found", 0):
+                        search_result = self.search_for_table(potential_table_name.replace('_', ''), limit=1)
+                else:
+                    search_result = self.search_for_table(potential_table_name, limit=1)
+                
+                if search_result.get("files_found", 0) > 0 and search_result.get("results", []):
+                    result = search_result["results"][0]
+                    logger.info(f"Found file via table search: {result.get('file_path')}")
+                    
+                    if "content" in result:
+                        return result["content"]
+                    elif "file_path" in result and self.github_wrapper:
+                        try:
+                            file_info = self.github_wrapper.get_file_content_with_lines(result["file_path"])
+                            if "content" in file_info:
+                                return file_info["content"]
+                        except Exception as e:
+                            logger.error(f"Error getting content for found file: {str(e)}")
+        except Exception as e:
+            logger.error(f"Error in table-based file search: {str(e)}")
+        
+        # All attempts failed
+        logger.warning(f"Could not find file: {file_path}")
+        return ""
+    
     def summarize_sql_file(self, content: str) -> str:
         """Generate a brief summary of SQL file contents"""
         try:

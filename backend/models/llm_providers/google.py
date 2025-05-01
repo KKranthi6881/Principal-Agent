@@ -89,13 +89,11 @@ class GoogleProvider(BaseLLMProvider):
             List[Dict[str, Any]]: List of model information dictionaries
         """
         return [
-            {"id": "gemini-1.5-pro", "name": "Gemini 1.5 Pro", "context_length": 1000000, "description": "Most capable model with vision capabilities"},
-            {"id": "gemini-1.5-flash", "name": "Gemini 1.5 Flash", "context_length": 1000000, "description": "Balanced, cost-effective solution"},
-            {"id": "gemini-1.0-pro", "name": "Gemini 1.0 Pro", "context_length": 32000, "description": "Previous generation model"},
-            {"id": "gemini-1.0-ultra", "name": "Gemini 1.0 Ultra", "context_length": 32000, "description": "Previous generation high-capability model"}
+            {"id": "gemini-2.5-flash-preview-04-17", "name": "gemini-2.5-flash-preview-04-17", "context_length": 1000000, "description": "Most capable model with vision capabilities"},
+            {"id": "gemini-2.0-flash", "name": "gemini-2.0-flash", "context_length": 1000000, "description": "Balanced, cost-effective solution"},
         ]
     
-    @staticmethod
+    @classmethod
     def get_provider_name() -> str:
         """
         Get the name of the provider

@@ -1,0 +1,2093 @@
+import React, { useState, useEffect } from 'react';
+import {
+  Box,
+  Container,
+  Grid,
+  GridItem,
+  Text,
+  VStack,
+  HStack,
+  Icon,
+  Input,
+  InputGroup,
+  InputLeftElement,
+  Spinner,
+  Button,
+  Heading,
+  Divider,
+  Code,
+  useToast,
+  Flex,
+  IconButton,
+  Tooltip,
+  Menu,
+  MenuButton,
+  MenuList,
+  MenuItem,
+  Select
+} from '@chakra-ui/react';
+import { useLocation, useNavigate } from 'react-router-dom';
+import { 
+  IoSearch, 
+  IoFolderOpen, 
+  IoFolder,
+  IoDocument, 
+  IoChevronDown, 
+  IoChevronForward,
+  IoGitBranch,
+  IoCode,
+  IoPlayCircle,
+  IoEye,
+  IoShare,
+  IoGitNetwork,
+  IoApps,
+  IoList,
+  IoAnalytics,
+  IoArrowBack,
+  IoCheckmark
+} from 'react-icons/io5';
+import SyntaxHighlighter from 'react-syntax-highlighter';
+import { docco } from 'react-syntax-highlighter/dist/esm/styles/hljs';
+import { LineageGraph } from '../components/LineageGraph';
+
+const RepositoryPage = () => {
+  const [githubConnectors, setGithubConnectors] = useState([]);
+  const [selectedConnector, setSelectedConnector] = useState(null);
+  const [fileTree, setFileTree] = useState([]); 
+  // Initialize expanded folders with root expanded by default
+  const [expandedFolders, setExpandedFolders] = useState({root: true, '': true}); 
+  const [selectedFile, setSelectedFile] = useState(null);
+  const [fileContent, setFileContent] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [lineageData, setLineageData] = useState(null);
+  const [showLineage, setShowLineage] = useState(false);
+  // Track if initial tree has been expanded
+  const [initialExpanded, setInitialExpanded] = useState(false);
+  
+  const toast = useToast();
+  const navigate = useNavigate();
+  const location = useLocation();
+
+  // Fetch GitHub connectors on component mount
+  useEffect(() => {
+    fetchGithubConnectors();
+    
+    // Expand root level by default
+    setExpandedFolders({root: true});
+  }, []);
+
+  // Process URL parameters to open specific file when provided
+  useEffect(() => {
+    // Parse URL query parameters
+    const queryParams = new URLSearchParams(location.search);
+    const repoParam = queryParams.get('repo');
+    const pathParam = queryParams.get('path');
+    const fileParam = queryParams.get('file');
+    
+    console.log('URL Parameters:', { repoParam, pathParam, fileParam });
+    console.log('Available GitHub connectors:', githubConnectors);
+    
+    // Only proceed if we have all the necessary parameters
+    if (repoParam && fileParam) {
+      // Find or select the correct repository
+      const loadRepository = async () => {
+        // Wait for connectors to be loaded
+        if (githubConnectors.length === 0) {
+          console.log('No GitHub connectors available yet, waiting...');
+          return;
+        }
+        
+        // Print full details of all connectors for debugging
+        console.log('GitHub Connectors for matching:');
+        githubConnectors.forEach((c, index) => {
+          console.log(`Connector ${index}:`, {
+            id: c.id,
+            name: c.name,
+            repo_url: c.repo_url,
+          });
+        });
+        
+        // Special case for the dbt-labs repository that's causing issues
+        if (repoParam.includes('dbt-labs') || repoParam.includes('dbt-cloud-snowflake-demo-template')) {
+          console.log('Detected dbt-labs repository, using special handling');
+          // Find any connector that might be suitable
+          const dbtConnector = githubConnectors.find(c => 
+            c.repo_url && (
+              c.repo_url.includes('dbt-labs') || 
+              c.repo_url.includes('dbt-cloud') || 
+              c.repo_url.includes('snowflake')
+            )
+          );
+          
+          // If no matching connectors, use the first available one
+          let connector = dbtConnector || githubConnectors[0];
+          
+          if (connector) {
+            console.log('Using connector for dbt-labs repository:', connector);
+            setSelectedConnector(connector);
+            await fetchFileTree(connector.repo_url);
+            
+            // After file tree is loaded, find and open the specific file
+            // Try multiple times with increasing delays to ensure file tree is populated
+            let attempts = 0;
+            const maxAttempts = 5;
+            const tryOpenFile = () => {
+              attempts++;
+              if (fileTree && fileTree.length > 0) {
+                console.log(`Attempt ${attempts}: File tree loaded, trying to open file:`, fileParam);
+                const success = openFileFromPath(fileParam);
+                if (!success && attempts < maxAttempts) {
+                  // If file not found and we haven't exceeded max attempts, try again
+                  console.log(`File not found on attempt ${attempts}, trying again...`);
+                  setTimeout(tryOpenFile, 500 * attempts); // Increasing delay with each attempt
+                }
+              } else if (attempts < maxAttempts) {
+                // File tree not loaded yet, try again
+                console.log(`Attempt ${attempts}: File tree not loaded yet, retrying...`);
+                setTimeout(tryOpenFile, 500 * attempts);
+              } else {
+                console.error('Failed to open file after maximum attempts:', fileParam);
+                toast({
+                  title: 'File Not Found',
+                  description: `Could not open file: ${fileParam}. The file may not exist in the repository.`,
+                  status: 'warning',
+                  duration: 5000,
+                  isClosable: true,
+                });
+              }
+            };
+            
+            // Start trying to open the file
+            setTimeout(tryOpenFile, 500);
+            return;
+          }
+        }
+        
+        // Find the matching repository connector
+        let connector = githubConnectors.find(c => {
+          // Check if repo URL contains the repo parameter
+          if (c.repo_url) {
+            // Extract owner/repo from URL
+            try {
+              const normalizedConnectorUrl = normalizeGitHubUrl(c.repo_url);
+              console.log('Normalized connector URL:', normalizedConnectorUrl);
+              
+              // Multiple matching strategies for greater flexibility
+              
+              // Strategy 1: Direct path comparison (owner/repo)
+              const urlObj = new URL(normalizedConnectorUrl);
+              const pathParts = urlObj.pathname.split('/').filter(Boolean);
+              const repoString = pathParts.length >= 2 ? `${pathParts[0]}/${pathParts[1]}` : '';
+              
+              // Strategy 2: Compare just the repo name (for cases where formats differ)
+              const repoName = pathParts.length >= 2 ? pathParts[1].replace('.git', '') : '';
+              
+              // Log comparison values for debugging
+              console.log('Comparing:', { 
+                repoParam, 
+                repoString,
+                repoName,
+                connectorUrl: c.repo_url 
+              });
+              
+              // More flexible matching - match either the full path or just the repo name
+              // This handles cases where format differs between connector and URL parameter
+              return (
+                repoString === repoParam || 
+                repoParam.includes(repoName) || 
+                normalizedConnectorUrl.includes(repoParam)
+              );
+            } catch (e) {
+              console.error('Error comparing repo URLs:', e);
+              return false;
+            }
+          }
+          return false;
+        });
+        
+        // If no connector was found by URL matching, try a more lenient approach
+        if (!connector) {
+          console.log('No connector found with exact URL match, trying fallback approach');
+          
+          // Try matching by repo name pattern in either direction
+          connector = githubConnectors.find(c => {
+            if (c.repo_url) {
+              try {
+                // Extract repo name without owner
+                const urlObj = new URL(normalizeGitHubUrl(c.repo_url));
+                const pathParts = urlObj.pathname.split('/').filter(Boolean);
+                const repoName = pathParts.length >= 2 ? pathParts[1].replace('.git', '') : '';
+                
+                // Split the repository parameter to get the repo name part
+                const repoParamParts = repoParam.split('/');
+                const repoParamName = repoParamParts.length >= 2 ? repoParamParts[1] : repoParam;
+                
+                // Check if either contains the other
+                return (
+                  repoName.includes(repoParamName) || 
+                  repoParamName.includes(repoName) ||
+                  c.repo_url.includes(repoParam) ||
+                  repoParam.includes(repoName)
+                );
+              } catch (e) {
+                return false;
+              }
+            }
+            return false;
+          });
+        }
+        
+        // If found, select it and load its file tree
+        if (connector) {
+          console.log('Found matching connector for repo:', repoParam, connector);
+          setSelectedConnector(connector);
+          await fetchFileTree(connector.repo_url);
+          
+          // After file tree is loaded, find and open the specific file
+          // Try multiple times with increasing delays to ensure file tree is populated
+          let attempts = 0;
+          const maxAttempts = 5;
+          const tryOpenFile = () => {
+            attempts++;
+            if (fileTree && fileTree.length > 0) {
+              console.log(`Attempt ${attempts}: File tree loaded, trying to open file:`, fileParam);
+              const success = openFileFromPath(fileParam);
+              if (!success && attempts < maxAttempts) {
+                // If file not found and we haven't exceeded max attempts, try again
+                console.log(`File not found on attempt ${attempts}, trying again...`);
+                setTimeout(tryOpenFile, 500 * attempts); // Increasing delay with each attempt
+              }
+            } else if (attempts < maxAttempts) {
+              // File tree not loaded yet, try again
+              console.log(`Attempt ${attempts}: File tree not loaded yet, retrying...`);
+              setTimeout(tryOpenFile, 500 * attempts);
+            } else {
+              console.error('Failed to open file after maximum attempts:', fileParam);
+              toast({
+                title: 'File Not Found',
+                description: `Could not open file: ${fileParam}. The file may not exist in the repository.`,
+                status: 'warning',
+                duration: 5000,
+                isClosable: true,
+              });
+            }
+          };
+          
+          // Start trying to open the file
+          setTimeout(tryOpenFile, 500);
+        } else {
+          console.warn('No matching repository connector found for:', repoParam);
+          toast({
+            title: 'Repository not found',
+            description: `Could not find a connector for repository: ${repoParam}`,
+            status: 'warning',
+            duration: 5000,
+            isClosable: true,
+          });
+        }
+      };
+      
+      loadRepository();
+    }
+  }, [location, githubConnectors]);
+
+  // Helper function to find and open a file by its path
+  const openFileFromPath = (filePath) => {
+    if (!filePath) {
+      console.warn('No file path provided to openFileFromPath');
+      return false;
+    }
+    
+    // Ensure path doesn't have leading slash
+    const normalizedPath = filePath.startsWith('/') ? filePath.substring(1) : filePath;
+    console.log('Opening file from path:', normalizedPath);
+    
+    // Try to find the file in the file tree
+    const findAndOpenFile = (nodes, targetPath) => {
+      for (const node of nodes) {
+        // Try multiple path matching strategies
+        const nodeMatchesPath = 
+          // Exact path match
+          node.path === targetPath || 
+          // Case insensitive match
+          node.path.toLowerCase() === targetPath.toLowerCase() ||
+          // Path ending match (for cases where repository prefixes are different)
+          (node.path.endsWith(targetPath) && node.type === 'file');
+        
+        // Check if this is the file we're looking for
+        if (nodeMatchesPath && node.type === 'file') {
+          console.log('Found matching file:', node);
+          
+          // Expand parent folders
+          expandParentFolders(node.path);
+          
+          // Select the file and fetch its content
+          setSelectedFile({
+            path: node.path,
+            name: node.name,
+            repo: selectedConnector?.repo_url || '',
+            type: 'file'
+          });
+          
+          // Update the URL to reflect current file selection without refreshing the page
+          updateBrowserUrl(node.path);
+          
+          // Fetch file content
+          fetchFileContent(selectedConnector?.repo_url, node.path);
+          return true;
+        }
+        
+        // Check children if this is a directory
+        if (node.children && node.children.length > 0) {
+          if (findAndOpenFile(node.children, targetPath)) {
+            return true;
+          }
+        }
+      }
+      
+      return false;
+    };
+    
+    // Try to find and open the file
+    if (fileTree && fileTree.length > 0) {
+      if (findAndOpenFile(fileTree, normalizedPath)) {
+        return true;
+      } else {
+        console.warn('Could not find the specified file in the file tree:', normalizedPath);
+        return false;
+      }
+    } else {
+      console.warn('File tree is empty, cannot open file:', normalizedPath);
+      return false;
+    }
+  };
+
+  // Fetch GitHub connectors from metadata.db via the API
+  const fetchGithubConnectors = async () => {
+    try {
+      setLoading(true);
+      // Using the correct API endpoint from the logs
+      const response = await fetch('/api/settings/github_connectors');
+      
+      if (!response.ok) {
+        throw new Error('Failed to fetch GitHub connectors');
+      }
+      
+      const data = await response.json();
+      // Adjust based on the actual response structure
+      const connectors = data.connectors || data || [];
+      setGithubConnectors(connectors);
+      
+      // If connectors are found, select the first one by default
+      if (connectors.length > 0) {
+        setSelectedConnector(connectors[0]);
+        await fetchFileTree(connectors[0].repo_url);
+        
+        // Auto-expand all top-level directories after a short delay
+        // to ensure fileTree is populated
+        setTimeout(() => {
+          const newExpandedState = { ...expandedFolders };
+          fileTree.forEach(node => {
+            if (node.type === 'dir' || node.isDirectory) {
+              newExpandedState[node.path] = true;
+            }
+          });
+          setExpandedFolders(newExpandedState);
+          setInitialExpanded(true);
+        }, 800);
+      } else {
+        // If no connectors are found, try to get repositories from syncs endpoint
+        await fetchRepositoriesFromSyncs();
+      }
+    } catch (error) {
+      console.error('Error fetching GitHub connectors:', error);
+      // Fall back to syncs endpoint if connectors endpoint fails
+      await fetchRepositoriesFromSyncs();
+    } finally {
+      setLoading(false);
+    }
+  };
+  
+  // Fallback method to fetch repositories from syncs endpoint
+  const fetchRepositoriesFromSyncs = async () => {
+    try {
+      const response = await fetch('/api/github/syncs?limit=50');
+      
+      if (!response.ok) {
+        throw new Error('Failed to fetch repositories from syncs');
+      }
+      
+      const data = await response.json();
+      // Convert syncs to a format compatible with our connectors
+      const syncsAsConnectors = data.map(sync => ({
+        id: sync.sync_id || sync.id,
+        name: sync.repo_name || 'GitHub Repository',
+        repo_url: sync.repo_url,
+        default_branch: 'main',
+        tech_stack: sync.tech_stack || 'unknown'
+      }));
+      
+      setGithubConnectors(syncsAsConnectors);
+      
+      if (syncsAsConnectors.length > 0) {
+        setSelectedConnector(syncsAsConnectors[0]);
+        fetchFileTree(syncsAsConnectors[0].repo_url);
+        
+        // Also expand top-level folders by default
+        setTimeout(() => expandAllTopLevelFolders(), 1000);
+      }
+    } catch (error) {
+      console.error('Error fetching repositories from syncs:', error);
+      toast({
+        title: 'Error',
+        description: 'Failed to fetch repositories. Please ensure you have GitHub repositories configured.',
+        status: 'error',
+        duration: 5000,
+        isClosable: true,
+      });
+    }
+  };
+
+  // Function to handle connector selection change
+  const handleConnectorChange = (connectorId) => {
+    const connector = githubConnectors.find(c => c.id === connectorId);
+    if (connector) {
+      setSelectedConnector(connector);
+      fetchFileTree(connector.repo_url);
+    }
+  };
+
+  // Fetch file tree for a repository using connector
+  const fetchFileTree = async (repoUrl) => {
+    if (!repoUrl) return;
+    try {
+      setLoading(true);
+      console.log('Fetching file tree for repo:', repoUrl);
+      
+      // Normalize the repo URL
+      const normalizedUrl = normalizeGitHubUrl(repoUrl);
+      console.log('Using normalized repo URL for file tree:', normalizedUrl);
+      
+      // Parse the URL to extract owner and repo components
+      let owner, repo;
+      try {
+        // Extract owner/repo from URL
+        const urlObj = new URL(normalizedUrl);
+        const pathParts = urlObj.pathname.split('/');
+        if (pathParts.length >= 3) {
+          owner = pathParts[1];
+          repo = pathParts[2].replace('.git', '');
+          console.log(`Extracted owner=${owner}, repo=${repo} from URL`);
+        }
+      } catch (e) {
+        console.error('Failed to parse repo URL:', e);
+      }
+      
+      // Try retrieving from local repositories first
+      if (owner && repo) {
+        console.log(`Attempting to fetch file tree from local repository: ${owner}/${repo}`);
+        try {
+          const repoParam = `${owner}/${repo}`;
+          const localRepoResponse = await fetch(`/api/github/local/files?repo=${encodeURIComponent(repoParam)}`);
+          
+          if (localRepoResponse.ok) {
+            console.log('Successfully fetched file tree from local repository');
+            const data = await localRepoResponse.json();
+            
+            if (data && data.files && data.files.length > 0) {
+              // Transform the response to match what buildFileTree expects
+              const success = await buildFileTree(data.files);
+              if (success) {
+                setLoading(false);
+                return true;
+              }
+            }
+          }
+        } catch (localRepoError) {
+          console.log('Local content fetch failed, falling back to GitHub API:', localRepoError);
+        }
+      }
+      
+      // Fall back to original GitHub API methods if local repo access fails
+      if (owner && repo) {
+        console.log(`Falling back to GitHub API: owner=${owner}, repo=${repo}`);
+        const ownerRepoResponse = await fetch(`/api/github/files?owner=${encodeURIComponent(owner)}&repo=${encodeURIComponent(repo)}`);
+        
+        if (ownerRepoResponse.ok) {
+          console.log('Successfully fetched file tree using owner/repo parameters');
+          const success = await handleFilesResponse(ownerRepoResponse);
+          if (success) {
+            setLoading(false);
+            return true;
+          }
+        } else {
+          console.log(`Failed to fetch file tree using owner/repo: ${ownerRepoResponse.status} ${ownerRepoResponse.statusText}`);
+        }
+      }
+      
+      // Try using sync data as another fallback
+      const syncResponse = await fetchFilesFromSyncs(normalizedUrl);
+      if (syncResponse) {
+        console.log('Successfully fetched file tree from syncs data');
+        setLoading(false);
+        return true;
+      }
+      
+      // If all methods fail, show an error
+      throw new Error('Failed to fetch file tree from all sources');
+    } catch (error) {
+      console.error('Error fetching file tree:', error);
+      toast({
+        title: 'Error',
+        description: `Failed to fetch file tree: ${error.message}`,
+        status: 'error',
+        duration: 5000,
+        isClosable: true,
+      });
+      setFileTree([]);
+      return false;
+    } finally {
+      setLoading(false);
+    }
+  };
+  
+  // Parse the GitHub API response data
+  const handleFilesResponse = async (response) => {
+    try {
+      const data = await response.json();
+      console.log('GitHub API response:', data);
+      
+      // Ensure we have an array of files
+      const filesArray = Array.isArray(data) ? data : 
+                      (data.files ? data.files : 
+                      (data.tree ? data.tree.map(item => ({
+                        path: item.path,
+                        type: item.type === 'blob' ? 'file' : 'dir',
+                        is_dir: item.type === 'tree'
+                      })) : []));
+      
+      console.log('Processed files array:', filesArray);
+      const tree = buildFileTree(filesArray);
+      setFileTree(tree);
+      
+      // Auto-expand top-level folders
+      setTimeout(() => {
+        expandAllTopLevelFolders();
+      }, 300);
+      
+      return true;
+    } catch (error) {
+      console.error('Error parsing GitHub files response:', error);
+      return false;
+    }
+  };
+
+  // Build a hierarchical file tree from flat list
+  const buildFileTree = (files) => {
+    console.log("Building file tree from data:", files);
+    
+    // Make sure we're working with an array
+    if (!Array.isArray(files)) {
+      console.error("Expected array of files but got:", typeof files);
+      return [];
+    }
+    
+    const tree = [];
+    const paths = {};
+
+    // Filter out any null or undefined entries
+    const validFiles = files.filter(f => f && f.path);
+    console.log("Valid files:", validFiles.length);
+    
+    // Sort files to ensure folders come before files
+    validFiles.sort((a, b) => {
+      const aIsDir = a.type === 'dir' || a.is_dir === true || a.path.endsWith('/');
+      const bIsDir = b.type === 'dir' || b.is_dir === true || b.path.endsWith('/');
+      if (aIsDir && !bIsDir) return -1;
+      if (!aIsDir && bIsDir) return 1;
+      return a.path.localeCompare(b.path);
+    });
+
+    // Create a map of all paths to ensure we don't miss any directories
+    const allPaths = new Set();
+    
+    // Log input data sample
+    if (validFiles.length > 0) {
+      console.log("Sample file entry:", validFiles[0]);
+    }
+    
+    // First gather all explicit paths
+    validFiles.forEach(file => {
+      const path = file.path;
+      allPaths.add(path);
+      
+      // Also add all parent directory paths
+      const parts = path.split('/');
+      for (let i = 1; i < parts.length; i++) {
+        const parentPath = parts.slice(0, i).join('/');
+        allPaths.add(parentPath + '/');
+      }
+    });
+    
+    // Now create nodes for all paths
+    Array.from(allPaths).forEach(path => {
+      const isDirectory = path.endsWith('/') || validFiles.find(f => f.path === path)?.type === 'dir';
+      const cleanPath = isDirectory ? path.replace(/\/$/, '') : path;
+      const parts = cleanPath.split('/');
+      const name = parts[parts.length - 1] || cleanPath;
+      
+      // Skip if already created
+      if (paths[cleanPath]) return;
+      
+      const node = {
+        name,
+        path: path,
+        type: isDirectory ? 'dir' : 'file',
+        children: isDirectory ? [] : null,
+        parent: parts.length > 1 ? parts.slice(0, -1).join('/') : null,
+      };
+      
+      paths[cleanPath] = node;
+      
+      // If it's a root-level item, add to the tree
+      if (parts.length === 1 || !parts[0]) {
+        tree.push(node);
+      }
+    });
+
+    // Second pass: connect children to parents
+    Object.values(paths).forEach(node => {
+      if (node.parent) {
+        // Ensure parent exists (create if needed)
+        if (!paths[node.parent]) {
+          const parts = node.parent.split('/');
+          const parentName = parts[parts.length - 1] || node.parent;
+          
+          paths[node.parent] = {
+            name: parentName,
+            path: node.parent + '/',
+            type: 'dir',
+            children: [],
+            parent: parts.length > 1 ? parts.slice(0, -1).join('/') : null,
+          };
+          
+          // If this is a top-level parent, add to tree
+          if (parts.length === 1 || !parts[0]) {
+            tree.push(paths[node.parent]);
+          }
+        }
+        
+        // Add this node as a child of its parent
+        const parent = paths[node.parent];
+        parent.children = parent.children || [];
+        
+        // Avoid duplicates
+        if (!parent.children.some(child => child.path === node.path)) {
+          parent.children.push(node);
+        }
+      }
+    });
+
+    // Sort children within each node
+    const sortChildren = (node) => {
+      if (node.children && node.children.length) {
+        node.children.sort((a, b) => {
+          // Directories first, then alphabetically
+          if (a.type === 'dir' && b.type !== 'dir') return -1;
+          if (a.type !== 'dir' && b.type === 'dir') return 1;
+          return a.name.localeCompare(b.name);
+        });
+        
+        // Recursively sort children's children
+        node.children.forEach(sortChildren);
+      }
+    };
+    
+    // Sort top-level items
+    tree.sort((a, b) => {
+      if (a.type === 'dir' && b.type !== 'dir') return -1;
+      if (a.type !== 'dir' && b.type === 'dir') return 1;
+      return a.name.localeCompare(b.name);
+    });
+    
+    // Sort all children recursively
+    tree.forEach(sortChildren);
+    
+    return tree;
+  };
+
+  // Helper function to normalize GitHub URLs
+  const normalizeGitHubUrl = (url) => {
+    // If it already contains github.com, make sure it's not duplicated
+    if (url.includes('github.com')) {
+      // Check for duplicated github.com
+      if (url.includes('github.com/github.com')) {
+        return url.replace('github.com/github.com', 'github.com');
+      }
+      
+      // Check if it's a full URL with https://
+      if (url.startsWith('https://')) {
+        return url;
+      }
+      
+      // If it's just owner/repo format, add the https prefix
+      if (!url.startsWith('http')) {
+        return `https://github.com/${url}`;
+      }
+    }
+    
+    return url;
+  };
+
+  // Fetch file content from the GitHub API or local repository
+  const fetchFileContent = async (repo, path) => {
+    if (!repo || !path) {
+      console.error('Missing required parameters for fetchFileContent', { repo, path });
+      return;
+    }
+    
+    try {
+      setLoading(true);
+      console.log(`Fetching content for ${path} in repo ${repo}`);
+      
+      // Normalize repo URL
+      const normalizedRepo = normalizeGitHubUrl(repo);
+      
+      try {
+        // Extract owner and repo name from the URL
+        let owner, repoName;
+        try {
+          const urlObj = new URL(normalizedRepo);
+          const pathParts = urlObj.pathname.split('/').filter(Boolean);
+          if (pathParts.length >= 2) {
+            owner = pathParts[0];
+            repoName = pathParts[1].replace('.git', '');
+          }
+        } catch (e) {
+          console.error('Failed to parse repo URL:', e);
+        }
+        
+        let response;
+        let data;
+        
+        // First try local repository API
+        if (owner && repoName) {
+          const repoParam = `${owner}/${repoName}`;
+          try {
+            response = await fetch(`/api/github/local/content?repo=${encodeURIComponent(repoParam)}&path=${encodeURIComponent(path)}`);
+            
+            if (response.ok) {
+              data = await response.json();
+              console.log('Local file content response:', data);
+            }
+          } catch (localError) {
+            console.log('Local content fetch failed, falling back to GitHub API:', localError);
+          }
+        }
+        
+        // Fall back to GitHub API if local fetch failed
+        if (!data && normalizedRepo) {
+          response = await fetch(`/api/github/content?repo=${encodeURIComponent(normalizedRepo)}&path=${encodeURIComponent(path)}`);
+          
+          if (!response.ok) {
+            throw new Error(`API error: ${response.status} ${response.statusText}`);
+          }
+          
+          data = await response.json();
+          console.log('GitHub API file content response:', data);
+        }
+        
+        if (data && data.content) {
+          // Update selected file
+          setFileContent(data.content);
+          
+          // Update URL with the file path
+          updateBrowserUrl(path);
+          
+          // Attempt to fetch lineage data (for SQL files)
+          if (path.toLowerCase().endsWith('.sql') || path.toLowerCase().endsWith('.yml') || path.toLowerCase().endsWith('.yaml')) {
+            fetchLineageData(normalizedRepo, path);
+          } else {
+            // Reset lineage data for non-SQL/non-YAML files
+            setLineageData(null);
+            setShowLineage(false);
+          }
+        } else {
+          setFileContent('Empty file or no content available');
+        }
+      } catch (error) {
+        console.error('Error fetching file content:', error);
+        toast({
+          title: 'Error',
+          description: `Failed to fetch file content: ${error.message}`,
+          status: 'error',
+          duration: 3000,
+          isClosable: true,
+        });
+        setFileContent(`Error loading file: ${error.message}`);
+      } finally {
+        setLoading(false);
+      }
+    } catch (error) {
+      console.error('Error in fetchFileContent:', error);
+      setLoading(false);
+    }
+  };
+
+  // Fetch lineage data for the selected file
+  const fetchLineageData = async (repo, path) => {
+    if (!repo || !path) return;
+    try {
+      // Normalize the repo URL first
+      const normalizedRepo = normalizeGitHubUrl(repo);
+      
+      // Create a github_path in the format: owner/repo/path
+      let githubPath;
+      try {
+        // Handle both URL format and owner/repo format
+        if (normalizedRepo.startsWith('http')) {
+          const repoUrl = new URL(normalizedRepo);
+          // Extract owner/repo from URL path (remove leading slash)
+          const repoPath = repoUrl.pathname.substring(1);
+          githubPath = `${repoPath}/${path}`;
+        } else {
+          // If already in owner/repo format
+          githubPath = `${normalizedRepo}/${path}`;
+        }
+        
+        // Remove .git suffix if present
+        githubPath = githubPath.replace(/\.git\//, '/');
+      } catch (error) {
+        console.error('Error parsing repo URL:', error);
+        // Fallback to simple concatenation
+        githubPath = `${repo.replace(/\/$/, '')}/${path}`;
+      }
+      
+      console.log('Fetching lineage for path:', githubPath);
+      const response = await fetch(`/api/lineage/by-path?github_path=${encodeURIComponent(githubPath)}`);
+      
+      if (!response.ok) {
+        if (response.status === 404) {
+          // No lineage data available, this is not an error
+          console.log('No lineage data available for this file');
+          setLineageData(null);
+          setShowLineage(false);
+          return;
+        }
+        throw new Error(`Failed to fetch lineage data: ${response.status} ${response.statusText}`);
+      }
+      
+      const data = await response.json();
+      console.log('Lineage API response:', data);
+      
+      if (data && data.success && data.lineage_json) {
+        console.log('Lineage data received:', data.lineage_json);
+        // Transform the data for the LineageGraph component
+        const transformedData = transformLineageData(data.lineage_json);
+        
+        if (transformedData) {
+          setLineageData(transformedData);
+          toast({
+            title: 'Lineage Data Available',
+            description: 'Click the "Show Lineage" button to visualize data relationships',
+            status: 'info',
+            duration: 3000,
+            isClosable: true,
+          });
+        } else {
+          // We got data but it didn't transform correctly
+          setLineageData(null);
+          setShowLineage(false);
+          toast({
+            title: 'Lineage Visualization Error',
+            description: 'Could not create valid lineage visualization from the data',
+            status: 'warning',
+            duration: 3000,
+            isClosable: true,
+          });
+        }
+      } else {
+        setLineageData(null);
+        setShowLineage(false);
+        toast({
+          title: 'No Lineage Data Available',
+          description: data?.message || 'No lineage data found for this file',
+          status: 'info',
+          duration: 3000,
+          isClosable: true,
+        });
+      }
+    } catch (error) {
+      console.error('Error fetching lineage data:', error);
+      setLineageData(null);
+      setShowLineage(false);
+      toast({
+        title: 'Error',
+        description: `Failed to fetch lineage data: ${error.message}`,
+        status: 'error',
+        duration: 5000,
+        isClosable: true,
+      });
+    }
+  };
+
+  // Transform lineage data to format expected by LineageGraph
+  const transformLineageData = (lineageJson) => {
+    console.log('Transforming lineage data with keys:', Object.keys(lineageJson));
+    
+    try {
+      // First, add the root table to make sure it's included
+      const allTables = [...(Array.isArray(lineageJson.tables) ? lineageJson.tables : [])];
+      
+      // Add root table if it's not already in the tables array
+      if (lineageJson.root_table && !allTables.some(t => t.id === lineageJson.root_table.id)) {
+        allTables.push(lineageJson.root_table);
+      }
+      
+      // Log the table information for debugging
+      console.log('Root table:', lineageJson.root_table);
+      console.log('All tables count:', allTables.length);
+      console.log('Sample tables:', allTables.slice(0, 3));
+      
+      // If we don't have any tables, create at least one for the root
+      if (allTables.length === 0 && lineageJson.root_table) {
+        allTables.push({
+          id: 'root-table',
+          name: lineageJson.root_table.name || 'Root Table',
+          github_path: lineageJson.root_table.github_path || '',
+          tech_stack: lineageJson.root_table.tech_stack || 'unknown',
+        });
+      }
+      
+      // Transform tables to models (safely handle missing data)
+      const models = allTables.map(table => ({
+        id: table.id || `table-${Math.random().toString(36).substring(2, 9)}`,
+        name: table.name || 'Unknown',
+        path: table.github_path || '',
+        type: table.tech_stack || 'unknown',
+        highlight: lineageJson.root_table && table.id === lineageJson.root_table.id
+      }));
+      
+      // Create a set of valid model IDs to filter edges
+      const modelIds = new Set(models.map(model => model.id));
+      console.log('Valid model IDs count:', modelIds.size);
+      
+      // If we have relationships, use them; otherwise create a simple self-referential edge
+      let edges = [];
+      
+      if (Array.isArray(lineageJson.relationships) && lineageJson.relationships.length > 0) {
+        // Log relationships for debugging
+        console.log('Relationships count:', lineageJson.relationships.length);
+        console.log('Sample relationship:', lineageJson.relationships[0]);
+        
+        // Transform relationships to edges (safely handle missing data)
+        edges = lineageJson.relationships
+          .filter(rel => {
+            // Only include relationships where both source and target tables exist in our models
+            return rel.source && rel.target && 
+                  rel.source.table_id && rel.target.table_id && 
+                  modelIds.has(rel.source.table_id) && modelIds.has(rel.target.table_id);
+          })
+          .map(rel => ({
+            id: rel.id || `edge-${Math.random().toString(36).substring(2, 9)}`,
+            source: rel.source.table_id, 
+            target: rel.target.table_id, 
+            type: rel.type || 'depends_on'
+          }));
+      } else if (models.length > 0) {
+        // Create at least one edge if we have models but no relationships
+        // This ensures we have something to display
+        if (models.length === 1) {
+          // Self-reference for single model
+          edges = [{
+            id: 'self-edge',
+            source: models[0].id, 
+            target: models[0].id, 
+            type: 'self'
+          }];
+        } else if (models.length > 1) {
+          // Connect first two models
+          edges = [{
+            id: 'default-edge',
+            source: models[0].id, 
+            target: models[1].id, 
+            type: 'depends_on'
+          }];
+        }
+      }
+      
+      // Transform columns if they exist and belong to valid models
+      const columns = Array.isArray(lineageJson.columns) ? lineageJson.columns
+        .filter(col => col.table_id && modelIds.has(col.table_id))
+        .map(col => ({
+          id: col.id || `col-${Math.random().toString(36).substring(2, 9)}`,
+          name: col.name || 'Unknown',
+          modelId: col.table_id,
+          dataType: col.data_type || 'unknown',
+          type: col.is_primary_key ? 'primary_key' : col.is_foreign_key ? 'foreign_key' : 'regular'
+        })) : [];
+      
+      // Create a set of valid column IDs for filtering column connections
+      const columnIds = new Set(columns.map(col => col.id));
+      
+      // Column lineage connections if they exist
+      const columnConnections = Array.isArray(lineageJson.relationships) ? 
+        lineageJson.relationships
+          .filter(rel => {
+            return rel.source?.column_id && rel.target?.column_id && 
+                  columnIds.has(rel.source.column_id) && columnIds.has(rel.target.column_id);
+          })
+          .map(rel => ({
+            id: `col_${rel.id || Math.random().toString(36).substring(2, 9)}`,
+            fromColumn: rel.source.column_id,
+            toColumn: rel.target.column_id,
+            type: rel.type || 'depends_on'
+          })) : [];
+      
+      // Validate that we have valid models and edges
+      const validData = models.length > 0 && edges.length > 0;
+      
+      console.log('Transformed data:', {
+        models: models.length,
+        edges: edges.length,
+        columns: columns.length,
+        column_lineage: columnConnections.length,
+        valid: validData
+      });
+      
+      if (!validData) {
+        console.error('Invalid lineage data: insufficient valid models or edges');
+        return null;
+      }
+      
+      // Always return at least this minimum structure
+      return {
+        models,
+        edges,
+        columns,
+        column_lineage: columnConnections
+      };
+    } catch (error) {
+      console.error('Error transforming lineage data:', error);
+      return null;
+    }
+  };
+
+  // Toggle folder expansion with additional debug
+  const toggleFolder = (path) => {
+    console.log(`Toggling folder: ${path}`);
+    
+    // Create new state with the toggled folder
+    const newState = { ...expandedFolders };
+    newState[path] = !newState[path];
+    setExpandedFolders(newState);
+    
+    // If we're expanding and this folder hasn't been loaded yet, load its contents
+    if (newState[path] === true) {
+      const node = findNodeByPath(fileTree, path);
+      if (node && node.type === 'dir' && (!node.children || node.children.length === 0)) {
+        // Fetch the folder contents if not already loaded
+        fetchFolderContents(selectedConnector?.repo_url, path);
+      }
+    }
+    
+    // If this folder is visible in the file tree, update the URL
+    if (selectedConnector?.repo_url && newState[path] === true) {
+      // Only update URL for expanded folders
+      updateBrowserUrl(path);
+    }
+  };
+  
+  // Helper to find a node in the tree by path
+  const findNodeByPath = (nodes, path) => {
+    if (!nodes) return null;
+    
+    for (const node of nodes) {
+      if (node.path === path) {
+        return node;
+      }
+      if (node.children) {
+        const found = findNodeByPath(node.children, path);
+        if (found) return found;
+      }
+    }
+    return null;
+  };
+  
+  // Fetch contents specifically for a folder
+  const fetchFolderContents = async (repoUrl, folderPath) => {
+    if (!repoUrl || !folderPath) return;
+    
+    try {
+      console.log(`Fetching contents for folder: ${folderPath} in repo: ${repoUrl}`);
+      
+      // Parse the URL to extract owner and repo
+      let owner, repo;
+      try {
+        const urlObj = new URL(normalizeGitHubUrl(repoUrl));
+        const pathParts = urlObj.pathname.split('/').filter(Boolean);
+        if (pathParts.length >= 2) {
+          owner = pathParts[1];
+          repo = pathParts[2].replace('.git', '');
+        }
+      } catch (e) {
+        console.error('Failed to parse repo URL:', e);
+        return;
+      }
+      
+      // Fetch folder contents
+      if (owner && repo) {
+        // Clean up the folder path (remove leading/trailing slashes)
+        const cleanPath = folderPath.replace(/^\/+|\/+$/g, '');
+        
+        const response = await fetch(
+          `/api/github/files?owner=${encodeURIComponent(owner)}&repo=${encodeURIComponent(repo)}&path=${encodeURIComponent(cleanPath)}`
+        );
+        
+        if (!response.ok) {
+          console.error(`Failed to fetch folder contents: ${response.status} ${response.statusText}`);
+          return;
+        }
+        
+        const files = await response.json();
+        console.log(`Fetched ${files.length} files for folder ${folderPath}:`, files);
+        
+        // Update the file tree with the fetched contents
+        updateFileTreeWithFolderContents(folderPath, files);
+      }
+    } catch (error) {
+      console.error('Error fetching folder contents:', error);
+    }
+  };
+  
+  // Update the file tree with fetched folder contents
+  const updateFileTreeWithFolderContents = (folderPath, files) => {
+    // Don't update if no files found
+    if (!files || files.length === 0) return;
+    
+    setFileTree(prevTree => {
+      // Create a deep copy of the tree
+      const newTree = JSON.parse(JSON.stringify(prevTree));
+      
+      // Find the folder node to update
+      const updateNodeChildren = (nodes, path) => {
+        for (let i = 0; i < nodes.length; i++) {
+          const node = nodes[i];
+          
+          if (node.path === path || node.path === path + '/') {
+            // Found the folder, update its children
+            console.log(`Updating children for ${path} with ${files.length} files`);
+            
+            // Create folder children based on the fetched files
+            node.children = files.map(file => {
+              const isDir = file.is_dir || file.type === 'dir';
+              const filePath = file.path;
+              const fileName = filePath.split('/').pop() || filePath;
+              
+              return {
+                name: fileName,
+                path: filePath,
+                type: isDir ? 'dir' : 'file',
+                isDirectory: isDir,
+                children: isDir ? [] : null,
+                parent: folderPath
+              };
+            });
+            
+            // Sort children (folders first, then alphabetically)
+            node.children.sort((a, b) => {
+              if ((a.type === 'dir') !== (b.type === 'dir')) {
+                return a.type === 'dir' ? -1 : 1;
+              }
+              return a.name.localeCompare(b.name);
+            });
+            
+            return true;
+          } else if (node.children && node.children.length > 0) {
+            // Recursively search in children
+            if (updateNodeChildren(node.children, path)) {
+              return true;
+            }
+          }
+        }
+        return false;
+      };
+      
+      // Try to update the folder in the tree
+      if (!updateNodeChildren(newTree, folderPath)) {
+        console.error(`Couldn't find folder ${folderPath} in the file tree to update`);
+      }
+      
+      return newTree;
+    });
+  };
+
+  // Check if a folder is expanded
+  const isFolderExpanded = (path) => {
+    // Root is expanded by default
+    if (path === '' || path === '/') {
+      return true;
+    }
+    return expandedFolders[path] === true;
+  };
+  
+  // Expand all parent folders of a path
+  const expandParentFolders = (path) => {
+    const parts = path.split('/');
+    let currentPath = '';
+    
+    setExpandedFolders(prev => {
+      const newState = {...prev};
+      
+      // For each segment in the path, expand its parent folder
+      for (let i = 0; i < parts.length - 1; i++) {
+        if (currentPath) {
+          currentPath += '/';
+        }
+        currentPath += parts[i];
+        newState[currentPath] = true;
+      }
+      
+      return newState;
+    });
+  };
+  
+  // Helper function to expand all top-level folders
+  const expandAllTopLevelFolders = () => {
+    const newExpandedState = { ...expandedFolders };
+    
+    // Always expand root and empty path
+    newExpandedState['root'] = true;
+    newExpandedState[''] = true;
+    newExpandedState['/'] = true;
+    
+    console.log('File tree for expansion:', fileTree);
+    
+    // Expand all top-level folders and their immediate children
+    if (fileTree && fileTree.length > 0) {
+      fileTree.forEach(node => {
+        if (!node) return;
+        
+        if (node.type === 'dir' || node.isDirectory === true) {
+          console.log('Expanding top-level folder:', node.path);
+          newExpandedState[node.path] = true;
+          
+          // Also expand first level children
+          if (node.children && node.children.length > 0) {
+            node.children.forEach(child => {
+              if (!child) return;
+              
+              if (child.type === 'dir' || child.isDirectory === true) {
+                console.log('Expanding second-level folder:', child.path);
+                newExpandedState[child.path] = true;
+              }
+            });
+          }
+        }
+      });
+    }
+    
+    console.log('Expanding all top-level folders:', newExpandedState);
+    setExpandedFolders(newExpandedState);
+  };
+
+  // Render file tree recursively
+  const renderFileTree = (nodes, depth = 0) => {
+    if (!nodes) {
+      console.log(`No nodes provided at depth ${depth}`);
+      return <Text color="gray.500" pl={depth > 0 ? 4 : 0}>No files found</Text>;
+    }
+    
+    if (nodes.length === 0) {
+      console.log(`Empty nodes array at depth ${depth}`);
+      return <Text color="gray.500" pl={depth > 0 ? 4 : 0}>No files found</Text>;
+    }
+
+    // Filter nodes based on search query if one exists
+    let filteredNodes = nodes;
+    
+    if (searchQuery) {
+      const lowerQuery = searchQuery.toLowerCase();
+      filteredNodes = nodes.filter(node => {
+        // Show if the name matches or if it's a parent directory of a matching file
+        const nameMatch = node.name.toLowerCase().includes(lowerQuery);
+        const childrenMatch = node.children && searchInChildren(node.children, lowerQuery);
+        return nameMatch || childrenMatch;
+      });
+      
+      // If searching, automatically expand all folders that contain matches
+      if (filteredNodes.length > 0) {
+        // Create a single new state object instead of multiple updates
+        const newExpandedState = { ...expandedFolders };
+        
+        // Track all folders to expand
+        const expandAllFolders = (nodes) => {
+          if (!nodes) return;
+          
+          nodes.forEach(node => {
+            if (node.type === 'dir' || node.isDirectory) {
+              newExpandedState[node.path] = true;
+              if (node.children) {
+                expandAllFolders(node.children);
+              }
+            }
+          });
+        };
+        
+        expandAllFolders(filteredNodes);
+        setExpandedFolders(newExpandedState);
+      }
+    }
+    
+    // Log the nodes being rendered for debugging
+    console.log(`Rendering ${filteredNodes.length} nodes at depth ${depth}:`, 
+      filteredNodes.map(n => n.path));
+    
+    // Helper function to search in children recursively
+    function searchInChildren(children, query) {
+      if (!children) return false;
+      
+      return children.some(child => {
+        const nameMatch = child.name.toLowerCase().includes(query);
+        const childrenMatch = child.children && searchInChildren(child.children, query);
+        return nameMatch || childrenMatch;
+      });
+    }
+
+    return (
+      <VStack align="stretch" spacing={0} pl={depth > 0 ? 4 : 0}>
+        {filteredNodes.map((node, index) => {
+          if (!node) {
+            console.error(`Undefined node at index ${index}`);
+            return null;
+          }
+          
+          const isExpanded = isFolderExpanded(node.path);
+          const isDirectory = node.type === 'dir' || node.isDirectory === true;
+          const isSelected = selectedFile && selectedFile.path === node.path;
+          const nodeName = node.name || node.path.split('/').pop() || node.path;
+          
+          // Debug info
+          if (isDirectory) {
+            if (node.children) {
+              console.log(`Folder ${node.path} has ${node.children.length} children, expanded: ${isExpanded}`);
+            } else {
+              console.log(`Folder ${node.path} has no children array defined`);
+            }
+          }
+          
+          return (
+            <Box key={`${node.path}-${index}`}>
+              <HStack 
+                p={2}
+                spacing={2}
+                cursor="pointer"
+                backgroundColor={isSelected ? 'blue.50' : 'transparent'}
+                _hover={{ backgroundColor: isSelected ? 'blue.100' : 'gray.100' }}
+                onClick={() => {
+                  if (isDirectory) {
+                    console.log('Clicked directory:', node.path);
+                    
+                    // Update selected file to the directory
+                    setSelectedFile({
+                      ...node,
+                      path: node.path,
+                      name: nodeName,
+                      type: 'dir',
+                      isDirectory: true
+                    });
+                    
+                    // Toggle folder expansion after updating selected file
+                    toggleFolder(node.path);
+                  } else {
+                    console.log('Clicked file:', node.path);
+                    if (selectedConnector && selectedConnector.repo_url) {
+                      // Pass both repo URL and file path to the fetchFileContent function
+                      fetchFileContent(selectedConnector.repo_url, node.path);
+                      // Update selectedFile with more properties
+                      setSelectedFile({
+                        ...node,
+                        path: node.path,
+                        name: nodeName,
+                        type: 'file',
+                        isDirectory: false
+                      });
+                      
+                      // Expand all parent folders of the selected file
+                      expandParentFolders(node.path);
+                    } else {
+                      toast({
+                        title: 'Error',
+                        description: 'No repository selected',
+                        status: 'error',
+                        duration: 3000,
+                        isClosable: true,
+                      });
+                    }
+                  }
+                }}
+                bg={isSelected ? 'blue.50' : 'transparent'}
+                borderRadius="md"
+              >
+                {/* Selection indicator */}
+                {isDirectory && (
+                  <Icon 
+                    as={isExpanded ? IoChevronDown : IoChevronForward} 
+                    color="gray.500" 
+                    boxSize={4}
+                  />
+                )}
+                
+                <Icon 
+                  as={isDirectory 
+                    ? (isExpanded ? IoFolderOpen : IoFolder) 
+                    : getFileIcon(node.name)} 
+                  color={isDirectory 
+                    ? 'blue.500' 
+                    : getFileColor(node.name)} 
+                  boxSize={4}
+                />
+                
+                <Text fontSize="sm" noOfLines={1} fontWeight={isSelected ? "bold" : "normal"}>
+                  {nodeName}
+                </Text>
+                
+                {/* Add lineage icon for SQL and YAML files */}
+                {!isDirectory && ['sql', 'yml', 'yaml'].includes(getFileExtension(nodeName)) && (
+                  <Tooltip label="View data lineage">
+                    <IconButton
+                      icon={<Icon as={IoGitNetwork} />}
+                      size="xs"
+                      variant="ghost"
+                      colorScheme="blue"
+                      ml="auto"
+                      onClick={(e) => {
+                        e.stopPropagation(); // Prevent triggering the parent click handler
+                        if (selectedConnector) {
+                          // First select the file to ensure content is loaded
+                          fetchFileContent(selectedConnector.repo_url, node.path);
+                          setSelectedFile({
+                            ...node,
+                            path: node.path,
+                            name: nodeName,
+                            type: 'file'
+                          });
+                          
+                          // Then fetch lineage data and show it
+                          fetchLineageData(selectedConnector.repo_url, node.path);
+                          setShowLineage(true);
+                        }
+                      }}
+                      aria-label="View lineage"
+                    />
+                  </Tooltip>
+                )}
+                
+                {/* Add lineage icon for SQL and YAML files */}
+                {!isDirectory && ['sql', 'yml', 'yaml'].includes(getFileExtension(nodeName)) && (
+                  <Tooltip label="View data lineage">
+                    <IconButton
+                      icon={<Icon as={IoGitNetwork} />}
+                      size="xs"
+                      variant="ghost"
+                      colorScheme="blue"
+                      ml="auto"
+                      onClick={(e) => {
+                        e.stopPropagation(); // Prevent triggering the parent click handler
+                        if (selectedConnector) {
+                          // First select the file to ensure content is loaded
+                          fetchFileContent(selectedConnector.repo_url, node.path);
+                          setSelectedFile({
+                            ...node,
+                            path: node.path,
+                            name: nodeName,
+                            type: 'file'
+                          });
+                          
+                          // Then fetch lineage data if available
+                          fetchLineageData(selectedConnector.repo_url, node.path)
+                            .then(() => {
+                              // Show lineage visualization
+                              setShowLineage(true);
+                            });
+                        }
+                      }}
+                      aria-label="View lineage"
+                    />
+                  </Tooltip>
+                )}
+              </HStack>
+              
+              {/* If directory is expanded and has children, show them */}
+              {isDirectory && isExpanded && (
+                <Box pl={4} borderLeft="1px" borderColor="gray.200" ml={2} mt={1}>
+                  {node.children && node.children.length > 0 
+                    ? renderFileTree(node.children, depth + 1)
+                    : <Text pl={4} py={2} color="gray.500" fontSize="sm">Empty folder</Text>
+                  }
+                </Box>
+              )}
+            </Box>
+          );
+        })}
+      </VStack>
+    );
+  };
+
+  // Get file extension for syntax highlighting
+  const getFileExtension = (filePath) => {
+    if (!filePath) return 'text';
+    const ext = filePath.split('.').pop().toLowerCase();
+    
+    const extensionMap = {
+      'js': 'javascript',
+      'jsx': 'jsx',
+      'py': 'python',
+      'sql': 'sql',
+      'json': 'json',
+      'html': 'html',
+      'css': 'css',
+      'md': 'markdown',
+      'yml': 'yaml',
+      'yaml': 'yaml',
+      'txt': 'text',
+      'sh': 'bash',
+      'bash': 'bash',
+      'csv': 'text',
+      'tsv': 'text',
+    };
+    
+    return extensionMap[ext] || 'text';
+  };
+  
+  // Get icon based on file type 
+  const getFileIcon = (fileName) => {
+    if (!fileName) return IoDocument;
+    
+    const ext = fileName.split('.').pop().toLowerCase();
+    
+    // Map file extensions to appropriate icons
+    const iconMap = {
+      'sql': IoCode,
+      'yml': IoList,
+      'yaml': IoList,
+      'md': IoDocument,
+      'json': IoCode,
+      'py': IoCode,
+      'js': IoCode,
+      'jsx': IoCode,
+      'html': IoCode,
+      'css': IoCode,
+      'txt': IoDocument,
+      'csv': IoList,
+      'tsv': IoList,
+    };
+    
+    return iconMap[ext] || IoDocument;
+  };
+  
+  // Get color based on file type
+  const getFileColor = (fileName) => {
+    if (!fileName) return 'gray.500';
+    
+    const ext = fileName.split('.').pop().toLowerCase();
+    
+    // Map file extensions to appropriate colors
+    const colorMap = {
+      'sql': 'green.600',
+      'yml': 'purple.500',
+      'yaml': 'purple.500',
+      'md': 'gray.500',
+      'json': 'orange.500',
+      'py': 'blue.600',
+      'js': 'yellow.600',
+      'jsx': 'yellow.600',
+      'html': 'red.500',
+      'css': 'pink.500',
+      'txt': 'gray.500',
+      'csv': 'teal.500',
+      'tsv': 'teal.500',
+    };
+
+    return colorMap[ext] || 'gray.500';
+  };
+
+  // Helper function to update browser URL without refreshing the page
+  const updateBrowserUrl = (filePath) => {
+    if (!selectedConnector || !selectedConnector.repo_url) return;
+    
+    // Extract owner/repo from the connector URL
+    try {
+      const normalizedUrl = normalizeGitHubUrl(selectedConnector.repo_url);
+      const urlObj = new URL(normalizedUrl);
+      const pathParts = urlObj.pathname.split('/').filter(Boolean);
+      if (pathParts.length >= 2) {
+        const repoParam = `${pathParts[0]}/${pathParts[1]}`;
+        
+        // Create new URL with the current file path
+        const newUrl = new URL(window.location.origin + '/repository');
+        newUrl.searchParams.set('repo', repoParam);
+        
+        if (filePath) {
+          // Extract folder path and file name
+          const lastSlashIndex = filePath.lastIndexOf('/');
+          
+          if (lastSlashIndex >= 0) {
+            // Set path to the directory containing the file
+            const dirPath = filePath.substring(0, lastSlashIndex + 1);
+            newUrl.searchParams.set('path', dirPath);
+            // Set file to the full path for exact file reference
+            newUrl.searchParams.set('file', filePath);
+          } else {
+            // For files in the root directory
+            newUrl.searchParams.set('path', '/');
+            newUrl.searchParams.set('file', filePath);
+          }
+        }
+        
+        // Update browser URL without reloading the page
+        window.history.pushState({}, '', newUrl.toString());
+        console.log('Updated browser URL:', newUrl.toString());
+      }
+    } catch (e) {
+      console.error('Failed to update browser URL:', e);
+    }
+  };
+newUrl.searchParams.set('file', filePath);
+}
+}
+  
+// Update browser URL without reloading the page
+window.history.pushState({}, '', newUrl.toString());
+console.log('Updated browser URL:', newUrl.toString());
+}
+} catch (e) {
+console.error('Failed to update browser URL:', e);
+}
+};
+
+return (
+<Container maxW="container.xl" py={4}>
+<Grid templateColumns="repeat(12, 1fr)" gap={4}>
+{/* Repository selector */}
+<GridItem colSpan={12} mb={4}>
+<HStack spacing={4} justify="space-between">
+<HStack>
+<Icon as={IoGitBranch} fontSize="xl" color="gray.600" />
+<Heading size="md">Repository Browser</Heading>
+</HStack>
+  
+{/* GitHub Connector Dropdown */}
+<Box>
+<Select
+placeholder="Select GitHub Repository"
+value={selectedConnector?.id || ''}
+onChange={(e) => handleConnectorChange(e.target.value)}
+width="300px"
+isDisabled={loading}
+>
+{githubConnectors.map(connector => (
+<option key={connector.id} value={connector.id}>
+{connector.name} ({connector.repo_url})
+</option>
+))}
+</Select>
+</Box>
+</HStack>
+<Divider my={2} />
+</GridItem>
+  
+{/* File explorer sidebar */}
+<GridItem colSpan={{ base: 12, md: 3 }} borderRight="1px" borderColor="gray.200" height="calc(100vh - 180px)" overflowY="auto">
+<VStack align="stretch" spacing={3}>
+<InputGroup size="sm">
+<InputLeftElement pointerEvents="none">
+<Icon as={IoSearch} color="gray.400" />
+</InputLeftElement>
+<Input 
+placeholder="Search files..." 
+value={searchQuery}
+onChange={(e) => setSearchQuery(e.target.value)}
+/>
+</InputGroup>
+  
+{loading && !fileTree.length ? (
+<Box textAlign="center" py={8}>
+<Spinner />
+</Box>
+) : (
+<>
+{renderFileTree(fileTree)}
+{fileTree.length === 0 && !loading && (
+<Box textAlign="center" py={8}>
+<Text color="gray.500">No files found</Text>
+</Box>
+)}
+</>
+)}
+</VStack>
+</GridItem>
+  
+{/* Main content area */}
+<GridItem colSpan={{ base: 12, md: 9 }} height="calc(100vh - 180px)" overflowY="auto">
+{selectedFile ? (
+<Box>
+<Flex justifyContent="space-between" alignItems="center" mb={2}>
+<HStack spacing={2}>
+<Icon as={IoDocument} color="gray.600" />
+<Text fontWeight="bold">{selectedFile.name}</Text>
+</HStack>
+  
+{/* Show lineage button with larger, more prominent design */}
+{lineageData && (
+<HStack spacing={2}>
+<Button
+leftIcon={<Icon as={IoGitNetwork} />}
+colorScheme={showLineage ? "orange" : "blue"}
+size="md"
+onClick={() => setShowLineage(!showLineage)}
+variant={showLineage ? "solid" : "outline"}
+>
+{showLineage ? "Hide Lineage" : "Show Lineage"}
+</Button>
+<Tooltip label="Data lineage shows column-level relationships between tables">
+<IconButton
+icon={<Icon as={IoAnalytics} />}
+size="sm"
+colorScheme="gray"
+variant="ghost"
+aria-label="Lineage info"
+/>
+</Tooltip>
+</HStack>
+)}
+</Flex>
+  
+<Divider mb={4} />
+  
+{loading ? (
+<Box textAlign="center" py={8}>
+<Spinner />
+</Box>
+) : (
+<>
+{showLineage && lineageData ? (
+<Box 
+height="calc(100vh - 250px)" 
+border="1px" 
+borderColor="blue.200" 
+borderRadius="md" 
+p={3}
+boxShadow="md"
+bg="white"
+>
+<Flex justify="space-between" align="center" mb={3}>
+<Heading size="sm" color="blue.700">
+Data Lineage Visualization
+</Heading>
+<HStack>
+<Button
+leftIcon={<Icon as={IoCode} />}
+size="xs"
+colorScheme="blue"
+onClick={() => {
+console.log('Current lineage data:', lineageData);
+}}
+>
+Debug Data
+</Button>
+<Button
+leftIcon={<Icon as={IoDocument} />}
+size="xs"
+colorScheme="gray"
+onClick={() => setShowLineage(false)}
+>
+Back to Code
+</Button>
+</HStack>
+</Flex>
+<Box height="calc(100% - 40px)" borderRadius="md" overflow="hidden" position="relative">
+{lineageData && Object.keys(lineageData).length > 0 ? (
+<LineageGraph data={lineageData} width="100%" height="100%" />
+) : (
+<Box 
+position="absolute" 
+top="50%" 
+left="50%" 
+transform="translate(-50%, -50%)"
+textAlign="center"
+p={4}
+borderRadius="md"
+bg="red.50"
+border="1px"
+borderColor="red.200"
+>
+<Icon as={IoWarning} color="red.500" boxSize={8} mb={2} />
+<Text fontWeight="bold" color="red.600" mb={2}>Lineage Visualization Error</Text>
+<Text color="red.600">Could not render the lineage graph with the available data.</Text>
+</Box>
+)}
+</Box>
+</Box>
+) : (
+<Box
+position="relative"
+borderRadius="md"
+border="1px"
+borderColor="gray.200"
+overflow="auto"
+bg="gray.50"
+fontSize="sm"
+>
+{/* Prominent lineage icon overlay for SQL files when not viewing lineage */}
+{lineageData && (
+<Box
+position="absolute"
+top="10px"
+right="10px"
+zIndex="1"
+>
+<IconButton
+icon={<Icon as={IoGitNetwork} />}
+colorScheme="blue"
+size="sm"
+onClick={() => setShowLineage(true)}
+aria-label="Show lineage"
+/>
+</Box>
+)}
+  
+<SyntaxHighlighter
+language={getFileExtension(selectedFile?.name || '')}
+style={docco}
+showLineNumbers
+customStyle={{ 
+backgroundColor: 'transparent',
+fontSize: '0.9em',
+        {/* Repository selector */}
+        <GridItem colSpan={12} mb={4}>
+          <HStack spacing={4} justify="space-between">
+            <HStack>
+              <Icon as={IoGitBranch} fontSize="xl" color="gray.600" />
+              <Heading size="md">Repository Browser</Heading>
+            </HStack>
+            
+            {/* GitHub Connector Dropdown */}
+            <Box>
+              <Select
+                placeholder="Select GitHub Repository"
+                value={selectedConnector?.id || ''}
+                onChange={(e) => handleConnectorChange(e.target.value)}
+                width="300px"
+                isDisabled={loading}
+              >
+                {githubConnectors.map(connector => (
+                  <option key={connector.id} value={connector.id}>
+                    {connector.name} ({connector.repo_url})
+                  </option>
+                ))}
+              </Select>
+            </Box>
+          </HStack>
+          <Divider my={2} />
+        </GridItem>
+        
+        {/* File explorer sidebar */}
+        <GridItem colSpan={{ base: 12, md: 3 }} borderRight="1px" borderColor="gray.200" height="calc(100vh - 180px)" overflowY="auto">
+          <VStack align="stretch" spacing={3}>
+            <InputGroup size="sm">
+              <InputLeftElement pointerEvents="none">
+                <Icon as={IoSearch} color="gray.400" />
+              </InputLeftElement>
+              <Input 
+                placeholder="Search files..." 
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+              />
+            </InputGroup>
+            
+            {loading && !fileTree.length ? (
+              <Box textAlign="center" py={8}>
+                <Spinner />
+              </Box>
+            ) : (
+              <>
+                {renderFileTree(fileTree)}
+                {fileTree.length === 0 && !loading && (
+                  <Box textAlign="center" py={8}>
+                    <Text color="gray.500">No files found</Text>
+                  </Box>
+                )}
+              </>
+            )}
+          </VStack>
+        </GridItem>
+        
+        {/* Main content area */}
+        <GridItem colSpan={{ base: 12, md: 9 }} height="calc(100vh - 180px)" overflowY="auto">
+          {selectedFile ? (
+            <Box>
+              <Flex justifyContent="space-between" alignItems="center" mb={2}>
+                <HStack spacing={2}>
+                  <Icon as={IoDocument} color="gray.600" />
+                  <Text fontWeight="bold">{selectedFile.name}</Text>
+                </HStack>
+                
+                {/* Show lineage button with larger, more prominent design */}
+                {lineageData && (
+                  <HStack spacing={2}>
+                    <Button
+                      leftIcon={<Icon as={IoGitNetwork} />}
+                      colorScheme={showLineage ? "orange" : "blue"}
+                      size="md"
+                      onClick={() => setShowLineage(!showLineage)}
+                      variant={showLineage ? "solid" : "outline"}
+                    >
+                      {showLineage ? "Hide Lineage" : "Show Lineage"}
+                    </Button>
+                    <Tooltip label="Data lineage shows column-level relationships between tables">
+                      <IconButton
+                        icon={<Icon as={IoAnalytics} />}
+                        size="sm"
+                        colorScheme="gray"
+                        variant="ghost"
+                        aria-label="Lineage info"
+                      />
+                    </Tooltip>
+                  </HStack>
+                )}
+              </Flex>
+              
+              <Divider mb={4} />
+              
+              {loading ? (
+                <Box textAlign="center" py={8}>
+                  <Spinner />
+                </Box>
+              ) : (
+                <>
+                  {showLineage && lineageData ? (
+                    <Box 
+                      height="calc(100vh - 250px)" 
+                      border="1px" 
+                      borderColor="blue.200" 
+                      borderRadius="md" 
+                      p={3}
+                      boxShadow="md"
+                      bg="white"
+                    >
+                      <Flex justify="space-between" align="center" mb={3}>
+                        <Heading size="sm" color="blue.700">
+                          Data Lineage Visualization
+                        </Heading>
+                        <HStack>
+                          <Button
+                            leftIcon={<Icon as={IoCode} />}
+                            size="xs"
+                            colorScheme="blue"
+                            onClick={() => {
+                              console.log('Current lineage data:', lineageData);
+                            }}
+                          >
+                            Debug Data
+                          </Button>
+                          <Button
+                            leftIcon={<Icon as={IoDocument} />}
+                            size="xs"
+                            colorScheme="gray"
+                            onClick={() => setShowLineage(false)}
+                          >
+                            Back to Code
+                          </Button>
+                        </HStack>
+                      </Flex>
+                      <Box height="calc(100% - 40px)" borderRadius="md" overflow="hidden" position="relative">
+                        {lineageData && Object.keys(lineageData).length > 0 ? (
+                          <LineageGraph data={lineageData} width="100%" height="100%" />
+                        ) : (
+                          <Box 
+                            position="absolute" 
+                            top="50%" 
+                            left="50%" 
+                            transform="translate(-50%, -50%)"
+                            textAlign="center"
+                            p={4}
+                            borderRadius="md"
+                            bg="red.50"
+                            border="1px"
+                            borderColor="red.200"
+                          >
+                            <Icon as={IoWarning} color="red.500" boxSize={8} mb={2} />
+                            <Text fontWeight="bold" color="red.600" mb={2}>Lineage Visualization Error</Text>
+                            <Text color="red.600">Could not render the lineage graph with the available data.</Text>
+                          </Box>
+                        )}
+                      </Box>
+                    </Box>
+                  ) : (
+                    <Box
+                      position="relative"
+                      borderRadius="md"
+                      border="1px"
+                      borderColor="gray.200"
+                      overflow="auto"
+                      bg="gray.50"
+                      fontSize="sm"
+                    >
+                      {/* Prominent lineage icon overlay for SQL files when not viewing lineage */}
+                      {lineageData && (
+                        <Box
+                          position="absolute"
+                          top="10px"
+                          right="10px"
+                          zIndex="1"
+                        >
+                          <IconButton
+                            icon={<Icon as={IoGitNetwork} />}
+                            colorScheme="blue"
+                            size="sm"
+                            onClick={() => setShowLineage(true)}
+                            aria-label="Show lineage"
+                          />
+                        </Box>
+                      )}
+                      
+                      <SyntaxHighlighter
+                        language={getFileExtension(selectedFile?.name || '')}
+                        style={docco}
+                        showLineNumbers
+                        customStyle={{ 
+                          backgroundColor: 'transparent',
+                          fontSize: '0.9em',
+                          fontFamily: 'monospace',
+                          padding: '20px'
+                        }}
+                      >
+                        {fileContent}
+                      </SyntaxHighlighter>
+                    </Box>
+                  )}
+                </>
+              )}
+            </Box>
+          ) : (
+            <Box
+              height="100%"
+              display="flex"
+              flexDirection="column"
+              justifyContent="center"
+              alignItems="center"
+              color="gray.500"
+            >
+              <Icon as={IoDocument} fontSize="6xl" mb={4} />
+              <Text>Select a file to view its contents</Text>
+            </Box>
+          )}
+        </GridItem>
+      </Grid>
+    </Container>
+  );
+};
+
+export default RepositoryPage;

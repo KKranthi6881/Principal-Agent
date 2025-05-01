@@ -53,8 +53,8 @@ app.add_middleware(
 
 # Include routers
 app.include_router(llm_providers_api.router)
-app.include_router(github_connectors_api.router)
-app.include_router(github_vector_api.router)
+#app.include_router(github_connectors_api.router)
+#app.include_router(github_vector_api.router)
 app.include_router(models_api.router)
 app.include_router(sql_dependencies_api.router)
 app.include_router(settings_api.router)
@@ -62,6 +62,10 @@ app.include_router(sql_analysis_api.router)
 app.include_router(sql_agent_router, prefix="/sql-agent", tags=["SQL Agent"])
 app.include_router(conversation_history_router)
 app.include_router(lineage_router)
+app.include_router(github_connectors_api.router)
+app.include_router(github_vector_api.router)
+from api import github_local_api
+app.include_router(github_local_api.router)
 
 # Architect Analyze API endpoint
 @app.post("/api/architect/analyze/")

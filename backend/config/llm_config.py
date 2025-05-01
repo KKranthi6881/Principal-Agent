@@ -68,7 +68,7 @@ OPENAI_CONFIG = {
 # Anthropic configuration
 ANTHROPIC_CONFIG = {
     "api_key": get_env("ANTHROPIC_API_KEY"),
-    "default_model": "claude-3-5-sonnet-20240620"
+    "default_model": "claude-3.7-sonnet"
 }
 
 # Google configuration

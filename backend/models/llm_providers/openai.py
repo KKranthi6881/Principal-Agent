@@ -201,28 +201,35 @@ class OpenAIProvider(BaseLLMProvider):
             {
                 "id": "gpt-4o",
                 "name": "GPT-4o",
-                "description": "Latest GPT-4 Omni model with vision capabilities",
+                "description": "Latest gpt-4o model with vision capabilities",
                 "context_length": 128000,
                 "is_default": True
             },
             {
-                "id": "gpt-4-turbo",
-                "name": "GPT-4 Turbo",
-                "description": "Improved GPT-4 model with longer context",
+                "id": "gpt-4o-mini",
+                "name": "GPT-4o Mini",
+                "description": "Improved gpt-4o-mini model with longer context",
                 "context_length": 128000,
                 "is_default": False
             },
             {
-                "id": "gpt-4",
-                "name": "GPT-4",
-                "description": "High-capability GPT-4 model",
+                "id": "gpt-4.1-mini",
+                "name": "GPT-4.1 Mini",
+                "description": "High-capability gpt-4.1-mini model",
                 "context_length": 8192,
                 "is_default": False
             },
             {
-                "id": "gpt-3.5-turbo",
-                "name": "GPT-3.5 Turbo",
-                "description": "Fast and cost-effective GPT-3.5 model",
+                "id": "gpt-4.1",
+                "name": "GPT-4.1",
+                "description": "Fast and cost-effective gpt-4.1 model",
+                "context_length": 16385,
+                "is_default": False
+            },
+            {
+                "id": "gpt-4o-nano",
+                "name": "GPT-4o Nano",
+                "description": "Fast and cost-effective gpt-4o-nano model",
                 "context_length": 16385,
                 "is_default": False
             }

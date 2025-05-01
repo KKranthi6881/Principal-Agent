@@ -158,6 +158,51 @@ class DependencyAgent(Agent):
             Be thorough in your analysis and consider all potential effects.
         """)
         
+    def _build_github_url(self, repo_url: str, file_path: str) -> str:
+        """
+        Build a properly formatted URL for a file that points to the application's repository UI
+        
+        Args:
+            repo_url: Repository URL
+            file_path: File path
+            
+        Returns:
+            URL that points to the application's repository UI
+        """
+        if not repo_url:
+            return ""
+
+        # Extract repository info
+        repo_name = ""
+        owner = ""
+        
+        # Remove .git suffix if present
+        if repo_url.endswith('.git'):
+            repo_url = repo_url[:-4]
+        
+        # Ensure the repo URL doesn't have trailing slash
+        if repo_url.endswith('/'):
+            repo_url = repo_url[:-1]
+        
+        # Try to extract owner and repo
+        import re
+        github_url_match = re.match(r'https://github.com/([^/]+)/([^/]+)', repo_url)
+        if github_url_match:
+            owner = github_url_match.group(1)
+            repo_name = github_url_match.group(2)
+        else:
+            # If we couldn't extract owner/repo, use GitHub URL as fallback
+            if file_path and file_path.startswith('/'):
+                file_path = file_path[1:]
+            return f"{repo_url}/blob/main/{file_path}"
+        
+        # Remove leading slash from file path if present
+        if file_path and file_path.startswith('/'):
+            file_path = file_path[1:]
+            
+        # Build the application repository UI URL with file parameter for direct file opening
+        return f"http://localhost:5173/repository?repo={owner}/{repo_name}&path={file_path}&file={file_path}"
+        
     def analyze_dependencies(self, table_name: str, include_columns: bool = True,
                             dialect: Optional[str] = None, repo_url: Optional[str] = None):
         """
@@ -188,6 +233,7 @@ class DependencyAgent(Agent):
                 },
                 "columns": [],
                 "source_files": [],
+                "dependency_paths": [],
                 "summary": {
                     "table": table_name,
                     "dialect": dialect or "default",
@@ -208,17 +254,27 @@ class DependencyAgent(Agent):
                 # Log files found
                 logger.info(f"Found {len(result['source_files'])} files mentioning table {table_name}")
                 
+                # Build dependency graphs for upstream and downstream relationships
+                upstream_graph = {}
+                downstream_graph = {}
+                
                 # Process each file to extract dependencies
                 for file_info in result["source_files"]:
                     # Get file content and path
                     sql_code = file_info.get("content", "")
                     file_path = file_info.get("file_path", "")
-                    file_url = file_info.get("url", "")
                     
                     if sql_code and file_path:
                         # Try to extract lineage from the SQL code
                         try:
-                            lineage = self.sql_tools.extract_lineage(sql_code, dialect=dialect, file_path=file_path)
+                            # Check which method is available in the SQL tools interface
+                            if hasattr(self.sql_tools, 'extract_lineage'):
+                                lineage = self.sql_tools.extract_lineage(sql_code, dialect=dialect, file_path=file_path)
+                            elif hasattr(self.sql_tools, 'analyze_lineage'):
+                                lineage = self.sql_tools.analyze_lineage(sql_code, dialect=dialect, file_path=file_path)
+                            else:
+                                logger.warning(f"No lineage extraction method available for file {file_path}")
+                                continue
                             
                             # Process extracted lineage to identify upstream and downstream dependencies
                             if isinstance(lineage, dict) and "table_lineage" in lineage:
@@ -231,311 +287,227 @@ class DependencyAgent(Agent):
                                     
                                     # If this table is the target, the source is upstream
                                     if target and target.lower() == table_name.lower() and source:
-                                        # Add to upstream dependencies if not already there
-                                        if not any(dep["table"] == source for dep in result["dependencies"]["upstream"]):
-                                            result["dependencies"]["upstream"].append({
+                                        # Build the upstream graph
+                                        if source not in upstream_graph:
+                                            upstream_graph[source] = {
                                                 "table": source,
-                                                "script": file_path,
-                                                "url": file_url
-                                            })
+                                                "files": [],
+                                                "references": 0
+                                            }
+                                        
+                                        # Add file info to the graph
+                                        file_entry = {
+                                            "file_path": file_path,
+                                            "url": self._build_github_url(repo_url, file_path) if repo_url else file_info.get("url", "")
+                                        }
+                                        
+                                        if file_entry not in upstream_graph[source]["files"]:
+                                            upstream_graph[source]["files"].append(file_entry)
+                                            upstream_graph[source]["references"] += 1
                                     
                                     # If this table is the source, the target is downstream
                                     if source and source.lower() == table_name.lower() and target:
-                                        # Add to downstream dependencies if not already there
-                                        if not any(dep["table"] == target for dep in result["dependencies"]["downstream"]):
-                                            result["dependencies"]["downstream"].append({
+                                        # Build the downstream graph
+                                        if target not in downstream_graph:
+                                            downstream_graph[target] = {
                                                 "table": target,
-                                                "script": file_path,
-                                                "url": file_url
-                                            })
-                            
-                            # Process column lineage if requested
-                            if include_columns and isinstance(lineage, dict) and "column_lineage" in lineage:
-                                column_lineage = lineage["column_lineage"]
-                                
-                                for relation in column_lineage:
-                                    source_table = relation.get("source_table")
-                                    source_column = relation.get("source_column")
-                                    target_table = relation.get("target_table")
-                                    target_column = relation.get("target_column")
+                                                "files": [],
+                                                "references": 0
+                                            }
+                                        
+                                        # Add file info to the graph
+                                        file_entry = {
+                                            "file_path": file_path,
+                                            "url": self._build_github_url(repo_url, file_path) if repo_url else file_info.get("url", "")
+                                        }
+                                        
+                                        if file_entry not in downstream_graph[target]["files"]:
+                                            downstream_graph[target]["files"].append(file_entry)
+                                            downstream_graph[target]["references"] += 1
+                        
+                                # Process column lineage if requested
+                                if include_columns and "column_lineage" in lineage:
+                                    column_lineage = lineage["column_lineage"]
                                     
-                                    # If this table is involved in the column relationship
-                                    if (source_table and source_table.lower() == table_name.lower()) or \
-                                       (target_table and target_table.lower() == table_name.lower()):
-                                        # Add the column to the list if it belongs to the target table
-                                        column_name = None
-                                        if source_table and source_table.lower() == table_name.lower():
-                                            column_name = source_column
-                                        elif target_table and target_table.lower() == table_name.lower():
-                                            column_name = target_column
+                                    for relation in column_lineage:
+                                        source_table = relation.get("source_table")
+                                        source_column = relation.get("source_column")
+                                        target_table = relation.get("target_table")
+                                        target_column = relation.get("target_column")
+                                        transformation = relation.get("transformation")
+                                        
+                                        # Add column lineage information
+                                        if source_table and source_column and target_table and target_column:
+                                            # For upstream dependencies (target table is our table)
+                                            if target_table.lower() == table_name.lower():
+                                                column_entry = {
+                                                    "source_table": source_table,
+                                                    "source_column": source_column,
+                                                    "target_table": target_table,
+                                                    "target_column": target_column,
+                                                    "transformation": transformation,
+                                                    "file": file_path,
+                                                    "url": self._build_github_url(repo_url, file_path) if repo_url else file_info.get("url", "")
+                                                }
+                                                result["columns"].append(column_entry)
                                             
-                                        if column_name and not any(col["name"] == column_name for col in result["columns"]):
-                                            result["columns"].append({
-                                                "name": column_name,
-                                                "table": table_name,
-                                                "referenced_in": file_path,
-                                                "url": file_url
-                                            })
-                        except Exception as lineage_error:
-                            logger.warning(f"Error extracting lineage from file {file_path}: {str(lineage_error)}")
-            
-            # If no dependencies found, try fallback approach with direct SQL search
-            if not result["dependencies"]["upstream"] and not result["dependencies"]["downstream"]:
-                logger.info(f"No dependencies found using lineage extraction, trying SQL search approach")
+                                            # For downstream dependencies (source table is our table)
+                                            elif source_table.lower() == table_name.lower():
+                                                column_entry = {
+                                                    "source_table": source_table,
+                                                    "source_column": source_column,
+                                                    "target_table": target_table,
+                                                    "target_column": target_column,
+                                                    "transformation": transformation,
+                                                    "file": file_path,
+                                                    "url": self._build_github_url(repo_url, file_path) if repo_url else file_info.get("url", "")
+                                                }
+                                                result["columns"].append(column_entry)
+                        except Exception as e:
+                            logger.error(f"Error processing lineage for file {file_path}: {str(e)}")
                 
-                # Search for SQL with queries involving this table
-                if hasattr(self.sql_tools, 'search_sql'):
-                    # Search for upstream dependencies (tables that feed into this table)
-                    query = f"INSERT INTO {table_name} SELECT FROM OR CREATE TABLE {table_name} AS SELECT FROM OR WITH.*SELECT.*FROM OR UPDATE {table_name} SET"
-                    upstream_search = self.sql_tools.search_sql(query, limit=10)
-                    
-                    # Process matches to find tables that feed into this one
-                    for match in upstream_search.get("results", []):
-                        sql_code = match.get("content", "")
-                        file_path = match.get("file_path", "")
-                        file_url = match.get("url", "")
-                        
-                        # Extract table names from SQL
-                        tables = self._extract_table_dependencies(sql_code, table_name)
-                        for source_table in tables.get("upstream", []):
-                            if not any(dep["table"] == source_table for dep in result["dependencies"]["upstream"]):
-                                result["dependencies"]["upstream"].append({
-                                    "table": source_table,
-                                    "script": file_path,
-                                    "url": file_url
-                                })
-                    
-                    # Search for downstream dependencies (tables that use this table)
-                    query = f"FROM {table_name} OR JOIN {table_name} OR WITH.*{table_name}"
-                    downstream_search = self.sql_tools.search_sql(query, limit=10)
-                    
-                    # Process matches to find tables that use this one
-                    for match in downstream_search.get("results", []):
-                        sql_code = match.get("content", "")
-                        file_path = match.get("file_path", "")
-                        file_url = match.get("url", "")
-                        
-                        # Extract table names from SQL
-                        tables = self._extract_table_dependencies(sql_code, table_name)
-                        for target_table in tables.get("downstream", []):
-                            if not any(dep["table"] == target_table for dep in result["dependencies"]["downstream"]):
-                                result["dependencies"]["downstream"].append({
-                                    "table": target_table,
-                                    "script": file_path,
-                                    "url": file_url
-                                })
-            
-            # Update summary counts
-            result["summary"]["upstream_count"] = len(result["dependencies"]["upstream"])
-            result["summary"]["downstream_count"] = len(result["dependencies"]["downstream"])
-            result["summary"]["column_count"] = len(result["columns"])
-            result["summary"]["file_count"] = len(result["source_files"])
-            
-            # Add natural language summary for LLM
-            result["natural_language_summary"] = self._generate_dependency_summary(result)
-            
-            logger.info(f"Completed dependency analysis for table {table_name}: "
-                       f"{result['summary']['upstream_count']} upstream, "
-                       f"{result['summary']['downstream_count']} downstream, "
-                       f"{result['summary']['column_count']} columns")
+                # Convert the dependency graphs to lists for result
+                result["dependencies"]["upstream"] = list(upstream_graph.values())
+                result["dependencies"]["downstream"] = list(downstream_graph.values())
+                
+                # Build dependency paths
+                result["dependency_paths"] = self._build_dependency_paths(
+                    table_name, 
+                    upstream_graph, 
+                    downstream_graph,
+                    repo_url
+                )
+                
+                # Update summary counts
+                result["summary"]["upstream_count"] = len(result["dependencies"]["upstream"])
+                result["summary"]["downstream_count"] = len(result["dependencies"]["downstream"])
+                result["summary"]["column_count"] = len(result["columns"])
+                
+                # Generate a natural language summary
+                result["summary_text"] = self._generate_dependency_summary(result)
             
             return result
+            
         except Exception as e:
             logger.error(f"Error analyzing dependencies: {str(e)}")
-            return {
-                "error": str(e),
-                "table": table_name,
-                "dependencies": {"upstream": [], "downstream": []},
-                "columns": [],
-                "natural_language_summary": f"Error analyzing dependencies for table {table_name}: {str(e)}"
-            }
-            
-    def _extract_table_dependencies(self, sql_code: str, table_name: str) -> Dict[str, List[str]]:
+            return {"error": f"Error analyzing dependencies: {str(e)}"}
+    
+    def _build_dependency_paths(self, table_name, upstream_graph, downstream_graph, repo_url=None):
         """
-        Extract table dependencies from SQL code
+        Build dependency paths for better visualization
         
         Args:
-            sql_code: SQL code to analyze
-            table_name: Name of the table being analyzed
+            table_name: The central table name
+            upstream_graph: Graph of upstream dependencies
+            downstream_graph: Graph of downstream dependencies
+            repo_url: Repository URL for building GitHub links
             
         Returns:
-            Dictionary with upstream and downstream table dependencies
+            List of dependency paths
         """
-        result = {
-            "upstream": [],
-            "downstream": []
-        }
+        paths = []
         
-        try:
-            # Normalize SQL code and table name for easier processing
-            sql_code = sql_code.lower()
-            normalized_table = table_name.lower()
-            
-            # Simple regex patterns to extract potential table references
-            # These are basic and would ideally be replaced with a proper SQL parser
-            table_pattern = r'\b(from|join)\s+([a-z0-9_\.]+)'  # FROM or JOIN clause
-            target_pattern = r'\b(into|update)\s+([a-z0-9_\.]+)'  # INTO or UPDATE clause
-            cte_pattern = r'\bwith\s+([a-z0-9_]+)\s+as\s*\('  # CTE definitions
-            create_pattern = r'\bcreate\s+(or\s+replace\s+)?(?:table|view)\s+([a-z0-9_\.]+)'  # CREATE statements
-            insert_pattern = r'\binsert\s+into\s+([a-z0-9_\.]+)'  # INSERT statements
-            select_pattern = r'\bselect\s+.*?\bfrom\s+([a-z0-9_\.]+)'  # SELECT statements
-            
-            # Extract tables referenced in FROM or JOIN clauses
-            import re
-            source_tables = set()
-            for match in re.finditer(table_pattern, sql_code):
-                source_name = match.group(2).strip()
-                if source_name != normalized_table and source_name not in source_tables:
-                    source_tables.add(source_name)
-                    
-            # Extract target tables in INTO or UPDATE clauses
-            target_tables = set()
-            for match in re.finditer(target_pattern, sql_code):
-                target_name = match.group(2).strip()
-                if target_name != normalized_table and target_name not in target_tables:
-                    target_tables.add(target_name)
-            
-            # Check for CREATE statements
-            create_matches = re.finditer(create_pattern, sql_code)
-            for match in create_matches:
-                created_table = match.group(2).strip()
-                if created_table.lower() == normalized_table:
-                    # This SQL creates our target table, so source tables are upstream
-                    result["upstream"] = list(source_tables)
-                elif normalized_table in source_tables:
-                    # Our target table is used to create another table, so that table is downstream
-                    target_tables.add(created_table)
-            
-            # Check for INSERT statements
-            insert_matches = re.finditer(insert_pattern, sql_code)
-            for match in insert_matches:
-                inserted_table = match.group(1).strip()
-                if inserted_table.lower() == normalized_table:
-                    # Data is being inserted into our target table, sources are upstream
-                    result["upstream"] = list(source_tables)
-                elif normalized_table in source_tables:
-                    # Our target table is used in an insert, so the target is downstream
-                    target_tables.add(inserted_table)
-            
-            # If we have specific references, assign them to appropriate categories
-            if normalized_table in sql_code:
-                # If this SQL mentions our table but doesn't create it, it's likely using the table
-                if normalized_table in source_tables:
-                    # Tables created or updated using our table as a source are downstream
-                    result["downstream"] = list(target_tables)
-                else:
-                    # If our table is a target, then the sources are upstream
-                    result["upstream"] = list(source_tables)
-            
-            # Clean up results
-            result["upstream"] = [table for table in result["upstream"] if table != normalized_table]
-            result["downstream"] = [table for table in result["downstream"] if table != normalized_table]
-            
-            return result
-            
-        except Exception as e:
-            logger.error(f"Error extracting table dependencies: {str(e)}")
-            return result
+        # Build upstream paths (source -> table)
+        for source_table, source_info in upstream_graph.items():
+            path = {
+                "direction": "upstream",
+                "path": f"{source_table} → {table_name}",
+                "tables": [source_table, table_name],
+                "files": source_info["files"]
+            }
+            paths.append(path)
+        
+        # Build downstream paths (table -> target)
+        for target_table, target_info in downstream_graph.items():
+            path = {
+                "direction": "downstream",
+                "path": f"{table_name} → {target_table}",
+                "tables": [table_name, target_table],
+                "files": target_info["files"]
+            }
+            paths.append(path)
+        
+        return paths
     
-    def _generate_dependency_summary(self, result: Dict[str, Any]) -> str:
+    def _generate_dependency_summary(self, result):
         """
-        Generate a natural language summary of dependencies
+        Generate a natural language summary of the dependencies
         
         Args:
-            result: Dependency analysis result
+            result: The dependency analysis result
             
         Returns:
             Natural language summary
         """
-        summary_parts = []
         table_name = result.get("table", "unknown")
+        upstream = result.get("dependencies", {}).get("upstream", [])
+        downstream = result.get("dependencies", {}).get("downstream", [])
+        columns = result.get("columns", [])
+        
+        summary_parts = []
         
         # Upstream dependencies
-        upstream = result.get("dependencies", {}).get("upstream", [])
         if upstream:
-            # Format upstream tables with their files
-            upstream_tables = []
-            for dep in upstream:
-                table = dep.get("table", "")
-                script = dep.get("script", "").split("/")[-1] if dep.get("script") else ""  # Just filename not full path
-                if table:
-                    if script:
-                        upstream_tables.append(f"{table} (defined in {script})")
-                    else:
-                        upstream_tables.append(table)
-            
-            if len(upstream_tables) == 1:
-                summary_parts.append(f"The table {table_name} depends on {upstream_tables[0]}.")
-            elif len(upstream_tables) > 1:
-                tables_list = ", ".join(upstream_tables[:-1]) + " and " + upstream_tables[-1]
-                summary_parts.append(f"The table {table_name} depends on {tables_list}.")
+            if len(upstream) == 1:
+                summary_parts.append(f"The table {table_name} depends on 1 upstream table: {upstream[0]['table']}.")
+            else:
+                upstream_names = [u["table"] for u in upstream[:5]]
+                if len(upstream) <= 5:
+                    tables_list = ", ".join(upstream_names)
+                    summary_parts.append(f"The table {table_name} depends on {len(upstream)} upstream tables: {tables_list}.")
+                else:
+                    tables_sample = ", ".join(upstream_names)
+                    summary_parts.append(f"The table {table_name} depends on {len(upstream)} upstream tables, including: {tables_sample}...")
         else:
-            summary_parts.append(f"The table {table_name} does not have any identified upstream dependencies.")
+            summary_parts.append(f"The table {table_name} has no identifiable upstream dependencies.")
         
         # Downstream dependencies
-        downstream = result.get("dependencies", {}).get("downstream", [])
         if downstream:
-            # Format downstream tables with their files
-            downstream_tables = []
-            for dep in downstream:
-                table = dep.get("table", "")
-                script = dep.get("script", "").split("/")[-1] if dep.get("script") else ""  # Just filename not full path
-                if table:
-                    if script:
-                        downstream_tables.append(f"{table} (defined in {script})")
-                    else:
-                        downstream_tables.append(table)
-            
-            if len(downstream_tables) == 1:
-                summary_parts.append(f"The table {downstream_tables[0]} depends on {table_name}.")
-            elif len(downstream_tables) > 1:
-                tables_list = ", ".join(downstream_tables[:-1]) + " and " + downstream_tables[-1]
-                summary_parts.append(f"The tables {tables_list} depend on {table_name}.")
+            if len(downstream) == 1:
+                summary_parts.append(f"1 downstream table depends on {table_name}: {downstream[0]['table']}.")
+            else:
+                downstream_names = [d["table"] for d in downstream[:5]]
+                if len(downstream) <= 5:
+                    tables_list = ", ".join(downstream_names)
+                    summary_parts.append(f"{len(downstream)} downstream tables depend on {table_name}: {tables_list}.")
+                else:
+                    tables_sample = ", ".join(downstream_names)
+                    summary_parts.append(f"{len(downstream)} downstream tables depend on {table_name}, including: {tables_sample}...")
         else:
-            summary_parts.append(f"No downstream dependencies were identified for the table {table_name}.")
+            summary_parts.append(f"No identifiable downstream tables depend on {table_name}.")
         
-        # Column information
-        columns = result.get("columns", [])
+        # Column dependencies
         if columns:
-            column_names = [col.get("name", "") for col in columns if col.get("name", "")]
-            if column_names:
-                if len(column_names) <= 5:
-                    columns_list = ", ".join(column_names)
-                    summary_parts.append(f"The table includes these columns: {columns_list}.")
+            column_counts = {}
+            for col in columns:
+                source_table = col.get("source_table")
+                target_table = col.get("target_table")
+                
+                if source_table == table_name:
+                    # This is a downstream column relation
+                    key = f"{source_table} → {target_table}"
+                    column_counts[key] = column_counts.get(key, 0) + 1
                 else:
-                    columns_sample = ", ".join(column_names[:5])
-                    summary_parts.append(f"The table includes these columns (showing 5 of {len(column_names)}): {columns_sample}.")
-        
-        # Files information
-        files = result.get("source_files", [])
-        if files:
-            file_paths = [file.get("file_path", "").split("/")[-1] for file in files if file.get("file_path", "")]  # Just filename not full path
-            if len(file_paths) == 1:
-                summary_parts.append(f"The table is referenced in the file {file_paths[0]}.")
-            elif len(file_paths) > 1:
-                if len(file_paths) <= 3:
-                    files_list = ", ".join(file_paths)
-                    summary_parts.append(f"The table is referenced in these files: {files_list}.")
-                else:
-                    files_sample = ", ".join(file_paths[:3])
-                    summary_parts.append(f"The table is referenced in {len(file_paths)} files, including: {files_sample}.")
+                    # This is an upstream column relation
+                    key = f"{source_table} → {target_table}"
+                    column_counts[key] = column_counts.get(key, 0) + 1
+            
+            # Format column dependency information
+            col_summaries = []
+            for relation, count in column_counts.items():
+                col_summaries.append(f"{count} column dependencies between {relation}")
+            
+            if col_summaries:
+                summary_parts.append("Column-level dependencies:")
+                for summary in col_summaries[:3]:
+                    summary_parts.append(f"- {summary}")
+                
+                if len(col_summaries) > 3:
+                    summary_parts.append(f"- ...and {len(col_summaries) - 3} more column dependencies")
         
         # Join all parts
-        result_summary = " ".join(summary_parts)
-        
-        # Add a business implications section
-        if upstream or downstream:
-            result_summary += "\n\nBusiness implications: "
-            if upstream and downstream:
-                result_summary += f"The table {table_name} serves as an intermediary in a data pipeline, processing data from upstream sources and providing it to downstream consumers."
-            elif upstream:
-                result_summary += f"The table {table_name} is a consumer of data from other tables, likely used for analytics, reporting, or as a refined data product."
-            elif downstream:
-                result_summary += f"The table {table_name} is a source of data for other tables, indicating it serves as foundational data in the system."
-        else:
-            result_summary += f"\n\nBusiness implications: The table {table_name} appears to be isolated in the current codebase, without clear data lineage connections."
-        
-        return result_summary
+        full_summary = "\n".join(summary_parts)
+        return full_summary
     
     def analyze_impact(self, table_name: str, column_name: Optional[str] = None,
                       dialect: Optional[str] = None, repo_url: Optional[str] = None):
@@ -552,66 +524,185 @@ class DependencyAgent(Agent):
             Impact analysis
         """
         try:
-            # Get the dependencies
-            dependencies = self.analyze_dependencies(
+            logger.info(f"Analyzing impact for table '{table_name}', column '{column_name}' with dialect '{dialect}'")
+            
+            # Validate SQLTools instance exists
+            if not self.sql_tools:
+                return {"error": "SQL tools not available"}
+            
+            # Initialize result structure
+            result = {
+                "entity_type": "table" if not column_name else "column",
+                "entity_name": column_name if column_name else table_name,
+                "table_name": table_name,
+                "column_name": column_name,
+                "affected_tables": [],
+                "affected_columns": [],
+                "affected_queries": [],
+                "summary": {
+                    "affected_tables_count": 0,
+                    "affected_columns_count": 0,
+                    "affected_queries_count": 0
+                }
+            }
+            
+            # First, get dependencies for the table to find affected entities
+            deps = self.analyze_dependencies(
                 table_name=table_name,
                 include_columns=True,
                 dialect=dialect,
                 repo_url=repo_url
             )
             
-            # Get the entity type (table or column)
-            entity_type = "table"
+            # Handle the case where dependencies couldn't be found
+            if "error" in deps:
+                return {
+                    "entity_type": "table" if not column_name else "column",
+                    "entity_name": column_name if column_name else table_name,
+                    "table_name": table_name,
+                    "column_name": column_name,
+                    "error": deps["error"],
+                    "summary": "Could not analyze impact due to error in dependency analysis"
+                }
+            
+            # Extract downstream dependencies (tables affected by this table)
+            downstream = deps.get("dependencies", {}).get("downstream", [])
+            result["affected_tables"] = downstream
+            result["summary"]["affected_tables_count"] = len(downstream)
+            
+            # Extract column-level dependencies if we're analyzing a column
             if column_name:
-                entity_type = "column"
+                columns = deps.get("columns", [])
+                affected_columns = []
                 
-            # Initialize with empty defaults to prevent errors
-            upstream_deps = "[]"
-            downstream_deps = "[]"
-            
-            # Handle potential error cases with appropriate checks
-            if isinstance(dependencies, dict) and "dependencies" in dependencies:
-                # Format the dependencies for the prompt - handle table level
-                if "upstream" in dependencies.get("dependencies", {}):
-                    upstream_deps = json.dumps(dependencies["dependencies"]["upstream"], indent=2)
-                if "downstream" in dependencies.get("dependencies", {}):
-                    downstream_deps = json.dumps(dependencies["dependencies"]["downstream"], indent=2)
+                for col_dep in columns:
+                    if col_dep.get("source_table") == table_name and col_dep.get("source_column") == column_name:
+                        affected_columns.append({
+                            "table": col_dep.get("target_table"),
+                            "column": col_dep.get("target_column"),
+                            "transformation": col_dep.get("transformation")
+                        })
                 
-                # Handle column level if it exists
-                if column_name and "columns" in dependencies and isinstance(dependencies["columns"], dict):
-                    if column_name in dependencies["columns"]:
-                        col_info = dependencies["columns"][column_name]
-                        if "upstream" in col_info:
-                            upstream_deps = json.dumps(col_info["upstream"], indent=2)
-                        if "downstream" in col_info:
-                            downstream_deps = json.dumps(col_info["downstream"], indent=2)
-            else:
-                # If dependencies is not in expected format, use empty lists
-                logger.warning(f"Dependencies not in expected format: {dependencies}")
+                result["affected_columns"] = affected_columns
+                result["summary"]["affected_columns_count"] = len(affected_columns)
+            
+            # Look for queries that use this table/column
+            if self.sql_tools:
+                # Search for the table in SQL files
+                search_terms = [table_name]
+                if column_name:
+                    search_terms.append(column_name)
                 
-            # Build the prompt
-            prompt = self.impact_analysis_prompt.format(
-                table=table_name,
-                column=column_name or "N/A",
-                entity_type=entity_type,
-                upstream_dependencies=upstream_deps,
-                downstream_dependencies=downstream_deps
-            )
+                for term in search_terms:
+                    search_results = self.sql_tools.search_for_table(term, limit=10)
+                    if "results" in search_results:
+                        for item in search_results["results"]:
+                            # Add file info to affected queries
+                            result["affected_queries"].append({
+                                "file": item.get("file_path", ""),
+                                "url": self._build_github_url(repo_url, item.get("file_path", "")) if repo_url else item.get("url", ""),
+                                "matched_term": term
+                            })
             
-            # Get the model response
-            response = self.model.invoke(prompt)
+            # Remove duplicates from affected queries
+            unique_queries = []
+            unique_paths = set()
+            for query in result["affected_queries"]:
+                if query["file"] not in unique_paths:
+                    unique_paths.add(query["file"])
+                    unique_queries.append(query)
             
-            # Parse the response
-            try:
-                return self.parser.parse(response.content)
-            except Exception as e:
-                logger.error(f"Error parsing model response: {str(e)}")
-                # Return the raw response if parsing fails
-                return {"raw_response": response.content}
+            result["affected_queries"] = unique_queries
+            result["summary"]["affected_queries_count"] = len(unique_queries)
+            
+            # Generate a natural language summary
+            result["summary_text"] = self._generate_impact_summary(result)
+            
+            return result
         except Exception as e:
             logger.error(f"Error analyzing impact: {str(e)}")
-            return {"error": str(e)}
+            return {
+                "entity_type": "table" if not column_name else "column",
+                "entity_name": column_name if column_name else table_name,
+                "table_name": table_name,
+                "column_name": column_name,
+                "error": str(e),
+                "summary": f"Error analyzing impact: {str(e)}"
+            }
+    
+    def _generate_impact_summary(self, result: Dict[str, Any]) -> str:
+        """
+        Generate a natural language summary of the impact analysis
+        
+        Args:
+            result: Impact analysis result
             
+        Returns:
+            Natural language summary
+        """
+        summary_parts = []
+        entity_type = result.get("entity_type", "table")
+        entity_name = result.get("entity_name", "unknown")
+        table_name = result.get("table_name", "unknown")
+        
+        # Affected tables
+        affected_tables = result.get("affected_tables", [])
+        if affected_tables:
+            if len(affected_tables) == 1:
+                summary_parts.append(f"Modifying the {entity_type} {entity_name} will affect the table {affected_tables[0]['table']}.")
+            else:
+                tables_list = ", ".join([t["table"] for t in affected_tables])
+                summary_parts.append(f"Modifying the {entity_type} {entity_name} will affect the tables {tables_list}.")
+        else:
+            summary_parts.append(f"Modifying the {entity_type} {entity_name} does not appear to affect any other tables.")
+        
+        # Affected columns
+        affected_columns = result.get("affected_columns", [])
+        if affected_columns:
+            if len(affected_columns) == 1:
+                summary_parts.append(f"Modifying the {entity_type} {entity_name} will affect the column {affected_columns[0]['column']} in the table {affected_columns[0]['table']}.")
+            else:
+                columns_list = ", ".join([f"{col['column']} in {col['table']}" for col in affected_columns])
+                summary_parts.append(f"Modifying the {entity_type} {entity_name} will affect the columns {columns_list}.")
+        else:
+            summary_parts.append(f"Modifying the {entity_type} {entity_name} does not appear to affect any other columns.")
+        
+        # Affected queries
+        affected_queries = result.get("affected_queries", [])
+        if affected_queries:
+            if len(affected_queries) == 1:
+                summary_parts.append(f"Modifying the {entity_type} {entity_name} will affect the query in the file {affected_queries[0]['file']}.")
+            else:
+                files_list = ", ".join([q["file"] for q in affected_queries])
+                summary_parts.append(f"Modifying the {entity_type} {entity_name} will affect the queries in the files {files_list}.")
+        else:
+            summary_parts.append(f"Modifying the {entity_type} {entity_name} does not appear to affect any queries.")
+        
+        # Join all parts
+        result_summary = " ".join(summary_parts)
+        
+        # Add a business implications section
+        if affected_tables or affected_columns or affected_queries:
+            result_summary += "\n\nBusiness implications: "
+            if affected_tables and affected_columns and affected_queries:
+                result_summary += f"Modifying the {entity_type} {entity_name} will have a significant impact on the data pipeline, affecting multiple tables, columns, and queries."
+            elif affected_tables and affected_columns:
+                result_summary += f"Modifying the {entity_type} {entity_name} will have a moderate impact on the data pipeline, affecting multiple tables and columns."
+            elif affected_tables and affected_queries:
+                result_summary += f"Modifying the {entity_type} {entity_name} will have a moderate impact on the data pipeline, affecting multiple tables and queries."
+            elif affected_columns and affected_queries:
+                result_summary += f"Modifying the {entity_type} {entity_name} will have a moderate impact on the data pipeline, affecting multiple columns and queries."
+            elif affected_tables:
+                result_summary += f"Modifying the {entity_type} {entity_name} will have a minor impact on the data pipeline, affecting one or more tables."
+            elif affected_columns:
+                result_summary += f"Modifying the {entity_type} {entity_name} will have a minor impact on the data pipeline, affecting one or more columns."
+            elif affected_queries:
+                result_summary += f"Modifying the {entity_type} {entity_name} will have a minor impact on the data pipeline, affecting one or more queries."
+        else:
+            result_summary += f"\n\nBusiness implications: Modifying the {entity_type} {entity_name} does not appear to have any significant impact on the data pipeline."
+        
+        return result_summary
+    
     def search_and_analyze(self, keyword: str, dialect: Optional[str] = None, repo_url: Optional[str] = None) -> Dict[str, Any]:
         """
         Search for a keyword (column name or business logic) and analyze related tables
@@ -842,6 +933,11 @@ class DependencyAgent(Agent):
         """
         action = input_data.get("action", "")
         params = input_data.get("params", {})
+        
+        # Handle common misspelling of analyze_dependencies
+        if action == "analyze_dependenies":
+            logger.info("Correcting misspelled action 'analyze_dependenies' to 'analyze_dependencies'")
+            action = "analyze_dependencies"
         
         if action == "analyze_dependencies":
             table_name = params.get("table_name")

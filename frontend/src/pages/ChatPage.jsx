@@ -1107,24 +1107,39 @@ const MarkdownContent = ({ content }) => {
     // Skip separator row
     const dataRows = tableLines.slice(2);
     
+    // Function to process potential markdown in table cells
+    const processCellContent = (content) => {
+      // Check if the content has markdown formatting
+      const hasMarkdown = content.includes('**') || content.includes('*') || 
+                          content.includes('`') || content.includes('[');
+      
+      if (hasMarkdown) {
+        return <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>;
+      }
+      
+      return content;
+    };
+    
     return (
       <Box className="md-table" 
            width="100%" 
            overflowX="auto" 
-           my={3}
+           my={4}
            border="1px solid"
            borderColor="gray.200"
            borderRadius="md">
-        <Table size="sm" variant="simple" width="100%">
+        <Table size="md" variant="simple" width="100%">
           <Thead bg="purple.50">
             <Tr>
               {headers.map((header, i) => (
                 <Th key={i} 
-                    py={2}
-                    px={3}
+                    py={3}
+                    px={4}
                     color="purple.700"
-                    fontSize="sm">
-                  {header}
+                    fontSize="sm"
+                    borderBottom="2px" 
+                    borderColor="purple.200">
+                  {processCellContent(header)}
                 </Th>
               ))}
             </Tr>
@@ -1139,12 +1154,13 @@ const MarkdownContent = ({ content }) => {
                 <Tr key={rowIdx} bg={rowIdx % 2 === 1 ? "gray.50" : "white"}>
                   {cells.map((cell, cellIdx) => (
                     <Td key={cellIdx} 
-                        py={2}
-                        px={3}
+                        py={3}
+                        px={4}
                         fontSize="sm"
                         whiteSpace="pre-wrap"
-                        verticalAlign="top">
-                      {cell}
+                        verticalAlign="top"
+                        className={cellIdx === 0 ? "nowrap" : ""}>
+                      {processCellContent(cell)}
                     </Td>
                   ))}
                 </Tr>
@@ -1360,6 +1376,7 @@ const MarkdownContent = ({ content }) => {
               >
                 {section.text}
               </Heading>
+              
               <Box pl={2}>
                 {renderContent(section.content)}
               </Box>

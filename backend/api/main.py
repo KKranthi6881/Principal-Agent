@@ -7,6 +7,7 @@ from api.github_connectors_api import router as github_connectors_router
 from api.llm_providers_api import router as llm_providers_router
 from api.models_api import router as models_router
 from api.github_vector_api import router as github_vector_router
+from api.github_local_api import router as github_local_router
 from fastapi.middleware.cors import CORSMiddleware
 import os
 import sqlite3
@@ -42,6 +43,7 @@ app.include_router(models_router, prefix="/models")
 app.include_router(llm_providers_router)
 app.include_router(github_connectors_router)
 app.include_router(github_vector_router)
+app.include_router(github_local_router)
 
 # Pydantic models for request/response
 class ThreadCreate(BaseModel):

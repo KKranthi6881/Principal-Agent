@@ -40,6 +40,26 @@ def get_cipher():
     return Fernet(key)
 
 # Helper functions
+def normalize_enterprise_api_url(api_url: str) -> str:
+    """
+    Ensure the provided API URL is a valid GitHub Enterprise API base URL.
+    Returns the normalized URL or raises ValueError if invalid.
+    """
+    if not api_url:
+        raise ValueError("API URL is required for enterprise GitHub.")
+    parsed = urlparse(api_url)
+    # Heuristic: If path contains '/', it's likely not a base API URL
+    if parsed.netloc == '' or parsed.scheme == '':
+        raise ValueError(f"Malformed API URL: '{api_url}'")
+    # If this looks like a repo URL (ends with .git or has /owner/repo)
+    if parsed.path.endswith('.git') or len([p for p in parsed.path.strip('/').split('/') if p]) >= 2:
+        raise ValueError(f"API URL appears to be a repository URL. Please provide the base API URL (e.g., https://<your-gh-enterprise-domain>/api/v3)")
+    # Ensure /api/v3 is present
+    if not parsed.path.rstrip('/').endswith('/api/v3'):
+        raise ValueError(f"API URL must end with /api/v3 (e.g., https://<your-gh-enterprise-domain>/api/v3)")
+    # Normalize (remove trailing slash)
+    return api_url.rstrip('/')
+
 def get_db_connection():
     """Get a connection to the metadata database"""
     conn = sqlite3.connect(METADATA_DB)
@@ -255,11 +275,7 @@ async def create_github_connector(connector: GitHubConnectorCreate, background_t
             'has_token': has_token
         }
         
-        # Only trigger lineage extraction if connector is active
-        if connector.active:
-            # Trigger lineage extraction directly and ignore response
-            background_tasks.add_task(trigger_lineage_extraction, connector_id, connector_data)
-        
+        # Do NOT trigger lineage extraction or sync here. Just save and return connector.
         return connector_data
     except HTTPException:
         raise
@@ -453,12 +469,6 @@ async def update_github_connector(connector_id: str, connector: GitHubConnectorU
             'has_token': has_token
         }
         
-        # Only trigger lineage extraction if connector is active and 
-        # either active status was explicitly set to true or tech_stack was updated
-        if connector_data.get('active', False) and (connector.active is True or connector.tech_stack is not None):
-            # Trigger lineage extraction directly and ignore response
-            background_tasks.add_task(trigger_lineage_extraction, connector_id, connector_data)
-        
         return connector_data
     except HTTPException:
         raise
@@ -530,7 +540,18 @@ async def test_github_connection(connector: GitHubConnectorCreate) -> TestConnec
                 print(f"Error parsing repository URL: {str(e)}")
                 
         # Determine base URL based on GitHub type
-        base_url = connector.api_url if connector.github_type == 'enterprise' else 'https://api.github.com'
+        # Normalize and validate API URL for enterprise
+        if connector.github_type == 'enterprise':
+            try:
+                base_url = normalize_enterprise_api_url(connector.api_url)
+            except ValueError as url_err:
+                return TestConnectionResponse(
+                    success=False,
+                    message=f"Invalid Enterprise GitHub API URL: {url_err}",
+                    details=None
+                )
+        else:
+            base_url = 'https://api.github.com'
         
         # Setup headers
         headers = {

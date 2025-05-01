@@ -130,7 +130,7 @@ class GitHubSQLFinder:
                         repo_url = metadata.get('github_repo', metadata.get('repository_url', ''))
                     
                     # Build proper URL with file path
-                    url = f"{repo_url}/blob/main/{file_path}" if repo_url else None
+                    url = self._build_github_url(repo_url, file_path)
                     
                     # Create formatted result with consistent keys
                     formatted_result = {
@@ -755,3 +755,191 @@ class GitHubSQLFinder:
             formatted_results.append(result)
             
         return formatted_results
+    
+    def _build_github_url(self, repo_url: str, file_path: str) -> str:
+        """
+        Build a properly formatted URL for a file that points to the application's repository UI
+        
+        Args:
+            repo_url: Repository URL
+            file_path: File path
+            
+        Returns:
+            URL that points to the application's repository UI
+        """
+        if not repo_url:
+            return ""
+
+        # Extract repository info
+        repo_name = ""
+        owner = ""
+        
+        # Remove .git suffix if present
+        if repo_url.endswith('.git'):
+            repo_url = repo_url[:-4]
+        
+        # Ensure the repo URL doesn't have trailing slash
+        if repo_url.endswith('/'):
+            repo_url = repo_url[:-1]
+        
+        # Try to extract owner and repo
+        github_url_match = re.match(r'https://github.com/([^/]+)/([^/]+)', repo_url)
+        if github_url_match:
+            owner = github_url_match.group(1)
+            repo_name = github_url_match.group(2)
+        else:
+            # If we couldn't extract owner/repo, use GitHub URL as fallback
+            if file_path and file_path.startswith('/'):
+                file_path = file_path[1:]
+            return f"{repo_url}/blob/main/{file_path}"
+        
+        # Remove leading slash from file path if present
+        if file_path and file_path.startswith('/'):
+            file_path = file_path[1:]
+            
+        # Build the application repository UI URL - with file parameter to open file directly
+        return f"http://localhost:5173/repository?repo={owner}/{repo_name}&path={file_path}&file={file_path}"
+
+    def search_files(self, query: str, limit: int = 10, include_content: bool = True,
+                    file_extensions: List[str] = None) -> Dict[str, Any]:
+        """
+        Search for files by name, path or content with enhanced matching capabilities
+        
+        This performs a comprehensive search for files based on:
+        - Exact filename matching
+        - Partial path matching
+        - File content semantic search
+        - Extension filtering
+        
+        Args:
+            query: Search query (filename, partial path, or content)
+            limit: Maximum number of results to return
+            include_content: Whether to include file content in results
+            file_extensions: List of file extensions to filter by (e.g., ['.sql'])
+            
+        Returns:
+            Dictionary with search results
+        """
+        try:
+            if not self.vector_store:
+                if not self.initialize():
+                    return {"error": "Could not initialize vector store", "results": []}
+            
+            results = []
+            exact_matches = []
+            
+            # 1. Look for exact filename matches first
+            file_name = os.path.basename(query)
+            if file_name:
+                # Get all available documents in the vector store
+                all_docs = self.vector_store.get_all_documents()
+                
+                for doc in all_docs:
+                    metadata = doc.metadata
+                    doc_path = metadata.get("file_path", "")
+                    doc_name = os.path.basename(doc_path)
+                    
+                    # If file extensions are provided, filter by them
+                    if file_extensions and not any(doc_path.endswith(ext) for ext in file_extensions):
+                        continue
+                    
+                    # Check for exact filename match
+                    if doc_name.lower() == file_name.lower():
+                        # Calculate match score based on path similarity
+                        path_score = 0
+                        query_parts = query.split("/")
+                        doc_parts = doc_path.split("/")
+                        
+                        # Count matching path components
+                        for part in query_parts:
+                            if part and part in doc_parts:
+                                path_score += 1
+                        
+                        # Higher score for longer paths with more matching components
+                        exact_matches.append((doc, path_score))
+            
+            # 2. If we have exact matches, prioritize them
+            if exact_matches:
+                # Sort by path score (higher is better)
+                exact_matches.sort(key=lambda x: x[1], reverse=True)
+                
+                # Convert to result format
+                for doc, score in exact_matches[:limit]:
+                    metadata = doc.metadata
+                    result = {
+                        "file_path": metadata.get("file_path", ""),
+                        "match_score": score,
+                        "match_type": "exact_filename"
+                    }
+                    
+                    # Optionally include content
+                    if include_content:
+                        if self.github_wrapper:
+                            try:
+                                file_info = self.github_wrapper.get_file_content_with_lines(metadata.get("file_path", ""))
+                                result["content"] = file_info.get("content", "")
+                            except Exception as e:
+                                logger.error(f"Error getting content: {str(e)}")
+                                result["content"] = doc.page_content
+                        else:
+                            result["content"] = doc.page_content
+                    
+                    results.append(result)
+            
+            # 3. If not enough exact matches, perform semantic search
+            if len(results) < limit:
+                remaining_limit = limit - len(results)
+                
+                # Perform semantic search
+                semantic_results = self.vector_store.similarity_search_with_score(
+                    query=query,
+                    k=remaining_limit * 2  # Get more results to filter
+                )
+                
+                # Filter out any exact matches we already have
+                existing_paths = {r["file_path"] for r in results}
+                filtered_semantic = []
+                
+                for doc, score in semantic_results:
+                    metadata = doc.metadata
+                    path = metadata.get("file_path", "")
+                    
+                    if path not in existing_paths:
+                        # If file extensions are provided, filter by them
+                        if file_extensions and not any(path.endswith(ext) for ext in file_extensions):
+                            continue
+                            
+                        filtered_semantic.append((doc, score))
+                
+                # Add semantic results to our results list
+                for doc, score in filtered_semantic[:remaining_limit]:
+                    metadata = doc.metadata
+                    result = {
+                        "file_path": metadata.get("file_path", ""),
+                        "match_score": float(score),
+                        "match_type": "semantic"
+                    }
+                    
+                    # Optionally include content
+                    if include_content:
+                        if self.github_wrapper:
+                            try:
+                                file_info = self.github_wrapper.get_file_content_with_lines(metadata.get("file_path", ""))
+                                result["content"] = file_info.get("content", "")
+                            except Exception as e:
+                                logger.error(f"Error getting content: {str(e)}")
+                                result["content"] = doc.page_content
+                        else:
+                            result["content"] = doc.page_content
+                    
+                    results.append(result)
+            
+            return {
+                "results": results,
+                "query": query,
+                "total_results": len(results)
+            }
+                
+        except Exception as e:
+            logger.error(f"Error searching files: {str(e)}")
+            return {"error": str(e), "results": []}

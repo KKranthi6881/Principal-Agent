@@ -8,6 +8,7 @@ import logging
 import json
 import os
 import sys
+import re
 from pathlib import Path
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import JsonOutputParser
@@ -358,6 +359,50 @@ class LineageAgent(Agent):
             logger.error(f"Error converting column lineage data: {str(e)}")
             return {"error": f"Error converting column lineage data: {str(e)}"}
         
+    def _build_github_url(self, repo_url: str, file_path: str) -> str:
+        """
+        Build a properly formatted URL for a file that points to the application's repository UI
+        
+        Args:
+            repo_url: Repository URL
+            file_path: File path
+            
+        Returns:
+            URL that points to the application's repository UI
+        """
+        if not repo_url:
+            return ""
+
+        # Extract repository info
+        repo_name = ""
+        owner = ""
+        
+        # Remove .git suffix if present
+        if repo_url.endswith('.git'):
+            repo_url = repo_url[:-4]
+        
+        # Ensure the repo URL doesn't have trailing slash
+        if repo_url.endswith('/'):
+            repo_url = repo_url[:-1]
+        
+        # Try to extract owner and repo
+        github_url_match = re.match(r'https://github.com/([^/]+)/([^/]+)', repo_url)
+        if github_url_match:
+            owner = github_url_match.group(1)
+            repo_name = github_url_match.group(2)
+        else:
+            # If we couldn't extract owner/repo, use GitHub URL as fallback
+            if file_path and file_path.startswith('/'):
+                file_path = file_path[1:]
+            return f"{repo_url}/blob/main/{file_path}"
+        
+        # Remove leading slash from file path if present
+        if file_path and file_path.startswith('/'):
+            file_path = file_path[1:]
+            
+        # Build the application repository UI URL with file parameter for direct file opening
+        return f"http://localhost:5173/repository?repo={owner}/{repo_name}&path={file_path}&file={file_path}"
+    
     def trace_table_lineage(self, table_name: str, direction: str = "upstream",
                            dialect: Optional[str] = None, repo_url: Optional[str] = None,
                            include_visualization: bool = True):
@@ -501,8 +546,6 @@ class LineageAgent(Agent):
         # Create enhanced structure for table lineage paths
         table_lineage_paths = []
         github_file_paths = []
-        
-        # Track processed tables and their paths
         processed_tables = set()
         table_to_sources = {}
         
@@ -511,7 +554,7 @@ class LineageAgent(Agent):
         
         # First pass: Build dependency relationships from files_by_level
         for level_str, files in files_by_level.items():
-            level = int(level_str) if level_str.isdigit() else int(level_str)
+            level = int(level_str) if isinstance(level_str, str) else level_str
             
             for file_info in files:
                 target = file_info.get("target_table", "")
