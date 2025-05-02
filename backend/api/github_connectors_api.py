@@ -14,6 +14,11 @@ import base64
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from urllib.parse import urlparse
+from utils.repo_manager import clone_repository
+import logging
+
+# Set up logging
+logger = logging.getLogger(__name__)
 
 # Router for GitHub connectors API
 router = APIRouter(prefix="/api/settings", tags=["github"])
@@ -139,12 +144,72 @@ class TestConnectionResponse(BaseModel):
     message: str
     details: Optional[Dict[str, Any]] = None
 
+# Function to clone a GitHub repository locally
+def clone_github_repository(connector: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Helper function to clone a GitHub repository locally
+    """
+    try:
+        # Determine the repository URL and branch
+        repo_url = None
+        branch = connector.get("default_branch", "main")
+        
+        # Direct repository URL (highest priority)
+        if connector.get("repo_url"):
+            repo_url = connector["repo_url"]
+        # Owner and repositories
+        elif connector.get("owner") and connector.get("repositories") and len(connector["repositories"]) > 0:
+            owner = connector["owner"]
+            repo_name = connector["repositories"][0]  # Take the first repo for now
+            repo_url = f"https://github.com/{owner}/{repo_name}"
+        # Organization repositories (would need to be enhanced to handle multiple)
+        elif connector.get("organization") and connector.get("repositories") and len(connector["repositories"]) > 0:
+            org = connector["organization"]
+            repo_name = connector["repositories"][0]  # Take the first repo for now
+            repo_url = f"https://github.com/{org}/{repo_name}"
+        
+        if not repo_url:
+            logger.error(f"No repository URL could be determined from connector settings")
+            return {
+                "status": "error",
+                "message": "No repository URL could be determined"
+            }
+            
+        logger.info(f"Cloning repository: {repo_url}, branch: {branch}")
+        repo_path = clone_repository(repo_url, branch)
+        
+        if repo_path:
+            logger.info(f"Successfully cloned repository to {repo_path}")
+            return {
+                "status": "success",
+                "message": f"Repository cloned successfully to {repo_path}",
+                "repo_path": repo_path
+            }
+        else:
+            logger.error(f"Failed to clone repository: {repo_url}")
+            return {
+                "status": "error",
+                "message": f"Failed to clone repository: {repo_url}"
+            }
+    except Exception as e:
+        logger.error(f"Error cloning repository: {str(e)}")
+        return {
+            "status": "error",
+            "message": f"Error cloning repository: {str(e)}"
+        }
+
 # Function to trigger lineage extraction
 def trigger_lineage_extraction(connector_id: str, connector: Dict[str, Any]) -> Dict[str, Any]:
     """
     Helper function to trigger lineage extraction in the background
     """
     try:
+        # First, ensure the repository is cloned locally
+        clone_result = clone_github_repository(connector)
+        if clone_result["status"] == "error":
+            logger.warning(f"Could not clone repository before lineage extraction: {clone_result['message']}")
+            # Continue anyway, the lineage extraction might have its own cloning mechanism
+        
         # Construct URL for the lineage extraction endpoint
         base_url = "http://localhost:8000"  # Adjust as needed for production
         url = f"{base_url}/api/lineage/github-connector/{connector_id}/extract-lineage"
@@ -152,22 +217,25 @@ def trigger_lineage_extraction(connector_id: str, connector: Dict[str, Any]) -> 
         # Use tech_stack from connector
         tech_stack = connector.get("tech_stack", "postgresql")
         
-        # Make a request to trigger lineage extraction
-        params = {"tech_stack": tech_stack}
-        response = requests.post(url, params=params)
+        # Make the request
+        response = requests.post(
+            url,
+            json={"tech_stack": tech_stack}
+        )
         
-        # Parse response
         if response.status_code == 200:
-            print(f"Lineage extraction started for connector {connector_id}")
-            return response.json()
+            return {
+                "status": "success",
+                "message": "Lineage extraction started in the background"
+            }
         else:
-            print(f"Error triggering lineage extraction: {response.status_code} - {response.text}")
+            logger.error(f"Error triggering lineage extraction: {response.status_code} - {response.text}")
             return {
                 "status": "error",
                 "message": f"Failed to start lineage extraction: {response.text}"
             }
     except Exception as e:
-        print(f"Error triggering lineage extraction: {str(e)}")
+        logger.error(f"Error triggering lineage extraction: {str(e)}")
         return {
             "status": "error",
             "message": f"Error triggering lineage extraction: {str(e)}"
@@ -275,7 +343,13 @@ async def create_github_connector(connector: GitHubConnectorCreate, background_t
             'has_token': has_token
         }
         
-        # Do NOT trigger lineage extraction or sync here. Just save and return connector.
+        # Clone the repository in the background
+        background_tasks.add_task(clone_github_repository, connector_data)
+        
+        # Trigger lineage extraction in the background if active
+        if connector.active:
+            background_tasks.add_task(trigger_lineage_extraction, connector_id, connector_data)
+        
         return connector_data
     except HTTPException:
         raise
