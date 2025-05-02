@@ -126,10 +126,48 @@ class LineageDB:
             raise
         finally:
             conn.close()
+            
+    def create_or_get_table(self, table_name: str, tech_stack: str, github_path: str = None, 
+                          schema_name: str = None, database_name: str = None, 
+                          connector_id: str = None, github_repo: str = None,
+                          business_description: str = None) -> str:
+        """
+        Create a table if it doesn't exist, or get the existing table ID
+        
+        Args:
+            table_name: Name of the table
+            tech_stack: Technology stack (tsql, dbt, mysql, postgresql, snowflake)
+            github_path: Path to the file in GitHub
+            schema_name: Schema name (optional)
+            database_name: Database name (optional)
+            connector_id: GitHub connector ID
+            github_repo: GitHub repository URL
+            business_description: Business description of the table
+            
+        Returns:
+            Table ID
+        """
+        # First check if table already exists
+        existing_table = self.get_table_by_name(table_name, tech_stack)
+        if existing_table:
+            logger.info(f"Table {table_name} already exists, returning existing ID")
+            return existing_table['table_id']
+        
+        # Otherwise create a new table
+        return self.add_table(
+            table_name=table_name,
+            tech_stack=tech_stack,
+            github_path=github_path,
+            schema_name=schema_name,
+            database_name=database_name,
+            connector_id=connector_id,
+            github_repo=github_repo,
+            business_description=business_description
+        )
     
     def add_column(self, table_id: str, column_name: str, data_type: str = None,
                    is_primary_key: bool = False, is_foreign_key: bool = False,
-                   business_description: str = None) -> str:
+                   business_description: str = None, github_path: str = None) -> str:
         """
         Add a column to a table
         
@@ -140,6 +178,7 @@ class LineageDB:
             is_primary_key: Whether the column is a primary key
             is_foreign_key: Whether the column is a foreign key
             business_description: Business description of the column
+            github_path: GitHub file path where the column is defined
             
         Returns:
             Column ID
@@ -152,11 +191,11 @@ class LineageDB:
             cursor.execute(
                 """INSERT INTO columns 
                    (column_id, table_id, column_name, data_type, is_primary_key, 
-                    is_foreign_key, business_description) 
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    is_foreign_key, business_description, github_path) 
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                 (column_id, table_id, column_name, data_type, 
                  1 if is_primary_key else 0, 1 if is_foreign_key else 0, 
-                 business_description)
+                 business_description, github_path)
             )
             
             conn.commit()
@@ -165,6 +204,95 @@ class LineageDB:
         except Exception as e:
             logger.error(f"Error adding column: {str(e)}")
             conn.rollback()
+            raise
+        finally:
+            conn.close()
+            
+    def create_or_get_column(self, table_id: str, column_name: str, data_type: str = None,
+                           is_primary_key: bool = False, is_foreign_key: bool = False,
+                           description: str = None, github_path: str = None) -> str:
+        """
+        Create a column if it doesn't exist, or get the existing column ID
+        
+        Args:
+            table_id: ID of the table
+            column_name: Name of the column
+            data_type: Data type of the column
+            is_primary_key: Whether the column is a primary key
+            is_foreign_key: Whether the column is a foreign key
+            description: Description of the column
+            github_path: GitHub file path where column is defined
+            
+        Returns:
+            Column ID
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            # Check if column already exists for this table
+            cursor.execute(
+                """SELECT * FROM columns 
+                   WHERE table_id = ? AND column_name = ?""",
+                (table_id, column_name)
+            )
+            
+            existing_column = cursor.fetchone()
+            if existing_column:
+                # If it exists, return its ID but potentially update it with new info
+                column_id = existing_column['column_id']
+                
+                # Update column metadata if new info is provided
+                if data_type or is_primary_key or is_foreign_key or description or github_path:
+                    update_params = []
+                    update_values = []
+                    
+                    if data_type and data_type != "unknown" and (not existing_column['data_type'] or existing_column['data_type'] == "unknown"):
+                        update_params.append("data_type = ?")
+                        update_values.append(data_type)
+                    
+                    if description and (not existing_column['business_description']):
+                        update_params.append("business_description = ?")
+                        update_values.append(description)
+                    
+                    if github_path and (not existing_column['github_path']):
+                        update_params.append("github_path = ?")
+                        update_values.append(github_path)
+                    
+                    # Handle boolean flags - set to true if new value is true
+                    if is_primary_key and not existing_column['is_primary_key']:
+                        update_params.append("is_primary_key = ?")
+                        update_values.append(1)
+                    
+                    if is_foreign_key and not existing_column['is_foreign_key']:
+                        update_params.append("is_foreign_key = ?")
+                        update_values.append(1)
+                    
+                    # Only update if we have changes
+                    if update_params:
+                        cursor.execute(
+                            f"""UPDATE columns 
+                               SET {', '.join(update_params)}
+                               WHERE column_id = ?""",
+                            update_values + [column_id]
+                        )
+                        conn.commit()
+                        logger.info(f"Updated column {column_name} for table {table_id} with new metadata")
+                
+                return column_id
+            
+            # Otherwise create a new column
+            return self.add_column(
+                table_id=table_id,
+                column_name=column_name,
+                data_type=data_type,
+                is_primary_key=is_primary_key,
+                is_foreign_key=is_foreign_key,
+                business_description=description,
+                github_path=github_path
+            )
+        except Exception as e:
+            logger.error(f"Error in create_or_get_column: {str(e)}")
             raise
         finally:
             conn.close()
@@ -205,10 +333,10 @@ class LineageDB:
         Args:
             source_table_id: ID of the source table
             target_table_id: ID of the target table
-            relationship_type: Type of relationship (e.g., 'depends_on', 'derived_from')
-            source_column_id: ID of the source column (optional, for column lineage)
-            target_column_id: ID of the target column (optional, for column lineage)
-            github_path: Path to the file in GitHub
+            relationship_type: Type of relationship (e.g., join, foreign_key)
+            source_column_id: ID of the source column (optional)
+            target_column_id: ID of the target column (optional)
+            github_path: Path to the file in GitHub that defines this relationship
             
         Returns:
             Relationship ID
@@ -220,19 +348,81 @@ class LineageDB:
         try:
             cursor.execute(
                 """INSERT INTO relationships 
-                   (relationship_id, source_table_id, target_table_id, relationship_type,
+                   (relationship_id, source_table_id, target_table_id, relationship_type, 
                     source_column_id, target_column_id, github_path) 
                    VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (relationship_id, source_table_id, target_table_id, relationship_type,
+                (relationship_id, source_table_id, target_table_id, relationship_type, 
                  source_column_id, target_column_id, github_path)
             )
             
             conn.commit()
-            logger.info(f"Added relationship from {source_table_id} to {target_table_id} of type {relationship_type}")
             return relationship_id
         except Exception as e:
             logger.error(f"Error adding relationship: {str(e)}")
             conn.rollback()
+            raise
+        finally:
+            conn.close()
+            
+    def create_or_get_relationship(self, source_table_id: str, target_table_id: str, 
+                                 relationship_type: str, source_column_id: str = None,
+                                 target_column_id: str = None, github_path: str = None) -> str:
+        """
+        Create a relationship if it doesn't exist, or get the existing relationship ID
+        
+        Args:
+            source_table_id: ID of the source table
+            target_table_id: ID of the target table
+            relationship_type: Type of relationship (e.g., join, foreign_key, dependency)
+            source_column_id: ID of the source column (optional)
+            target_column_id: ID of the target column (optional)
+            github_path: Path to the file in GitHub that defines this relationship
+            
+        Returns:
+            Relationship ID
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            # Check if relationship already exists
+            query = """
+                SELECT * FROM relationships 
+                WHERE source_table_id = ? AND target_table_id = ?
+            """
+            params = [source_table_id, target_table_id]
+            
+            # Add additional filters if provided
+            if relationship_type:
+                query += " AND relationship_type = ?"
+                params.append(relationship_type)
+            
+            if source_column_id:
+                query += " AND source_column_id = ?"
+                params.append(source_column_id)
+                
+            if target_column_id:
+                query += " AND target_column_id = ?"
+                params.append(target_column_id)
+            
+            cursor.execute(query, params)
+            existing_relationship = cursor.fetchone()
+            
+            if existing_relationship:
+                # If it exists, return its ID
+                return existing_relationship['relationship_id']
+            
+            # Otherwise create a new relationship
+            return self.add_relationship(
+                source_table_id=source_table_id,
+                target_table_id=target_table_id,
+                relationship_type=relationship_type,
+                source_column_id=source_column_id,
+                target_column_id=target_column_id,
+                github_path=github_path
+            )
+        except Exception as e:
+            logger.error(f"Error in create_or_get_relationship: {str(e)}")
             raise
         finally:
             conn.close()

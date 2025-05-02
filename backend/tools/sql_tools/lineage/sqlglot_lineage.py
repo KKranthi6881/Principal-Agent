@@ -111,6 +111,9 @@ class SQLGlotLineageExtractor(BaseLineageExtractor):
                 "metadata": {}
             }
             
+            # Log the type of AST we're processing
+            logger.info(f"Extracting column lineage from {type(sql_ast).__name__} AST")
+            
             # Check for CREATE or INSERT statements to determine target columns
             target_table_name = None
             target_table_schema = None
@@ -122,54 +125,328 @@ class SQLGlotLineageExtractor(BaseLineageExtractor):
                     target_table_name = target_table_info.get("name")
                     target_table_schema = target_table_info.get("schema")
                     
-                    # Extract column definitions from CREATE TABLE statement
-                    if hasattr(sql_ast, 'args') and 'columns' in sql_ast.args:
-                        for col_def in sql_ast.args['columns']:
-                            col_info = self._extract_column_info(col_def)
-                            if col_info:
-                                # Set the table name for this column
-                                col_info["table"] = target_table_name
-                                col_info["schema"] = target_table_schema
-                                result["target_columns"].append(col_info)
+                    logger.info(f"Found target table: {target_table_name} (schema: {target_table_schema})")
                     
-                    # For CREATE TABLE AS SELECT, extract column lineage
-                    select_stmt = sql_ast.find(Select)
-                    if select_stmt:
-                        self._extract_select_column_mappings(select_stmt, result, target_table_name, target_table_schema)
+                    # Look for column definitions in CREATE TABLE statements
+                    target_columns = []
+                    
+                    # Make sure the target table name is set in column definitions
+                    if not target_table_name and hasattr(sql_ast, 'alias'):
+                        target_table_name = sql_ast.alias
+                    elif not target_table_name and hasattr(sql_ast, 'args') and 'alias' in sql_ast.args:
+                        target_table_name = sql_ast.args['alias']
+                        
+                    # Try to get columns from the CREATE TABLE statement
+                    columns_def = []
+                    if hasattr(sql_ast, 'args') and 'columns' in sql_ast.args:
+                        columns_def = sql_ast.args.get("columns", [])
+                        logger.info(f"Found {len(columns_def)} columns in CREATE TABLE args")
+                    
+                    # Direct debug of structure
+                    if not columns_def and hasattr(sql_ast, 'args'):
+                        logger.debug(f"CREATE TABLE args keys: {list(sql_ast.args.keys())}")
+                        if 'expression' in sql_ast.args:
+                            logger.debug(f"CREATE TABLE has an expression: {type(sql_ast.args['expression'])}")
+                            
+                            # If it's a CREATE TABLE AS SELECT, extract columns from the SELECT clause
+                            select_expr = sql_ast.args.get('expression')
+                            if isinstance(select_expr, Select):
+                                logger.info(f"Extracting columns from SELECT in CREATE TABLE AS")
+                                expressions = select_expr.args.get('expressions', [])
+                                for expr in expressions:
+                                    col_name = None
+                                    if hasattr(expr, 'alias') and expr.alias:
+                                        col_name = expr.alias
+                                    elif hasattr(expr, 'args') and 'alias' in expr.args and expr.args['alias']:
+                                        col_name = expr.args['alias']
+                                    elif hasattr(expr, 'name'):
+                                        col_name = expr.name
+                                    elif hasattr(expr, 'args') and 'this' in expr.args:
+                                        col_name = expr.args['this']
+                                    
+                                    if col_name:
+                                        target_columns.append({
+                                            "name": col_name,
+                                            "table": target_table_name,
+                                            "data_type": "unknown"
+                                        })
+                    
+                    logger.info(f"Found {len(columns_def)} column definitions in CREATE TABLE")
+                    
+                    # Fallback: Extract columns directly from SQL text if available
+                    if len(columns_def) == 0 and file_path:
+                        logger.info("No columns found in AST, trying to extract from SQL directly")
+                        import re
+                        try:
+                            with open(file_path, 'r') as f:
+                                sql_text = f.read()
+                                
+                                # If target table name isn't set, try to extract it from the CREATE TABLE statement
+                                if not target_table_name:
+                                    table_pattern = re.compile(r'CREATE\s+TABLE\s+([^\s\(]+)', re.IGNORECASE)
+                                    table_match = table_pattern.search(sql_text)
+                                    if table_match:
+                                        extracted_name = table_match.group(1).strip('"[]`')
+                                        logger.info(f"Extracted raw table name: {extracted_name}")
+                                        # Remove schema if present
+                                        if '.' in extracted_name:
+                                            parts = extracted_name.split('.')
+                                            target_table_name = parts[-1]  # Last part is the table name
+                                            logger.info(f"Extracted table name {target_table_name} from {parts}")
+                                        else:
+                                            target_table_name = extracted_name
+                                        logger.info(f"Extracted table name from SQL: {target_table_name}")
+                                
+                                # Simple regex to extract column definitions
+                                create_pattern = re.compile(r'CREATE\s+TABLE\s+[^\(]+(\(([^\)]+)\))', re.IGNORECASE | re.DOTALL)
+                                match = create_pattern.search(sql_text)
+                                if match:
+                                    col_defs = match.group(2).strip().split(',')
+                                    for col_def in col_defs:
+                                        # Skip if it starts with things like PRIMARY KEY, CONSTRAINT, etc.
+                                        if re.match(r'\s*(PRIMARY|FOREIGN|UNIQUE|CHECK|CONSTRAINT)', col_def, re.IGNORECASE):
+                                            continue
+                                        # Extract column name and type
+                                        parts = re.split(r'\s+', col_def.strip(), 1)
+                                        if parts:
+                                            col_name = parts[0].strip('"[]`')
+                                            data_type = parts[1].strip() if len(parts) > 1 else "unknown"
+                                            is_primary = 'PRIMARY KEY' in col_def.upper()
+                                            is_foreign = 'FOREIGN KEY' in col_def.upper() or 'REFERENCES' in col_def.upper()
+                                            logger.debug(f"Extracted column {col_name} of type {data_type} from SQL")
+                                            target_columns.append({
+                                                "name": col_name,
+                                                "table": target_table_name,
+                                                "data_type": data_type,
+                                                "is_primary_key": is_primary,
+                                                "is_foreign_key": is_foreign
+                                            })
+                                        
+                                # Also check for CREATE TABLE AS SELECT pattern
+                                as_pattern = re.compile(r'CREATE\s+TABLE\s+([^\s]+)\s+AS\s+SELECT\s+(.+?)\s+FROM', re.IGNORECASE | re.DOTALL)
+                                as_match = as_pattern.search(sql_text)
+                                if as_match and not target_columns:
+                                    table_name = as_match.group(1).strip('"[]`')
+                                    if '.' in table_name:
+                                        target_table_name = table_name.split('.')[-1]
+                                    else:
+                                        target_table_name = table_name
+                                        
+                                    logger.info(f"Found CREATE TABLE AS SELECT for table {target_table_name}")
+                                    
+                                    # Extract columns from the SELECT clause
+                                    select_cols = as_match.group(2).strip()
+                                    col_list = select_cols.split(',')
+                                    for col_item in col_list:
+                                        col_item = col_item.strip()
+                                        # Handle aliased columns
+                                        if ' AS ' in col_item.upper():
+                                            parts = col_item.split(' AS ', 1)
+                                            col_name = parts[1].strip('"[]`')
+                                        else:
+                                            # For columns without AS, use the last part after a dot or the full name
+                                            if '.' in col_item:
+                                                col_name = col_item.split('.')[-1].strip('"[]`')
+                                            else:
+                                                col_name = col_item.strip('"[]`')
+                                        
+                                        logger.debug(f"Extracted column {col_name} from CREATE TABLE AS SELECT")
+                                        target_columns.append({
+                                            "name": col_name,
+                                            "table": target_table_name,
+                                            "data_type": "unknown"
+                                        })
+                        except Exception as e:
+                            logger.warning(f"Error extracting columns from SQL text: {str(e)}")
+                    
+                    # Process column definitions from AST
+                    for col_def in columns_def:
+                        try:
+                            col_name = None
+                            if hasattr(col_def, "this"):
+                                col_name = col_def.this
+                            elif hasattr(col_def, "args") and "this" in col_def.args:
+                                col_name = col_def.args.get("this")
+                            elif hasattr(col_def, "name"):
+                                col_name = col_def.name
+                            elif isinstance(col_def, str):
+                                col_name = col_def
+                            
+                            if not col_name:
+                                # Debug the column definition structure
+                                if hasattr(col_def, 'args'):
+                                    logger.debug(f"Column def args keys: {list(col_def.args.keys())}")
+                                logger.debug(f"Could not extract column name from: {str(col_def)}")
+                                continue
+                                
+                            logger.debug(f"Processing column: {col_name} for table {target_table_name}")
+                            
+                            # Extract data type
+                            data_type = None
+                            if hasattr(col_def, "args") and "kind" in col_def.args:
+                                data_type = str(col_def.args.get("kind"))
+                            elif hasattr(col_def, "args") and "type" in col_def.args:
+                                data_type = str(col_def.args.get("type"))
+                            elif hasattr(col_def, "type"):
+                                data_type = str(col_def.type)
+                            
+                            # Extract description from comments if available
+                            description = None
+                            if hasattr(col_def, "args") and "comment" in col_def.args:
+                                description = str(col_def.args.get("comment"))
+                            
+                            # Check for constraints
+                            is_primary = False
+                            is_foreign = False
+                            constraints = None
+                            
+                            if hasattr(col_def, "args") and "constraints" in col_def.args:
+                                constraints = col_def.args.get("constraints", [])
+                            
+                            if constraints:
+                                for constraint in constraints:
+                                    constraint_type = None
+                                    if hasattr(constraint, "this"):
+                                        constraint_type = constraint.this
+                                    elif hasattr(constraint, "args") and "this" in constraint.args:
+                                        constraint_type = constraint.args.get("this")
+                                    elif hasattr(constraint, "kind"):
+                                        constraint_type = constraint.kind
+                                    
+                                    if constraint_type:
+                                        constraint_type = str(constraint_type).lower()
+                                        if "primary" in constraint_type or "pk" in constraint_type:
+                                            is_primary = True
+                                            logger.debug(f"Column {col_name} is a primary key")
+                                        elif "foreign" in constraint_type or "references" in constraint_type or "fk" in constraint_type:
+                                            is_foreign = True
+                                            logger.debug(f"Column {col_name} is a foreign key")
+                            
+                            target_columns.append({
+                                "name": col_name,
+                                "table": target_table_name,
+                                "data_type": data_type,
+                                "description": description,
+                                "is_primary_key": is_primary,
+                                "is_foreign_key": is_foreign
+                            })
+                        except Exception as col_err:
+                            logger.warning(f"Error processing column definition: {str(col_err)}")
+                    
+                    if target_columns:
+                        logger.info(f"Extracted {len(target_columns)} target columns for table {target_table_name}")
+                        
+                        # Ensure all columns have the target table name set
+                        for col in target_columns:
+                            if not col.get("table"):
+                                col["table"] = target_table_name
+                                
+                        result["target_columns"] = target_columns
             
+            # For SELECT statements, extract column mappings
+            if isinstance(sql_ast, Select):
+                logger.debug("Processing SELECT statement for column lineage")
+                
+                # Extract target table from context or infer from file name if possible
+                if not target_table_name and file_path:
+                    import os
+                    file_basename = os.path.basename(file_path)
+                    # Remove extension
+                    if '.' in file_basename:
+                        table_from_file = file_basename.split('.')[0]
+                        logger.info(f"Inferred target table {table_from_file} from file name {file_basename}")
+                        target_table_name = table_from_file
+                
+                # Extract columns from SELECT expressions
+                if hasattr(sql_ast, 'args') and 'expressions' in sql_ast.args:
+                    expressions = sql_ast.args['expressions']
+                    for expr in expressions:
+                        col_name = None
+                        col_table = None
+                        
+                        # Try to extract column name from various AST structures
+                        if hasattr(expr, 'alias') and expr.alias:
+                            col_name = expr.alias
+                        elif hasattr(expr, 'args') and 'alias' in expr.args and expr.args['alias']:
+                            col_name = expr.args['alias']
+                        elif hasattr(expr, 'name'):
+                            col_name = expr.name
+                        elif hasattr(expr, 'this'):
+                            col_name = expr.this
+                        elif hasattr(expr, 'args') and 'this' in expr.args:
+                            col_name = expr.args['this']
+                        
+                        # Try to extract table name
+                        if hasattr(expr, 'table'):
+                            col_table = expr.table
+                        elif hasattr(expr, 'args') and 'table' in expr.args:
+                            col_table = expr.args['table']
+                        
+                        if col_name:
+                            if target_table_name and not col_table:
+                                col_table = target_table_name
+                            
+                            result["target_columns"].append({
+                                "name": col_name,
+                                "table": col_table or target_table_name,
+                                "data_type": "unknown"
+                            })
+            
+            # For INSERT statements, map source to target columns
             elif isinstance(sql_ast, Insert):
-                # For INSERT statements, get target table
+                logger.info("Processing INSERT statement for column mappings")
                 target_obj = sql_ast.find(Table)
                 if target_obj:
                     target_table_info = self._extract_table_info(target_obj)
                     target_table_name = target_table_info.get("name")
-                    target_table_schema = target_table_info.get("schema")
                     
-                    # For INSERT, extract column mappings
-                    select_stmt = sql_ast.find(Select)
-                    if select_stmt:
-                        # Check if the INSERT statement specifies target columns
-                        target_columns = []
-                        if hasattr(sql_ast, 'args') and 'columns' in sql_ast.args:
-                            for col in sql_ast.args['columns']:
-                                target_columns.append(self._extract_column_name(col))
-                        
-                        self._extract_select_column_mappings(select_stmt, result, target_table_name, target_table_schema, target_columns)
+                    # Get columns being inserted into
+                    target_column_names = []
+                    if hasattr(sql_ast, "args") and "expressions" in sql_ast.args:
+                        for col in sql_ast.args["expressions"]:
+                            if hasattr(col, "this"):
+                                target_column_names.append(col.this)
+                            elif hasattr(col, "args") and "this" in col.args:
+                                target_column_names.append(col.args["this"])
+                    
+                    if target_column_names:
+                        logger.info(f"Found target columns in INSERT: {target_column_names}")
+                    
+                    # Find source query
+                    source_query = None
+                    if hasattr(sql_ast, "args") and "expression" in sql_ast.args:
+                        source_query = sql_ast.args["expression"]
+                    
+                    if isinstance(source_query, Select):
+                        logger.info("Processing INSERT...SELECT for column mappings")
+                        select_result = self.extract_column_lineage(source_query, target_table_name, file_path)
+                        if "source_columns" in select_result:
+                            result["source_columns"] = select_result["source_columns"]
+                        if "column_relationships" in select_result:
+                            result["column_relationships"] = select_result["column_relationships"]
             
-            # Extract from SELECT statement if it's the main statement (e.g., a view)
-            if isinstance(sql_ast, Select):
-                # If we have a SELECT as the main statement, it's likely a view
-                # We'll infer target table name from file name if possible
-                inferred_target = None
-                if file_path:
-                    import os
-                    base_name = os.path.basename(file_path)
-                    if base_name.endswith('.sql'):
-                        inferred_target = base_name[:-4]  # Remove .sql extension
-                        
-                # Use the inferred target or a generic name
-                target_name = inferred_target or "view_output"
-                self._extract_select_column_mappings(sql_ast, result, target_name, None)
+            # For CREATE TABLE AS SELECT, extract column mapping
+            if isinstance(sql_ast, Create) and target_table_name:
+                # If the CREATE has a SELECT, extract column information from it
+                select_expr = None
+                if hasattr(sql_ast, "args") and "expression" in sql_ast.args:
+                    select_expr = sql_ast.args["expression"]
+                
+                if isinstance(select_expr, Select):
+                    # Process the SELECT for source columns
+                    select_result = self.extract_column_lineage(select_expr, target_table_name, file_path)
+                    if "source_columns" in select_result:
+                        result["source_columns"] = select_result["source_columns"]
+                    if "column_relationships" in select_result:
+                        result["column_relationships"] = select_result["column_relationships"]
+                    if "target_columns" in select_result and not result.get("target_columns"):
+                        result["target_columns"] = select_result["target_columns"]
+                        # Update target table name for all columns
+                        for col in result["target_columns"]:
+                            col["table"] = target_table_name
+            
+            # Log results
+            logger.info(f"Extracted {len(result.get('target_columns', []))} target columns, {len(result.get('source_columns', []))} source columns, {len(result.get('column_relationships', []))} column relationships")
             
             return result
             

@@ -5,7 +5,7 @@ import os
 import uuid
 import json
 from typing import Dict, List, Optional, Any
-from fastapi import APIRouter, HTTPException, BackgroundTasks
+from fastapi import APIRouter, HTTPException, BackgroundTasks, Query
 from pydantic import BaseModel, Field
 import sqlite3
 import requests
@@ -23,8 +23,14 @@ logger = logging.getLogger(__name__)
 # Router for GitHub connectors API
 router = APIRouter(prefix="/api/settings", tags=["github"])
 
+# Import shared utilities
+from utils.connector_utils import get_db_connection, decrypt_token, get_github_connector
+
 # Path to metadata database
 METADATA_DB = os.path.join('database', 'metadata.db')
+
+# Import chunked lineage processor after utils to avoid circular imports
+from api.chunked_lineage_processor import ChunkedLineageProcessor
 
 # Encryption key generation (using same approach as in llm_providers_api.py)
 def get_encryption_key():
@@ -65,25 +71,12 @@ def normalize_enterprise_api_url(api_url: str) -> str:
     # Normalize (remove trailing slash)
     return api_url.rstrip('/')
 
-def get_db_connection():
-    """Get a connection to the metadata database"""
-    conn = sqlite3.connect(METADATA_DB)
-    conn.row_factory = sqlite3.Row
-    return conn
-
 def encrypt_token(token: str) -> str:
     """Encrypt a GitHub token"""
     if not token:
         return None
     cipher = get_cipher()
     return cipher.encrypt(token.encode()).decode()
-
-def decrypt_token(encrypted_token: str) -> str:
-    """Decrypt a GitHub token"""
-    if not encrypted_token:
-        return None
-    cipher = get_cipher()
-    return cipher.decrypt(encrypted_token.encode()).decode()
 
 # Pydantic models for request/response
 class GitHubConnectorCreate(BaseModel):
@@ -240,6 +233,98 @@ def trigger_lineage_extraction(connector_id: str, connector: Dict[str, Any]) -> 
             "status": "error",
             "message": f"Error triggering lineage extraction: {str(e)}"
         }
+
+# Sync repository and extract lineage
+@router.post("/github_connectors/{connector_id}/sync", response_model=Dict[str, Any])
+async def sync_github_connector(
+    connector_id: str,
+    tech_stack: Optional[str] = Query(None, description="Override tech stack (optional)"),
+    branch: Optional[str] = Query(None, description="Branch to extract from"),
+    chunk_size: Optional[int] = Query(50, description="Number of files per processing chunk")
+):
+    """
+    Sync a GitHub connector by cloning the repository and extracting lineage
+    
+    This endpoint performs both the cloning and lineage extraction in a non-blocking
+    asynchronous manner. Progress can be monitored via the task status endpoint.
+    """
+    try:
+        # Get the GitHub connector
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT * FROM github_connectors WHERE id = ?", (connector_id,))
+        connector = cursor.fetchone()
+        
+        if not connector:
+            raise HTTPException(status_code=404, detail=f"GitHub connector {connector_id} not found")
+        
+        # Convert to dict
+        connector_dict = dict(connector)
+        conn.close()
+        
+        # Determine the repository URL
+        repo_url = connector_dict.get('repo_url')
+        
+        if not repo_url and connector_dict.get('repositories'):
+            # Try to construct a URL from owner/repo or organization/repo
+            repositories = json.loads(connector_dict['repositories'])
+            if repositories and len(repositories) > 0:
+                owner = connector_dict.get('owner')
+                organization = connector_dict.get('organization')
+                
+                # Use first repository for now
+                repo_name = repositories[0]
+                
+                if owner:
+                    repo_url = f"https://github.com/{owner}/{repo_name}"
+                elif organization:
+                    repo_url = f"https://github.com/{organization}/{repo_name}"
+        
+        if not repo_url:
+            raise HTTPException(
+                status_code=400, 
+                detail="Unable to determine repository URL from connector settings"
+            )
+        
+        # Use connector's tech stack if not overridden
+        if not tech_stack:
+            tech_stack = connector_dict.get('tech_stack', 'postgresql')
+        
+        # Use connector's branch if provided and not overridden
+        if not branch and connector_dict.get('default_branch'):
+            branch = connector_dict.get('default_branch')
+        elif not branch:
+            branch = "main"  # Default branch
+        
+        # Create and start the chunked processor
+        processor = ChunkedLineageProcessor(
+            connector_id=connector_id,
+            repo_url=repo_url,
+            tech_stack=tech_stack,
+            branch=branch,
+            chunk_size=chunk_size
+        )
+        
+        # Start processing in background
+        task_id = await processor.process()
+        
+        return {
+            "success": True,
+            "task_id": task_id,
+            "message": f"Started synchronization and lineage extraction for {repo_url}",
+            "tech_stack": tech_stack,
+            "branch": branch,
+            "chunk_size": chunk_size
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error syncing GitHub connector: {str(e)}")
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Error syncing GitHub connector: {str(e)}"
+        )
 
 # API endpoints
 @router.get("/github_connectors", response_model=GitHubConnectorList)

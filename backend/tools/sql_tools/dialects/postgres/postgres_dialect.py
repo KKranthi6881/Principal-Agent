@@ -37,12 +37,13 @@ class PostgreSQLDialect(BaseSQLDialect):
         """
         return "postgres"
     
-    def parse_sql(self, sql_code: str) -> Tuple[Any, List[str]]:
+    def parse_sql(self, sql_code: str, file_path: str = None) -> Tuple[Any, List[str]]:
         """
         Parse PostgreSQL code using SQLGlot
         
         Args:
             sql_code: SQL code to parse
+            file_path: Optional path to the file being parsed (for better error reporting)
             
         Returns:
             Tuple of (AST, errors)
@@ -56,10 +57,21 @@ class PostgreSQLDialect(BaseSQLDialect):
             
             # Parse with SQLGlot
             ast = parse_one(cleaned_sql, dialect=self._get_sqlglot_dialect())
+            
+            # If parsing succeeded but we have a file path, log it for debugging
+            if file_path:
+                logger.debug(f"Successfully parsed {file_path} with PostgreSQL dialect")
+                
         except ParseError as e:
-            errors.append(f"Parse error: {str(e)}")
+            error_msg = f"Parse error: {str(e)}"
+            if file_path:
+                error_msg = f"Parse error in {file_path}: {str(e)}"
+            errors.append(error_msg)
         except Exception as e:
-            errors.append(f"Error parsing SQL: {str(e)}")
+            error_msg = f"Error parsing SQL: {str(e)}"
+            if file_path:
+                error_msg = f"Error parsing {file_path}: {str(e)}"
+            errors.append(error_msg)
         
         return ast, errors
     

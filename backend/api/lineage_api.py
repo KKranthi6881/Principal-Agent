@@ -18,6 +18,8 @@ from tools.sql_tools.dialects import get_dialect_parser
 from tools.sql_tools.lineage.sqlglot_lineage import SQLGlotLineageExtractor
 from database.lineage_db import LineageDB
 from api.lineage_tasks import process_repository_for_lineage, get_lineage_task, get_all_lineage_tasks
+from api.chunked_lineage_processor import ChunkedLineageProcessor
+from database.task_db import TaskDB
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -26,8 +28,9 @@ logger.setLevel(logging.INFO)
 # Create router
 router = APIRouter(prefix="/api/lineage", tags=["lineage"])
 
-# Initialize lineage database connection
+# Initialize database connections
 lineage_db = LineageDB()
+task_db = TaskDB()
 
 # Pydantic models for request/response
 class SQLParseRequest(BaseModel):
@@ -59,12 +62,14 @@ class TaskResponse(BaseModel):
     connector_id: str
     repo_url: str
     tech_stack: str
-    total_files: int
-    processed_files: int
-    successful_files: int
-    failed_files: int
+    total_items: int
+    processed_items: int
+    successful_items: int
+    failed_items: int
     elapsed_seconds: float
     error: Optional[str] = None
+    metadata: Optional[Dict[str, Any]] = None
+    chunks: Optional[List[Dict[str, Any]]] = None
 
 class TaskListResponse(BaseModel):
     """Response model for list of tasks"""
@@ -451,20 +456,26 @@ async def parse_from_github_connector(
 
 @router.post("/github-connector/{connector_id}/extract-lineage", response_model=Dict[str, Any])
 async def extract_lineage_from_github(
-    background_tasks: BackgroundTasks,
     connector_id: str = Path(..., description="GitHub connector ID"),
     tech_stack: Optional[str] = Query(None, description="Override tech stack (optional)"),
-    branch: Optional[str] = Query("main", description="Branch to extract from")
+    branch: Optional[str] = Query("main", description="Branch to extract from"),
+    chunk_size: Optional[int] = Query(50, description="Number of files per processing chunk")
 ):
     """
     Start a background task to extract lineage from a GitHub repository
     
     This will extract lineage from all SQL files in the repository and store it in the
-    lineage database. The process runs in the background and can be monitored with
-    the task status endpoint.
+    lineage database. The extraction will run in the background and can be monitored
+    using the /task/{task_id} endpoint.
+    
+    Args:
+        connector_id: GitHub connector ID
+        tech_stack: Override tech stack (optional)
+        branch: Branch to extract from
+        chunk_size: Number of files per processing chunk (default: 50)
     """
     try:
-        # Get connector details from database
+        # Get the GitHub connector
         conn = sqlite3.connect(os.path.join('database', 'metadata.db'))
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
@@ -473,68 +484,73 @@ async def extract_lineage_from_github(
         connector = cursor.fetchone()
         
         if not connector:
+            raise HTTPException(status_code=404, detail=f"GitHub connector {connector_id} not found")
+        
+        # Convert to dict
+        connector_dict = dict(connector)
+        
+        # Determine the repository URL
+        repo_url = connector_dict.get('repo_url')
+        
+        if not repo_url and connector_dict.get('repositories'):
+            # Try to construct a URL from owner/repo or organization/repo
+            repositories = json.loads(connector_dict['repositories'])
+            if repositories and len(repositories) > 0:
+                owner = connector_dict.get('owner')
+                organization = connector_dict.get('organization')
+                
+                # Use first repository for now
+                repo_name = repositories[0]
+                
+                if owner:
+                    repo_url = f"https://github.com/{owner}/{repo_name}"
+                elif organization:
+                    repo_url = f"https://github.com/{organization}/{repo_name}"
+        
+        if not repo_url:
             raise HTTPException(
-                status_code=404,
-                detail=f"GitHub connector with ID {connector_id} not found"
+                status_code=400, 
+                detail="Unable to determine repository URL from connector settings"
             )
         
-        connector = dict(connector)
-        conn.close()
-        
-        # Use tech stack from connector if not provided
+        # Use connector's tech stack if not overridden
         if not tech_stack:
-            tech_stack = connector.get("tech_stack", "postgresql")
+            tech_stack = connector_dict.get('tech_stack', 'postgresql')
         
-        # Get repository URL
-        repo_url = connector.get("repo_url")
-        if not repo_url:
-            owner = connector.get("owner")
-            if "repositories" in connector and connector["repositories"]:
-                try:
-                    repositories = json.loads(connector["repositories"])
-                    if repositories and len(repositories) > 0:
-                        repo_name = repositories[0]
-                        repo_url = f"https://github.com/{owner}/{repo_name}"
-                except:
-                    pass
+        # Use connector's branch if provided
+        if not branch and connector_dict.get('default_branch'):
+            branch = connector_dict.get('default_branch')
         
-        if not repo_url:
-            raise HTTPException(
-                status_code=400,
-                detail="No repository URL found for connector"
-            )
-        
-        # Generate task ID
-        task_id = f"{connector_id}_{int(time.time())}"
-        
-        # Start background task
-        background_tasks.add_task(
-            process_repository_for_lineage,
+        # Create and start the chunked processor
+        processor = ChunkedLineageProcessor(
             connector_id=connector_id,
             repo_url=repo_url,
             tech_stack=tech_stack,
-            branch=branch
+            branch=branch,
+            chunk_size=chunk_size
         )
         
+        # Start processing in background
+        task_id = await processor.process()
+        
         return {
+            "success": True,
             "task_id": task_id,
-            "status": "started",
             "message": f"Started lineage extraction for {repo_url}",
-            "connector_id": connector_id,
             "tech_stack": tech_stack,
-            "repo_url": repo_url
+            "branch": branch,
+            "chunk_size": chunk_size
         }
-    
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Error starting lineage extraction: {str(e)}")
         raise HTTPException(
-            status_code=500,
+            status_code=500, 
             detail=f"Error starting lineage extraction: {str(e)}"
         )
 
-@router.get("/tasks/{task_id}", response_model=TaskResponse)
+@router.get("/task/{task_id}", response_model=TaskResponse)
 async def get_task_status(
     task_id: str = Path(..., description="Task ID")
 ):
@@ -542,55 +558,145 @@ async def get_task_status(
     Get the status of a lineage extraction task
     """
     try:
-        task = get_lineage_task(task_id)
+        # Get task status from the task database
+        task_status = task_db.get_task(task_id)
         
-        if not task:
-            raise HTTPException(
-                status_code=404,
-                detail=f"Task {task_id} not found"
-            )
+        if not task_status:
+            # Try the old method as fallback for compatibility
+            legacy_task = get_lineage_task(task_id)
+            if not legacy_task:
+                raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+            
+            # Convert legacy task format to new format
+            return {
+                "task_id": task_id,
+                "status": legacy_task["status"],
+                "connector_id": legacy_task["connector_id"],
+                "repo_url": legacy_task["repo_url"],
+                "tech_stack": legacy_task["tech_stack"],
+                "total_items": legacy_task["total_files"],
+                "processed_items": legacy_task["processed_files"],
+                "successful_items": legacy_task["successful_files"],
+                "failed_items": legacy_task["failed_files"],
+                "elapsed_seconds": time.time() - legacy_task["start_time"],
+                "error": legacy_task.get("error"),
+                "metadata": {},
+                "chunks": []
+            }
         
+        # Calculate progress percentage
+        progress = 0
+        if task_status["total_items"] > 0:
+            progress = (task_status["processed_items"] / task_status["total_items"]) * 100
+            
+        # Make sure elapsed_seconds is properly calculated if it's missing
+        if "elapsed_seconds" not in task_status or task_status["elapsed_seconds"] == 0:
+            if "created_at" in task_status:
+                task_status["elapsed_seconds"] = time.time() - task_status["created_at"]
+        
+        # Format the response
         return {
-            "task_id": task_id,
-            **task
+            "task_id": task_status["task_id"],
+            "status": task_status["status"],
+            "connector_id": task_status["connector_id"],
+            "repo_url": task_status["repo_url"],
+            "tech_stack": task_status["tech_stack"],
+            "total_items": task_status["total_items"],
+            "processed_items": task_status["processed_items"],
+            "successful_items": task_status["successful_items"],
+            "failed_items": task_status["failed_items"],
+            "elapsed_seconds": task_status["elapsed_seconds"],
+            "error": task_status.get("error"),
+            "metadata": task_status.get("metadata", {}),
+            "chunks": task_status.get("chunks", [])
         }
-    
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Error getting task status: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error getting task status: {str(e)}"
-        )
+        raise HTTPException(status_code=500, detail=f"Error getting task status: {str(e)}")
 
 @router.get("/tasks", response_model=TaskListResponse)
-async def get_all_tasks():
+async def get_all_tasks(
+    limit: Optional[int] = Query(20, description="Maximum number of tasks to return"),
+    status: Optional[str] = Query(None, description="Filter by status (pending, running, completed, failed)")
+):
     """
     Get all lineage extraction tasks
     """
     try:
-        tasks = get_all_lineage_tasks()
+        # Get tasks from the task database
+        db_tasks = task_db.list_tasks(status=status, task_type="lineage_extraction", limit=limit)
         
-        # Add task IDs
-        tasks_with_ids = []
-        for i, task in enumerate(tasks):
-            task_with_id = {
-                "task_id": f"task_{i}",
-                **task
-            }
-            tasks_with_ids.append(task_with_id)
+        # Also get legacy tasks for compatibility
+        legacy_tasks = get_all_lineage_tasks()
         
-        return {
-            "tasks": tasks_with_ids
-        }
-    
+        # Format tasks
+        formatted_tasks = []
+        
+        # Process new-style tasks
+        for task in db_tasks:
+            # Calculate progress percentage
+            progress = 0
+            if task["total_items"] > 0:
+                progress = (task["processed_items"] / task["total_items"]) * 100
+                
+            # Make sure elapsed_seconds is properly calculated if it's missing
+            if "elapsed_seconds" not in task or task["elapsed_seconds"] == 0:
+                if "created_at" in task:
+                    task["elapsed_seconds"] = time.time() - task["created_at"]
+            
+            formatted_tasks.append({
+                "task_id": task["task_id"],
+                "status": task["status"],
+                "connector_id": task["connector_id"],
+                "repo_url": task["repo_url"],
+                "tech_stack": task["tech_stack"],
+                "total_items": task["total_items"],
+                "processed_items": task["processed_items"],
+                "successful_items": task["successful_items"],
+                "failed_items": task["failed_items"],
+                "elapsed_seconds": task["elapsed_seconds"],
+                "error": task.get("error"),
+                "metadata": task.get("metadata", {}),
+                "chunks": task.get("chunks", [])
+            })
+        
+        # Process legacy tasks (older format)
+        current_time = time.time()
+        for task in legacy_tasks:
+            # Skip if this task ID is already in the formatted list
+            if any(t["task_id"] == task.get("task_id") for t in formatted_tasks):
+                continue
+                
+            elapsed_seconds = current_time - task["start_time"]
+            
+            formatted_tasks.append({
+                "task_id": task.get("task_id", f"legacy_{int(time.time())}"),
+                "status": task["status"],
+                "connector_id": task["connector_id"],
+                "repo_url": task["repo_url"],
+                "tech_stack": task["tech_stack"],
+                "total_items": task["total_files"],
+                "processed_items": task["processed_files"],
+                "successful_items": task["successful_files"],
+                "failed_items": task["failed_files"],
+                "elapsed_seconds": elapsed_seconds,
+                "error": task.get("error"),
+                "metadata": {},
+                "chunks": []
+            })
+        
+        # Sort by creation time (newest first)
+        formatted_tasks.sort(key=lambda x: x.get("elapsed_seconds", 0), reverse=True)
+        
+        # Apply limit
+        formatted_tasks = formatted_tasks[:limit]
+        
+        return {"tasks": formatted_tasks}
     except Exception as e:
         logger.error(f"Error getting all tasks: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error getting all tasks: {str(e)}"
-        )
+        raise HTTPException(status_code=500, detail=f"Error getting all tasks: {str(e)}")
 
 @router.get("/export/{table_name}", response_model=Dict[str, Any])
 async def export_lineage_json(
