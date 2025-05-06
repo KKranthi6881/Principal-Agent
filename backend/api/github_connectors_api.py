@@ -197,6 +197,22 @@ def clone_github_repository(connector: Dict[str, Any]) -> Dict[str, Any]:
             repo_url = connector["repo_url"].strip()
             logger.info(f"Using explicitly provided repo URL: {repo_url}")
             
+            # For enterprise GitHub, if we have a repo_url ending with .git, try to extract owner and repo name
+            if github_type == "enterprise" and not connector.get("owner") and not connector.get("repositories"):
+                try:
+                    parsed_url = urlparse(repo_url)
+                    path_parts = parsed_url.path.strip('/').split('/')
+                    
+                    if len(path_parts) >= 2:
+                        owner = path_parts[0]
+                        repo_name = path_parts[1]
+                        if repo_name.endswith('.git'):
+                            repo_name = repo_name[:-4]  # Remove .git suffix
+                            
+                        logger.info(f"Extracted owner '{owner}' and repo '{repo_name}' from repo_url: {repo_url}")
+                except Exception as e:
+                    logger.error(f"Error extracting owner/repo from repo_url: {e}")
+            
         # For repositories property, handle both string JSON and array formats
         repositories = []
         if connector.get("repositories"):
@@ -524,11 +540,37 @@ async def create_github_connector(connector: GitHubConnectorCreate, background_t
         
         # For enterprise GitHub, make sure to pass the repo information correctly
         if connector.github_type == 'enterprise':
-            logger.info(f"Enterprise GitHub connector created with: API URL={connector.api_url}, Owner={connector.owner}, Org={connector.organization}, Repos={connector.repositories}")
+            logger.info(f"Enterprise GitHub connector created with: API URL={connector.api_url}, Owner={connector.owner}, Org={connector.organization}, Repos={connector.repositories}, RepoURL={connector.repo_url}")
             
             # Store the repositories directly to avoid parsing issues during cloning
             if connector.repositories and not connector_data.get('repositories'):
                 connector_data['repositories'] = connector.repositories
+                
+            # Make sure we have a repo_url for cloning if it can be constructed
+            if connector.repo_url and not connector_data.get('repo_url'):
+                connector_data['repo_url'] = connector.repo_url
+                logger.info(f"Added repo_url to connector data: {connector.repo_url}")
+                
+            # If we have owner and repositories but no repo_url, try to construct one
+            elif not connector_data.get('repo_url') and connector_data.get('owner') and connector_data.get('repositories'):
+                try:
+                    api_url = connector.api_url or connector_data.get('api_url')
+                    if api_url:
+                        parsed = urlparse(api_url)
+                        base_domain = parsed.netloc.replace('/api/v3', '')
+                        
+                        repositories = connector_data['repositories']
+                        if isinstance(repositories, str):
+                            repositories = json.loads(repositories)
+                            
+                        if repositories and len(repositories) > 0:
+                            repo_name = repositories[0]
+                            owner = connector_data['owner']
+                            repo_url = f"https://{base_domain}/{owner}/{repo_name}"
+                            connector_data['repo_url'] = repo_url
+                            logger.info(f"Constructed and added repo_url to connector data: {repo_url}")
+                except Exception as e:
+                    logger.error(f"Error constructing repo_url for enterprise connector: {e}")
         
         # Clone the repository in the background
         logger.info(f"Scheduling repository clone with connector data: {connector_data}")
@@ -779,24 +821,37 @@ async def test_github_connection(connector: GitHubConnectorCreate) -> TestConnec
         sanitized_connector['token'] = '***REDACTED***' if sanitized_connector.get('token') else None
         print(f"Testing GitHub connection with: {sanitized_connector}")
         
-        # Extract owner and repository from repo_url if provided
-        if connector.github_type == 'public' and connector.repo_url:
+        # Extract owner and repository from repo_url if provided (for both public and enterprise)
+        if connector.repo_url:
             try:
                 parsed_url = urlparse(connector.repo_url)
-                if parsed_url.netloc == 'github.com':
-                    path_parts = parsed_url.path.strip('/').split('/')
-                    if len(path_parts) >= 2:
-                        # Set owner from URL if not already provided
-                        if not connector.owner:
-                            connector.owner = path_parts[0]
+                path_parts = parsed_url.path.strip('/').split('/')
+                
+                # Log the parsed URL and path parts
+                print(f"Parsed URL: {parsed_url}, Path parts: {path_parts}")
+                
+                if len(path_parts) >= 2:
+                    # Set owner from URL if not already provided
+                    if not connector.owner:
+                        connector.owner = path_parts[0]
+                        print(f"Extracted owner from URL: {connector.owner}")
+                    
+                    # Set repositories from URL if not already provided
+                    repo_name = path_parts[1]
+                    if repo_name.endswith('.git'):
+                        repo_name = repo_name[:-4]  # Remove .git suffix
+                    
+                    if not connector.repositories:
+                        connector.repositories = [repo_name]
+                        print(f"Extracted repository from URL: {repo_name}")
                         
-                        # Set repositories from URL if not already provided
-                        repo_name = path_parts[1]
-                        if repo_name.endswith('.git'):
-                            repo_name = repo_name[:-4]  # Remove .git suffix
-                            
-                        if not connector.repositories:
-                            connector.repositories = [repo_name]
+                    # For enterprise, also set the repo_url to make sure it's available for cloning
+                    if connector.github_type == 'enterprise':
+                        # Construct a proper repository URL for cloning
+                        base_domain = parsed_url.netloc
+                        repo_url = f"https://{base_domain}/{path_parts[0]}/{repo_name}"
+                        connector.repo_url = repo_url
+                        print(f"Set enterprise repo_url for cloning: {repo_url}")
             except Exception as e:
                 # Log but continue with the test
                 print(f"Error parsing repository URL: {str(e)}")
