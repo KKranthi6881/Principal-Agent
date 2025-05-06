@@ -14,6 +14,8 @@ import {
   useToast,
   Card,
   CardBody,
+  Alert,
+  AlertIcon,
   CardHeader,
   Divider,
   Icon,
@@ -300,9 +302,21 @@ const GitHubConnectorPage = () => {
                     />
                     <Text fontSize="xs" color="gray.500" mt={1}>
                       {isEnterprise ? 
-                        "Enter ONLY your GitHub Enterprise domain (no paths, no /api/v3)" : 
+                        "Enter ONLY your GitHub Enterprise domain name (e.g., github.mycompany.com). Do not include http://, paths, or /api/v3" : 
                         "Standard GitHub repository URL"}
                     </Text>
+                    {isEnterprise && (
+                      <Alert status="info" mt={2} size="sm" borderRadius="md">
+                        <AlertIcon />
+                        <Box fontSize="xs">
+                          <Text fontWeight="bold">Examples:</Text>
+                          <Text>✅ github.mycompany.com</Text>
+                          <Text>✅ enterprise-github.company.org</Text>
+                          <Text>❌ https://github.mycompany.com/api/v3</Text>
+                          <Text>❌ github.mycompany.com/username/repo</Text>
+                        </Box>
+                      </Alert>
+                    )}
                   </FormControl>
 
                   <FormControl display="flex" alignItems="center">

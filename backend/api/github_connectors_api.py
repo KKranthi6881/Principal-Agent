@@ -60,6 +60,9 @@ def normalize_enterprise_api_url(api_url: str) -> str:
     if not api_url:
         raise ValueError("API URL is required for enterprise GitHub.")
     
+    # Clean up the input - remove any whitespace and trailing slashes
+    api_url = api_url.strip().rstrip('/')
+    
     # Make sure URL starts with http:// or https://
     if not api_url.startswith('http://') and not api_url.startswith('https://'):
         api_url = f"https://{api_url}"
@@ -70,24 +73,17 @@ def normalize_enterprise_api_url(api_url: str) -> str:
     if parsed.netloc == '' or parsed.scheme == '':
         raise ValueError(f"Malformed API URL: '{api_url}'. Please provide a valid URL including the domain.")
     
-    # Only check for repository URL pattern if the path is more than just a domain
-    # Simple domains like 'github.mycompany.com' should be accepted
-    if parsed.path and parsed.path != '/':
-        # Check if it's a repository URL rather than a base domain
-        repo_path_pattern = re.compile(r'/[\w.-]+/[\w.-]+(\.git)?/?$')
-        if parsed.path.endswith('.git') or repo_path_pattern.search(parsed.path):
-            raise ValueError(f"API URL appears to be a repository URL. Please provide the base API URL (e.g., https://<your-gh-enterprise-domain>)")
+    # For enterprise GitHub, the user should just provide the domain name
+    # If they've entered anything that looks like a path to a specific repo, reject it
+    if any(pattern in parsed.path for pattern in [".git", "/repos/", "/pull/", "/blob/", "/tree/"]):
+        raise ValueError(f"API URL appears to be a repository URL. Please provide only the base domain (e.g., github.mycompany.com)")
     
-    # Normalize by removing trailing slashes
-    normalized_url = api_url.rstrip('/')
+    # Normalize URL to just the domain - strip any paths the user might have added
+    # For enterprise connections, we just want the domain
+    normalized_url = f"{parsed.scheme}://{parsed.netloc}"
     
-    # Automatically add /api/v3 if missing
-    if not normalized_url.endswith('/api/v3'):
-        # Don't duplicate /api/v3 if parts of it are already there
-        if normalized_url.endswith('/api'):
-            normalized_url = f"{normalized_url}/v3"
-        else:
-            normalized_url = f"{normalized_url}/api/v3"
+    # Automatically add /api/v3 to the normalized domain
+    normalized_url = f"{normalized_url}/api/v3"
     
     return normalized_url
 
