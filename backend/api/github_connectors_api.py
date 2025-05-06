@@ -70,10 +70,13 @@ def normalize_enterprise_api_url(api_url: str) -> str:
     if parsed.netloc == '' or parsed.scheme == '':
         raise ValueError(f"Malformed API URL: '{api_url}'. Please provide a valid URL including the domain.")
     
-    # Check if it's a repository URL rather than a base domain
-    repo_path_pattern = re.compile(r'/[\w.-]+/[\w.-]+(\.git)?/?$')
-    if parsed.path.endswith('.git') or repo_path_pattern.search(parsed.path):
-        raise ValueError(f"API URL appears to be a repository URL. Please provide the base API URL (e.g., https://<your-gh-enterprise-domain>)")
+    # Only check for repository URL pattern if the path is more than just a domain
+    # Simple domains like 'github.mycompany.com' should be accepted
+    if parsed.path and parsed.path != '/':
+        # Check if it's a repository URL rather than a base domain
+        repo_path_pattern = re.compile(r'/[\w.-]+/[\w.-]+(\.git)?/?$')
+        if parsed.path.endswith('.git') or repo_path_pattern.search(parsed.path):
+            raise ValueError(f"API URL appears to be a repository URL. Please provide the base API URL (e.g., https://<your-gh-enterprise-domain>)")
     
     # Normalize by removing trailing slashes
     normalized_url = api_url.rstrip('/')
