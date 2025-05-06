@@ -73,19 +73,24 @@ def normalize_enterprise_api_url(api_url: str) -> str:
     if parsed.netloc == '' or parsed.scheme == '':
         raise ValueError(f"Malformed API URL: '{api_url}'. Please provide a valid URL including the domain.")
     
-    # For enterprise GitHub, the user should just provide the domain name
-    # If they've entered anything that looks like a path to a specific repo, reject it
-    if any(pattern in parsed.path for pattern in [".git", "/repos/", "/pull/", "/blob/", "/tree/"]):
-        raise ValueError(f"API URL appears to be a repository URL. Please provide only the base domain (e.g., github.mycompany.com)")
-    
-    # Normalize URL to just the domain - strip any paths the user might have added
-    # For enterprise connections, we just want the domain
+    # Remove any explicit API path parts that the user may have included
+    # For enterprise connections, we want to standardize on domain/api/v3
     normalized_url = f"{parsed.scheme}://{parsed.netloc}"
     
-    # Automatically add /api/v3 to the normalized domain
-    normalized_url = f"{normalized_url}/api/v3"
+    # Remove /api/v3 if it was included to avoid duplication
+    if parsed.path.endswith('/api/v3'):
+        return normalized_url + '/api/v3'
+    if parsed.path.endswith('/api'):
+        return normalized_url + '/api/v3'
+        
+    # If we got a repository URL, extract just the domain
+    repo_indicators = [".git", "/repos/", "/pull/", "/blob/", "/tree/"]
+    if any(indicator in parsed.path for indicator in repo_indicators):
+        # Just warn but don't error - try to recover by using just the domain
+        print(f"Warning: API URL appears to be a repository URL: '{api_url}'. Using just the domain.")
     
-    return normalized_url
+    # Automatically add /api/v3 to the normalized domain
+    return f"{normalized_url}/api/v3"
 
 def encrypt_token(token: str) -> str:
     """Encrypt a GitHub token"""
@@ -162,20 +167,41 @@ def clone_github_repository(connector: Dict[str, Any]) -> Dict[str, Any]:
         # Determine the repository URL and branch
         repo_url = None
         branch = connector.get("default_branch", "main")
+        github_type = connector.get("github_type")
+        
+        # Log key connector attributes for debugging
+        logger.info(f"Cloning repository with github_type: {github_type}, owner: {connector.get('owner')}, org: {connector.get('organization')}")
+        
+        # Setup base domain for repository URL construction
+        base_domain = "github.com"  # Default for public GitHub
+        
+        # For enterprise GitHub, use the domain from the API URL
+        if github_type == "enterprise" and connector.get("api_url"):
+            try:
+                parsed = urlparse(connector.get("api_url"))
+                base_domain = parsed.netloc
+                # Remove any api/v3 part from netloc if somehow included
+                base_domain = base_domain.replace('/api/v3', '')
+                logger.info(f"Using enterprise GitHub domain: {base_domain}")
+            except Exception as e:
+                logger.error(f"Error parsing enterprise GitHub API URL: {e}")
         
         # Direct repository URL (highest priority)
         if connector.get("repo_url"):
             repo_url = connector["repo_url"]
+            logger.info(f"Using explicitly provided repo URL: {repo_url}")
         # Owner and repositories
         elif connector.get("owner") and connector.get("repositories") and len(connector["repositories"]) > 0:
             owner = connector["owner"]
             repo_name = connector["repositories"][0]  # Take the first repo for now
-            repo_url = f"https://github.com/{owner}/{repo_name}"
+            repo_url = f"https://{base_domain}/{owner}/{repo_name}"
+            logger.info(f"Constructed repo URL from owner/repo: {repo_url}")
         # Organization repositories (would need to be enhanced to handle multiple)
         elif connector.get("organization") and connector.get("repositories") and len(connector["repositories"]) > 0:
             org = connector["organization"]
             repo_name = connector["repositories"][0]  # Take the first repo for now
-            repo_url = f"https://github.com/{org}/{repo_name}"
+            repo_url = f"https://{base_domain}/{org}/{repo_name}"
+            logger.info(f"Constructed repo URL from org/repo: {repo_url}")
         
         if not repo_url:
             logger.error(f"No repository URL could be determined from connector settings")
@@ -281,10 +307,27 @@ async def sync_github_connector(
         
         # Determine the repository URL
         repo_url = connector_dict.get('repo_url')
+        github_type = connector_dict.get('github_type')
+        
+        # Setup base domain for repository URL construction
+        base_domain = "github.com"  # Default for public GitHub
+        
+        # For enterprise GitHub, use the domain from the API URL
+        if github_type == "enterprise" and connector_dict.get("api_url"):
+            try:
+                api_url = connector_dict.get("api_url")
+                parsed = urlparse(api_url)
+                base_domain = parsed.netloc
+                # Remove any api/v3 part from netloc if somehow included
+                base_domain = base_domain.replace('/api/v3', '')
+                logger.info(f"Using enterprise GitHub domain for sync: {base_domain}")
+            except Exception as e:
+                logger.error(f"Error parsing enterprise GitHub API URL during sync: {e}")
         
         if not repo_url and connector_dict.get('repositories'):
             # Try to construct a URL from owner/repo or organization/repo
-            repositories = json.loads(connector_dict['repositories'])
+            repositories = json.loads(connector_dict['repositories']) if isinstance(connector_dict['repositories'], str) else connector_dict['repositories']
+            
             if repositories and len(repositories) > 0:
                 owner = connector_dict.get('owner')
                 organization = connector_dict.get('organization')
@@ -293,9 +336,11 @@ async def sync_github_connector(
                 repo_name = repositories[0]
                 
                 if owner:
-                    repo_url = f"https://github.com/{owner}/{repo_name}"
+                    repo_url = f"https://{base_domain}/{owner}/{repo_name}"
+                    logger.info(f"Constructed repo URL from owner/repo for sync: {repo_url}")
                 elif organization:
-                    repo_url = f"https://github.com/{organization}/{repo_name}"
+                    repo_url = f"https://{base_domain}/{organization}/{repo_name}"
+                    logger.info(f"Constructed repo URL from org/repo for sync: {repo_url}")
         
         if not repo_url:
             raise HTTPException(
@@ -718,7 +763,16 @@ async def test_github_connection(connector: GitHubConnectorCreate) -> TestConnec
         # Normalize and validate API URL for enterprise
         if connector.github_type == 'enterprise':
             try:
+                # Handle edge case where api_url might be None or empty after stripping
+                if not connector.api_url or connector.api_url.strip() == '':
+                    return TestConnectionResponse(
+                        success=False,
+                        message="Enterprise GitHub API URL is required.",
+                        details=None
+                    )
+                    
                 base_url = normalize_enterprise_api_url(connector.api_url)
+                print(f"Normalized Enterprise GitHub URL: {base_url}")
             except ValueError as url_err:
                 return TestConnectionResponse(
                     success=False,
