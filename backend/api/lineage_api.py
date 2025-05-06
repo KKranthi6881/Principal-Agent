@@ -32,6 +32,12 @@ router = APIRouter(prefix="/api/lineage", tags=["lineage"])
 lineage_db = LineageDB()
 task_db = TaskDB()
 
+# Task status constants
+TASK_STATUS_RUNNING = "running"
+TASK_STATUS_COMPLETED = "completed"
+TASK_STATUS_FAILED = "failed"
+TASK_STATUS_STOPPED = "stopped"
+
 # Pydantic models for request/response
 class SQLParseRequest(BaseModel):
     """Request model for SQL parsing"""
@@ -802,6 +808,86 @@ async def export_column_lineage_json(
             status_code=500,
             detail=f"Error exporting column lineage JSON: {str(e)}"
         )
+
+@router.post("/tasks/{task_id}/stop", response_model=Dict[str, Any])
+async def stop_task(
+    task_id: str = Path(..., description="Task ID to stop")
+):
+    """
+    Stop a running lineage extraction task
+    
+    This endpoint allows stopping a task that is currently running. It will update
+    the task status to 'stopped' and add metadata about when it was stopped.
+    """
+    try:
+        # Get the task
+        task = task_db.get_task(task_id)
+        
+        if not task:
+            raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+        
+        # Check if the task is running
+        if task.get("status") != TASK_STATUS_RUNNING:
+            return {
+                "success": False,
+                "message": f"Task is not running. Current status: {task.get('status')}"
+            }
+        
+        # Update the task status
+        task_db.update_task(
+            task_id=task_id,
+            status=TASK_STATUS_STOPPED,
+            metadata={
+                "stopped_at": time.time(),
+                "stopped_by": "user",
+                "current_operation": "Task stopped by user",
+                "last_updated": time.time()
+            }
+        )
+        
+        # Return success
+        return {
+            "success": True,
+            "message": f"Task {task_id} has been stopped"
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error stopping task: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error stopping task: {str(e)}")
+
+@router.post("/tasks/clear-history", response_model=Dict[str, Any])
+async def clear_task_history():
+    """
+    Clear completed and failed task history
+    
+    This endpoint removes all completed and failed tasks from the database,
+    keeping only the currently running tasks.
+    """
+    try:
+        # Get list of all tasks first
+        all_tasks = task_db.list_tasks(task_type="lineage_extraction")
+        
+        # Count how many will be deleted
+        to_delete = [task["task_id"] for task in all_tasks 
+                    if task.get("status") in [TASK_STATUS_COMPLETED, TASK_STATUS_FAILED, TASK_STATUS_STOPPED]]
+        
+        # Delete tasks
+        deleted_count = 0
+        for task_id in to_delete:
+            success = task_db.delete_task(task_id)
+            if success:
+                deleted_count += 1
+        
+        # Return success with count
+        return {
+            "success": True,
+            "message": f"Cleared {deleted_count} completed or failed tasks",
+            "deleted_count": deleted_count
+        }
+    except Exception as e:
+        logger.error(f"Error clearing task history: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error clearing task history: {str(e)}")
 
 @router.get("/by-path", response_model=Dict[str, Any])
 async def get_lineage_by_github_path(

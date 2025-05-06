@@ -3,6 +3,7 @@ API for GitHub connector configurations
 """
 import os
 import uuid
+import re
 import json
 from typing import Dict, List, Optional, Any
 from fastapi import APIRouter, HTTPException, BackgroundTasks, Query
@@ -58,18 +59,34 @@ def normalize_enterprise_api_url(api_url: str) -> str:
     """
     if not api_url:
         raise ValueError("API URL is required for enterprise GitHub.")
+    
+    # Make sure URL starts with http:// or https://
+    if not api_url.startswith('http://') and not api_url.startswith('https://'):
+        api_url = f"https://{api_url}"
+    
     parsed = urlparse(api_url)
-    # Heuristic: If path contains '/', it's likely not a base API URL
+    
+    # Basic URL validation
     if parsed.netloc == '' or parsed.scheme == '':
-        raise ValueError(f"Malformed API URL: '{api_url}'")
-    # If this looks like a repo URL (ends with .git or has /owner/repo)
-    if parsed.path.endswith('.git') or len([p for p in parsed.path.strip('/').split('/') if p]) >= 2:
-        raise ValueError(f"API URL appears to be a repository URL. Please provide the base API URL (e.g., https://<your-gh-enterprise-domain>/api/v3)")
-    # Ensure /api/v3 is present
-    if not parsed.path.rstrip('/').endswith('/api/v3'):
-        raise ValueError(f"API URL must end with /api/v3 (e.g., https://<your-gh-enterprise-domain>/api/v3)")
-    # Normalize (remove trailing slash)
-    return api_url.rstrip('/')
+        raise ValueError(f"Malformed API URL: '{api_url}'. Please provide a valid URL including the domain.")
+    
+    # Check if it's a repository URL rather than a base domain
+    repo_path_pattern = re.compile(r'/[\w.-]+/[\w.-]+(\.git)?/?$')
+    if parsed.path.endswith('.git') or repo_path_pattern.search(parsed.path):
+        raise ValueError(f"API URL appears to be a repository URL. Please provide the base API URL (e.g., https://<your-gh-enterprise-domain>)")
+    
+    # Normalize by removing trailing slashes
+    normalized_url = api_url.rstrip('/')
+    
+    # Automatically add /api/v3 if missing
+    if not normalized_url.endswith('/api/v3'):
+        # Don't duplicate /api/v3 if parts of it are already there
+        if normalized_url.endswith('/api'):
+            normalized_url = f"{normalized_url}/v3"
+        else:
+            normalized_url = f"{normalized_url}/api/v3"
+    
+    return normalized_url
 
 def encrypt_token(token: str) -> str:
     """Encrypt a GitHub token"""

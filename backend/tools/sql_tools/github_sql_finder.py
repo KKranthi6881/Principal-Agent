@@ -767,7 +767,9 @@ class GitHubSQLFinder:
         Returns:
             URL that points to the application's repository UI
         """
-        if not repo_url:
+        import urllib.parse
+        
+        if not repo_url or not file_path:
             return ""
 
         # Extract repository info
@@ -783,22 +785,41 @@ class GitHubSQLFinder:
             repo_url = repo_url[:-1]
         
         # Try to extract owner and repo
-        github_url_match = re.match(r'https://github.com/([^/]+)/([^/]+)', repo_url)
+        github_url_match = re.match(r'https://github\.com/([^/]+)/([^/]+)', repo_url)
+        enterprise_url_match = re.match(r'https://([^/]+)/([^/]+)/([^/]+)', repo_url)
+        
         if github_url_match:
             owner = github_url_match.group(1)
             repo_name = github_url_match.group(2)
+        elif enterprise_url_match:
+            # Handle enterprise GitHub URLs
+            domain = enterprise_url_match.group(1)
+            owner = enterprise_url_match.group(2)
+            repo_name = enterprise_url_match.group(3)
         else:
-            # If we couldn't extract owner/repo, use GitHub URL as fallback
-            if file_path and file_path.startswith('/'):
-                file_path = file_path[1:]
-            return f"{repo_url}/blob/main/{file_path}"
+            # If we couldn't extract owner/repo, construct a fallback identifier
+            parts = repo_url.split('/')
+            if len(parts) >= 2:
+                owner = parts[-2]
+                repo_name = parts[-1]
+            else:
+                # If all else fails, use the URL as is
+                owner = "unknown"
+                repo_name = "repository"
         
+        # Normalize file path
         # Remove leading slash from file path if present
         if file_path and file_path.startswith('/'):
             file_path = file_path[1:]
             
-        # Build the application repository UI URL - with file parameter to open file directly
-        return f"http://localhost:5173/repository?repo={owner}/{repo_name}&path={file_path}&file={file_path}"
+        # URL encode the file path for safe inclusion in URL
+        encoded_path = urllib.parse.quote(file_path)
+        
+        # Build the application repository UI URL
+        repo_identifier = f"{owner}/{repo_name}"
+        
+        # Use the repository UI URL format
+        return f"http://localhost:5173/repository?repo={repo_identifier}&file={encoded_path}"
 
     def search_files(self, query: str, limit: int = 10, include_content: bool = True,
                     file_extensions: List[str] = None) -> Dict[str, Any]:

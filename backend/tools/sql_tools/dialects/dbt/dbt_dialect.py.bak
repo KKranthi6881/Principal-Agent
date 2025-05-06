@@ -380,6 +380,316 @@ class DBTDialect(BaseSQLDialect):
             return True
 
         return False
+    def _extract_refs(self, sql: str) -> List[Dict[str, str]]:
+        """
+        Extract refs from DBT SQL code using regex
+        
+        Args:
+            sql: SQL code
+            
+        Returns:
+            List of dictionaries with model and optionally project keys
+        """
+        refs = []
+        
+        # Match single-argument refs: {{ ref('model') }}
+        single_ref_pattern = r'{{\s*ref\s*\(\s*[\'"]([^\'"]+)[\'"]\s*\)\s*}}'
+        single_matches = re.finditer(single_ref_pattern, sql, re.IGNORECASE)
+        
+        for match in single_matches:
+            refs.append({
+                "model": match.group(1),
+            })
+        
+        # Match two-argument refs: {{ ref('project', 'model') }}
+        double_ref_pattern = r'{{\s*ref\s*\(\s*[\'"]([^\'"]+)[\'"]\s*,\s*[\'"]([^\'"]+)[\'"]\s*\)\s*}}'
+        double_matches = re.finditer(double_ref_pattern, sql, re.IGNORECASE)
+        
+        for match in double_matches:
+            refs.append({
+                "project": match.group(1),
+                "model": match.group(2),
+            })
+            
+        return refs
+
+    def _extract_sources(self, sql: str) -> List[Dict[str, str]]:
+        """
+        Extract sources from DBT SQL code using regex
+        
+        Args:
+            sql: SQL code
+            
+        Returns:
+            List of dictionaries with source and table keys
+        """
+        sources = []
+        
+        # Match sources: {{ source('source', 'table') }}
+        source_pattern = r'{{\s*source\s*\(\s*[\'"]([^\'"]+)[\'"]\s*,\s*[\'"]([^\'"]+)[\'"]\s*\)\s*}}'
+        matches = re.finditer(source_pattern, sql, re.IGNORECASE)
+        
+        for match in matches:
+            sources.append({
+                "source": match.group(1),
+                "table": match.group(2),
+            })
+            
+        return sources
+
+    def _extract_cte_dependencies(self, sql: str) -> Dict[str, List]:
+        """
+        Extract dependencies from CTEs (Common Table Expressions) in DBT SQL
+        
+        Args:
+            sql: SQL code
+            
+        Returns:
+            Dictionary with refs and sources lists
+        """
+        result = {
+            "refs": [],
+            "sources": []
+        }
+        
+        # Find CTE definitions - match anything between WITH and the main SELECT
+        cte_pattern = r'WITH\s+([^;]*)(?:SELECT|INSERT|UPDATE|DELETE)'
+        cte_matches = re.search(cte_pattern, sql, re.IGNORECASE | re.DOTALL)
+        
+        if not cte_matches:
+            return result
+            
+        cte_content = cte_matches.group(1)
+        
+        # Extract refs from CTEs
+        refs = self._extract_refs(cte_content)
+        if refs:
+            result["refs"].extend(refs)
+            
+        # Extract sources from CTEs
+        sources = self._extract_sources(cte_content)
+        if sources:
+            result["sources"].extend(sources)
+            
+        return result
+
+    def _extract_yaml_dependencies(self, yaml_content: str, file_path: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Extract dependencies from a DBT YAML file
+        
+        Args:
+            yaml_content: YAML content
+            file_path: Path to the file (optional)
+            
+        Returns:
+            Dictionary with dependency information
+        """
+        result = {
+            "model_name": None,
+            "refs": [],
+            "sources": [],
+            "tables": [],
+            "errors": []
+        }
+        
+        try:
+            # Parse YAML content
+            yaml_data = yaml.safe_load(yaml_content)
+            
+            if not yaml_data:
+                result["errors"].append("Empty or invalid YAML")
+                return result
+                
+            # Extract models
+            if "models" in yaml_data:
+                for model in yaml_data["models"]:
+                    if "name" in model:
+                        # Set the model name if not already set
+                        if not result["model_name"]:
+                            result["model_name"] = model["name"]
+                            
+                        # Add to tables list
+                        result["tables"].append(model["name"])
+                
+            # Extract sources
+            if "sources" in yaml_data:
+                for source in yaml_data["sources"]:
+                    source_name = source.get("name")
+                    
+                    if "tables" in source:
+                        for table in source["tables"]:
+                            table_name = table.get("name")
+                            
+                            if source_name and table_name:
+                                # Add to sources list
+                                result["sources"].append({
+                                    "source": source_name,
+                                    "table": table_name
+                                })
+                                
+                                # Add to tables list with source prefix
+                                result["tables"].append(f"{source_name}.{table_name}")
+            
+            return result
+                
+        except Exception as e:
+            result["errors"].append(f"Error parsing YAML: {str(e)}")
+            return result
+    def _extract_refs(self, sql: str) -> List[Dict[str, str]]:
+        """
+        Extract refs from DBT SQL code using regex
+        
+        Args:
+            sql: SQL code
+            
+        Returns:
+            List of dictionaries with model and optionally project keys
+        """
+        refs = []
+        
+        # Match single-argument refs: {{ ref('model') }}
+        single_ref_pattern = r'{{\s*ref\s*\(\s*[\'"]([^\'"]+)[\'"]\s*\)\s*}}'
+        single_matches = re.finditer(single_ref_pattern, sql, re.IGNORECASE)
+        
+        for match in single_matches:
+            refs.append({
+                "model": match.group(1),
+            })
+        
+        # Match two-argument refs: {{ ref('project', 'model') }}
+        double_ref_pattern = r'{{\s*ref\s*\(\s*[\'"]([^\'"]+)[\'"]\s*,\s*[\'"]([^\'"]+)[\'"]\s*\)\s*}}'
+        double_matches = re.finditer(double_ref_pattern, sql, re.IGNORECASE)
+        
+        for match in double_matches:
+            refs.append({
+                "project": match.group(1),
+                "model": match.group(2),
+            })
+            
+        return refs
+
+    def _extract_sources(self, sql: str) -> List[Dict[str, str]]:
+        """
+        Extract sources from DBT SQL code using regex
+        
+        Args:
+            sql: SQL code
+            
+        Returns:
+            List of dictionaries with source and table keys
+        """
+        sources = []
+        
+        # Match sources: {{ source('source', 'table') }}
+        source_pattern = r'{{\s*source\s*\(\s*[\'"]([^\'"]+)[\'"]\s*,\s*[\'"]([^\'"]+)[\'"]\s*\)\s*}}'
+        matches = re.finditer(source_pattern, sql, re.IGNORECASE)
+        
+        for match in matches:
+            sources.append({
+                "source": match.group(1),
+                "table": match.group(2),
+            })
+            
+        return sources
+
+    def _extract_cte_dependencies(self, sql: str) -> Dict[str, List]:
+        """
+        Extract dependencies from CTEs (Common Table Expressions) in DBT SQL
+        
+        Args:
+            sql: SQL code
+            
+        Returns:
+            Dictionary with refs and sources lists
+        """
+        result = {
+            "refs": [],
+            "sources": []
+        }
+        
+        # Find CTE definitions - match anything between WITH and the main SELECT
+        cte_pattern = r'WITH\s+([^;]*)(?:SELECT|INSERT|UPDATE|DELETE)'
+        cte_matches = re.search(cte_pattern, sql, re.IGNORECASE | re.DOTALL)
+        
+        if not cte_matches:
+            return result
+            
+        cte_content = cte_matches.group(1)
+        
+        # Extract refs from CTEs
+        refs = self._extract_refs(cte_content)
+        if refs:
+            result["refs"].extend(refs)
+            
+        # Extract sources from CTEs
+        sources = self._extract_sources(cte_content)
+        if sources:
+            result["sources"].extend(sources)
+            
+        return result
+
+    def _extract_yaml_dependencies(self, yaml_content: str, file_path: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Extract dependencies from a DBT YAML file
+        
+        Args:
+            yaml_content: YAML content
+            file_path: Path to the file (optional)
+            
+        Returns:
+            Dictionary with dependency information
+        """
+        result = {
+            "model_name": None,
+            "refs": [],
+            "sources": [],
+            "tables": [],
+            "errors": []
+        }
+        
+        try:
+            # Parse YAML content
+            yaml_data = yaml.safe_load(yaml_content)
+            
+            if not yaml_data:
+                result["errors"].append("Empty or invalid YAML")
+                return result
+                
+            # Extract models
+            if "models" in yaml_data:
+                for model in yaml_data["models"]:
+                    if "name" in model:
+                        # Set the model name if not already set
+                        if not result["model_name"]:
+                            result["model_name"] = model["name"]
+                            
+                        # Add to tables list
+                        result["tables"].append(model["name"])
+                
+            # Extract sources
+            if "sources" in yaml_data:
+                for source in yaml_data["sources"]:
+                    source_name = source.get("name")
+                    
+                    if "tables" in source:
+                        for table in source["tables"]:
+                            table_name = table.get("name")
+                            
+                            if source_name and table_name:
+                                # Add to sources list
+                                result["sources"].append({
+                                    "source": source_name,
+                                    "table": table_name
+                                })
+                                
+                                # Add to tables list with source prefix
+                                result["tables"].append(f"{source_name}.{table_name}")
+            
+            return result
+                
+        except Exception as e:
+            result["errors"].append(f"Error parsing YAML: {str(e)}")
+            return result
     
     def extract_dependencies(self, sql, file_path=None, dialect_hint=None, extract_only=False):
         """
@@ -450,27 +760,56 @@ class DBTDialect(BaseSQLDialect):
         Returns:
             Dictionary with lineage information
         """
-        # Initialize lineage result
+        # Initialize result structure to match the expected format
         result = {
-            "target_table": None,
-            "source_tables": [],
-            "column_level_lineage": {},
-            "columns": [],  # Add columns list for YAML-extracted columns
-            "errors": [],
-            "file_path": file_path
+            "table_lineage": {
+                "target_table": None,
+                "source_tables": []
+            },
+            "column_lineage": {
+                "target_columns": [],
+                "column_relationships": []
+            },
+            "columns": [],  # Legacy format for backward compatibility
+            "errors": []
         }
         
         # For YAML/YML files, use the YAML extractor
         if file_path and (file_path.endswith('.yml') or file_path.endswith('.yaml')):
-            yaml_result = self._extract_yaml_dependencies(sql_code, file_path)
-            # Add YAML-extracted columns to the result
-            if 'columns' in yaml_result:
-                result['columns'] = yaml_result['columns']
-                logger.info(f"Extracted {len(yaml_result['columns'])} columns from YAML file: {file_path}")
-            
-            # If we have a model name from YAML, use it as the target table
-            if 'model_name' in yaml_result and yaml_result['model_name']:
-                result['target_table'] = yaml_result['model_name']
+            try:
+                yaml_data = self._extract_yaml_dependencies(sql_code, file_path)
+                
+                if yaml_data and 'models' in yaml_data:
+                    # If there are models in the YAML, extract columns from them
+                    for model in yaml_data['models']:
+                        if 'columns' in model:
+                            for col in model['columns']:
+                                # Add to legacy format
+                                col_info = {
+                                    'table_name': model.get('name', ''),
+                                    'column_name': col.get('name', ''),
+                                    'description': col.get('description', ''),
+                                    'data_type': col.get('type', None),
+                                    'is_primary_key': 'primary_key' in col.get('tests', []),
+                                    'is_foreign_key': False  # YAML doesn't have foreign key info
+                                }
+                                result['columns'].append(col_info)
+                                
+                                # Add to the new column_lineage format
+                                result['column_lineage']['target_columns'].append({
+                                    'name': col.get('name', ''),
+                                    'table': model.get('name', ''),
+                                    'data_type': col.get('type', None),
+                                    'description': col.get('description', '')
+                                })
+                                
+                            # Extract the target table name from the model
+                            if not result['table_lineage']['target_table'] and 'name' in model:
+                                result['table_lineage']['target_table'] = model['name']
+                                
+            except Exception as e:
+                result['errors'].append(f"Error extracting YAML metadata: {str(e)}")
+                logger.error(f"Error extracting YAML metadata: {str(e)}")
                 
             return result
         
@@ -479,386 +818,56 @@ class DBTDialect(BaseSQLDialect):
             result["errors"].append("Input doesn't appear to be SQL code")
             return result
             
-        # Extract DBT dependencies
-        deps = self.extract_dependencies(sql_code, file_path)
-        if deps["errors"]:
-            result["errors"].extend(deps["errors"])
-            
-        # Extract model name from dependencies if present
-        if deps.get("model_name"):
-            result["target_table"] = deps["model_name"]
-            
-        # Initialize source tables
-        source_tables = []
-        
-        # Add sources (e.g. source('raw', 'customers') -> raw.customers)
-        for source in deps.get("sources", []):
-            source_tables.append({
-                "name": source.get("table"),
-                "schema": source.get("source"),
-                "source_type": "dbt_source"
-            })
-            
-        # Add refs (e.g. ref('stg_customers') -> stg_customers)
-        for ref in deps.get("refs", []):
-            source_tables.append({
-                "name": ref.get("model"),
-                "schema": ref.get("project", "dbt_ref"),
-                "source_type": "dbt_ref"
-            })
-            
-        # Add direct table references
-        for table in deps.get("tables", []):
-            # Skip tables that look like macros or references
-            if isinstance(table, str) and not table.startswith('__dbt_'):
-                parts = table.split('.')
-                if len(parts) == 2:
-                    source_tables.append({
-                        "name": parts[1],
-                        "schema": parts[0],
-                        "source_type": "table_ref"
-                    })
-                else:
-                    source_tables.append({
-                        "name": table,
-                        "schema": None,
-                        "source_type": "table_ref"
-                    })
-                    
-        # Add source tables to result
-        result["source_tables"] = source_tables
-        
-        try:
-            # Parse SQL
-            ast, errors = self.parse_sql(sql_code, file_path)
-            if errors:
-                result["errors"].extend(errors)
-            
-            if ast:
-                # If the AST was parsed, extract source tables and relationships
-                from sqlglot.expressions import Table, Select
-                
-                # Use SQLGlotLineageExtractor for consistent extraction
-                from tools.sql_tools.lineage.sqlglot_lineage import SQLGlotLineageExtractor
-                lineage_extractor = SQLGlotLineageExtractor()
-                table_lineage = lineage_extractor.extract_table_lineage(ast, file_path)
-                
-                # Add source tables from the table lineage
-                if table_lineage.get("source_tables"):
-                    result["source_tables"] = table_lineage["source_tables"]
-                
-                # If we didn't get a target table from the model name, try to infer it
-                if not result["target_table"] and table_lineage.get("target_table"):
-                    result["target_table"] = table_lineage["target_table"]
-                
-                # If we still don't have a target table, try to infer it from the file name
-                if not result["target_table"] and file_path:
-                    # Extract the filename without extension
-                    import os
-                    base_name = os.path.basename(file_path)
-                    if base_name.endswith('.sql'):
-                        base_name = base_name[:-4]
-                    result["target_table"] = base_name
-                
-                # Extract column-level lineage if possible
-                column_lineage = lineage_extractor.extract_column_lineage(ast, file_path)
-                if column_lineage:
-                    result["column_level_lineage"] = column_lineage
-                    
-                    # Extract columns from column_lineage for consistency with YAML extraction
-                    if "target_columns" in column_lineage:
-                        for col in column_lineage["target_columns"]:
-                            if "name" in col:
-                                table_name = result["target_table"] if result["target_table"] else ""
-                                result["columns"].append({
-                                    "table_name": table_name,
-                                    "column_name": col["name"],
-                                    "description": col.get("description", ""),
-                                    "data_type": col.get("data_type", None),
-                                    "is_primary_key": col.get("is_primary_key", False),
-                                    "is_foreign_key": col.get("is_foreign_key", False)
-                                })
-            
-        except Exception as e:
-            result["errors"].append(f"Error extracting lineage: {str(e)}")
-            logger.error(f"Error in extract_lineage: {str(e)}", exc_info=True)
-        
-        return result
-        
-        # If it's identified as macro-only by the logic, return regex results
-        if self._is_macro_only_file(sql_code):
-            result["errors"].append("Macro-only file identified, returning regex-based dependencies.")
-            return result
-    
-    def extract_lineage(self, sql_code: str, file_path: Optional[str] = None) -> Dict[str, Any]:
-        """
-        Extract column-level lineage from DBT SQL code
-        
-        Args:
-            sql_code: SQL code to analyze
-            file_path: Path to the file (optional)
-            
-        Returns:
-            Dictionary with lineage information
-        """
-        # Initialize lineage result
-        result = {
-            "target_table": None,
-            "source_tables": [],
-            "column_level_lineage": {},
-            "columns": [],  # Add columns list for YAML-extracted columns
-            "errors": [],
-            "file_path": file_path
-        }
-        
-        # For YAML/YML files, use the YAML extractor
-        if file_path and (file_path.endswith('.yml') or file_path.endswith('.yaml')):
-            yaml_result = self._extract_yaml_dependencies(sql_code, file_path)
-            # Add YAML-extracted columns to the result
-            if 'columns' in yaml_result:
-                result['columns'] = yaml_result['columns']
-                logger.info(f"Extracted {len(yaml_result['columns'])} columns from YAML file: {file_path}")
-            
-            # If we have a model name from YAML, use it as the target table
-            if 'model_name' in yaml_result and yaml_result['model_name']:
-                result['target_table'] = yaml_result['model_name']
-                
-            return result
-        
-        # Skip non-SQL files like MD
-        if not self._looks_like_sql(sql_code):
-            result["errors"].append("Input doesn't appear to be SQL code")
-            return result
-            
-        # Extract DBT dependencies
-        deps = self.extract_dependencies(sql_code, file_path)
-        if deps["errors"]:
-            result["errors"].extend(deps["errors"])
-            
-        # Extract model name from dependencies if present
-        if deps.get("model_name"):
-            result["target_table"] = deps["model_name"]
-            
-        # Initialize source tables
-        source_tables = []
-        
-        # Add sources (e.g. source('raw', 'customers') -> raw.customers)
-        for source in deps.get("sources", []):
-            source_tables.append({
-                "name": source.get("table"),
-                "schema": source.get("source"),
-                "source_type": "dbt_source"
-            })
-            
-        # Add refs (e.g. ref('stg_customers') -> stg_customers)
-        for ref in deps.get("refs", []):
-            source_tables.append({
-                "name": ref.get("model"),
-                "schema": ref.get("project", "dbt_ref"),
-                "source_type": "dbt_ref"
-            })
-            
-        # Add direct table references
-        for table in deps.get("tables", []):
-            # Skip tables that look like macros or references
-            if isinstance(table, str) and not table.startswith('__dbt_'):
-                parts = table.split('.')
-                if len(parts) == 2:
-                    source_tables.append({
-                        "name": parts[1],
-                        "schema": parts[0],
-                        "source_type": "table_ref"
-                    })
-                else:
-                    source_tables.append({
-                        "name": table,
-                        "schema": None,
-                        "source_type": "table_ref"
-                    })
-                    
-        # Add source tables to result
-        result["source_tables"] = source_tables
-        
-        try:
-            # Parse SQL
-            ast, errors = self.parse_sql(sql_code, file_path)
-            if errors:
-                result["errors"].extend(errors)
-            
-            if ast:
-                # If the AST was parsed, extract source tables and relationships
-                from sqlglot.expressions import Table, Select
-                
-                # Use SQLGlotLineageExtractor for consistent extraction
-                from tools.sql_tools.lineage.sqlglot_lineage import SQLGlotLineageExtractor
-                lineage_extractor = SQLGlotLineageExtractor()
-                table_lineage = lineage_extractor.extract_table_lineage(ast, file_path)
-                
-                # Add source tables from the table lineage
-                if table_lineage.get("source_tables"):
-                    result["source_tables"] = table_lineage["source_tables"]
-                
-                # If we didn't get a target table from the model name, try to infer it
-                if not result["target_table"] and table_lineage.get("target_table"):
-                    result["target_table"] = table_lineage["target_table"]
-                
-                # If we still don't have a target table, try to infer it from the file name
-                if not result["target_table"] and file_path:
-                    # Extract the filename without extension
-                    import os
-                    base_name = os.path.basename(file_path)
-                    if base_name.endswith('.sql'):
-                        base_name = base_name[:-4]
-                    result["target_table"] = base_name
-                
-                # Extract column-level lineage if possible
-                column_lineage = lineage_extractor.extract_column_lineage(ast, file_path)
-                if column_lineage:
-                    result["column_level_lineage"] = column_lineage
-                    
-                    # Extract columns from column_lineage for consistency with YAML extraction
-                    if "target_columns" in column_lineage:
-                        for col in column_lineage["target_columns"]:
-                            if "name" in col:
-                                table_name = result["target_table"] if result["target_table"] else ""
-                                result["columns"].append({
-                                    "table_name": table_name,
-                                    "column_name": col["name"],
-                                    "description": col.get("description", ""),
-                                    "data_type": col.get("data_type", None),
-                                    "is_primary_key": col.get("is_primary_key", False),
-                                    "is_foreign_key": col.get("is_foreign_key", False)
-                                })
-            
-        except Exception as e:
-            result["errors"].append(f"Error extracting lineage: {str(e)}")
-            logger.error(f"Error in extract_lineage: {str(e)}", exc_info=True)
-        
-        # If it's identified as macro-only by the logic, return regex results
-        if self._is_macro_only_file(sql):
-            result["errors"].append("Macro-only file identified, returning regex-based dependencies.")
-            return result
-
-        # If there's no SQL content detected, return regex results
-        if not self._looks_like_sql(sql):
-            result["errors"].append("Input doesn't appear to be SQL code, returning regex-based dependencies.")
-            return result
-            
-        # Proceed with parsing only if it looks like SQL and is not macro-only
-        try:
-            ast, errors = self.parse_sql(sql, file_path, dialect_hint)
-            
-            if errors:
-                # Append parsing errors but don't overwrite regex results unless parsing was successful
-                result["errors"].extend(errors)
-            
-            if ast:
-                # If parsing succeeded, use AST-based table extraction
-                # This might be more accurate than simple regex
-                tables = self._extract_tables_from_ast(ast)
-                if tables:
-                    result["tables"] = tables
+        # Try to infer target table from file path
+        target_model_name = None
+        if file_path:
+            # Try to predict target table name from file path
+            base_name = os.path.basename(file_path)
+            if base_name.endswith('.sql'):
+                target_model_name = base_name[:-4]
             else:
-                # If parsing failed, rely on simple regex extraction for tables
-                result["errors"].append("Parsing failed, relying on regex for table extraction.")
-                tables_from_regex = self._extract_table_refs_from_text(sql) 
-                result["tables"] = tables_from_regex
-            
-        except Exception as e:
-            result["errors"].append(f"Error during AST-based dependency extraction: {str(e)}")
-            # Fallback to regex tables if AST extraction fails
-            if not result.get("tables"):
-                tables_from_regex = self._extract_table_refs_from_text(sql)
-                result["tables"] = tables_from_regex
-
-        return result
-        """
-        Extract column-level lineage from DBT SQL code
+                target_model_name = base_name
         
-        Args:
-            sql_code: SQL code to analyze
-            file_path: Path to the file (optional)
-            
-        Returns:
-            Dictionary with lineage information
-        """
-        # Initialize lineage result
-        result = {
-            "target_table": None,
-            "source_tables": [],
-            "column_level_lineage": {},
-            "columns": [],  # Add columns list for YAML-extracted columns
-            "errors": [],
-            "file_path": file_path
-        }
-        
-        # For YAML/YML files, use the YAML extractor
-        if file_path and (file_path.endswith('.yml') or file_path.endswith('.yaml')):
-            yaml_result = self._extract_yaml_dependencies(sql_code, file_path)
-            # Add YAML-extracted columns to the result
-            if 'columns' in yaml_result:
-                result['columns'] = yaml_result['columns']
-                logger.info(f"Extracted {len(yaml_result['columns'])} columns from YAML file: {file_path}")
-            
-            # If we have a model name from YAML, use it as the target table
-            if 'model_name' in yaml_result and yaml_result['model_name']:
-                result['target_table'] = yaml_result['model_name']
-                
-            return result
-        
-        # Skip non-SQL files like MD
-        if not self._looks_like_sql(sql_code):
-            result["errors"].append("Input doesn't appear to be SQL code")
-            return result
+        # Set target table from model name if available
+        if target_model_name:
+            result["table_lineage"]["target_table"] = target_model_name
             
         # Extract DBT dependencies
-        deps = self.extract_dependencies(sql_code, file_path)
-        if deps["errors"]:
+        logger.info(f"Attempting to parse SQL for file {file_path} (length {len(sql_code)}):\n---\n{sql_code[:200]}...\n---")
+        deps = self.extract_dependencies(sql_code, file_path, extract_only=True)
+        if deps and deps.get("errors"):
             result["errors"].extend(deps["errors"])
             
         # Extract model name from dependencies if present
-        if deps.get("model_name"):
-            result["target_table"] = deps["model_name"]
+        if deps and deps.get("model_name"):
+            result["table_lineage"]["target_table"] = deps["model_name"]
             
-        # Initialize source tables
-        source_tables = []
+        # Extract source tables from dependencies
+        source_table_strings = []
+        
+        # Add references to other DBT models
+        for ref in (deps.get("refs", []) if deps else []):
+            # Add to the string list for the table_lineage format
+            if ref.get("project") and ref.get("model"):
+                source_table_strings.append(f"{ref.get('project')}.{ref.get('model')}")
+            elif ref.get("model"):
+                source_table_strings.append(ref.get("model"))
         
         # Add sources (e.g. source('raw', 'customers') -> raw.customers)
-        for source in deps.get("sources", []):
-            source_tables.append({
-                "name": source.get("table"),
-                "schema": source.get("source"),
-                "source_type": "dbt_source"
-            })
-            
-        # Add refs (e.g. ref('stg_customers') -> stg_customers)
-        for ref in deps.get("refs", []):
-            source_tables.append({
-                "name": ref.get("model"),
-                "schema": ref.get("project", "dbt_ref"),
-                "source_type": "dbt_ref"
-            })
+        for source in (deps.get("sources", []) if deps else []):
+            if source.get("source") and source.get("table"):
+                source_table_strings.append(f"{source.get('source')}.{source.get('table')}")
+            elif source.get("table"):
+                source_table_strings.append(source.get("table"))
             
         # Add direct table references
-        for table in deps.get("tables", []):
+        for table in (deps.get("tables", []) if deps else []):
             # Skip tables that look like macros or references
             if isinstance(table, str) and not table.startswith('__dbt_'):
-                parts = table.split('.')
-                if len(parts) == 2:
-                    source_tables.append({
-                        "name": parts[1],
-                        "schema": parts[0],
-                        "source_type": "table_ref"
-                    })
-                else:
-                    source_tables.append({
-                        "name": table,
-                        "schema": None,
-                        "source_type": "table_ref"
-                    })
+                source_table_strings.append(table)
                     
         # Add source tables to result
-        result["source_tables"] = source_tables
+        result["table_lineage"]["source_tables"] = source_table_strings
         
         try:
             # Parse SQL
@@ -875,805 +884,25 @@ class DBTDialect(BaseSQLDialect):
                 lineage_extractor = SQLGlotLineageExtractor()
                 table_lineage = lineage_extractor.extract_table_lineage(ast, file_path)
                 
-                # Add source tables from the table lineage
-                if table_lineage.get("source_tables"):
-                    result["source_tables"] = table_lineage["source_tables"]
+                # Add source tables from the table lineage if available
+                if table_lineage and table_lineage.get("source_tables"):
+                    result["table_lineage"]["source_tables"] = table_lineage["source_tables"]
                 
                 # If we didn't get a target table from the model name, try to infer it
-                if not result["target_table"] and table_lineage.get("target_table"):
-                    result["target_table"] = table_lineage["target_table"]
-                
-                # If we still don't have a target table, try to infer it from the file name
-                if not result["target_table"] and file_path:
-                    # Extract the filename without extension
-                    import os
-                    base_name = os.path.basename(file_path)
-                    if base_name.endswith('.sql'):
-                        base_name = base_name[:-4]
-                    result["target_table"] = base_name
+                if not result["table_lineage"]["target_table"] and table_lineage and table_lineage.get("target_table"):
+                    result["table_lineage"]["target_table"] = table_lineage["target_table"]
                 
                 # Extract column-level lineage if possible
                 column_lineage = lineage_extractor.extract_column_lineage(ast, file_path)
                 if column_lineage:
-                    result["column_level_lineage"] = column_lineage
-                    
-                    # Extract columns from column_lineage for consistency with YAML extraction
+                    # Add target columns to the column_lineage format
                     if "target_columns" in column_lineage:
-                        for col in column_lineage["target_columns"]:
-                            if "name" in col:
-                                table_name = result["target_table"] if result["target_table"] else ""
-                                result["columns"].append({
-                                    "table_name": table_name,
-                                    "column_name": col["name"],
-                                    "description": col.get("description", ""),
-                                    "data_type": col.get("data_type", None),
-                                    "is_primary_key": col.get("is_primary_key", False),
-                                    "is_foreign_key": col.get("is_foreign_key", False)
-                                })
-            
-        except Exception as e:
-            result["errors"].append(f"Error extracting lineage: {str(e)}")
-            logger.error(f"Error in extract_lineage: {str(e)}", exc_info=True)
-        
-        return result
-    
-    def _extract_yaml_dependencies(self, content, file_path):
-        """Extract dependencies from a DBT YAML/YML file.
-        
-        Args:
-            content: A string with the file content.
-            file_path: The path to the file.
-            
-        Returns:
-            A dictionary with extracted dependencies and model metadata.
-        """
-        result = {
-            "model_name": None,
-            "refs": [],
-            "sources": [],
-            "tables": [],
-            "errors": [],
-            "columns": [],  # Add columns list to store column information
-            "models_metadata": {}  # Add model metadata dictionary
-        }
-    
-        try:
-            # Parse the YAML content
-            yaml_data = yaml.safe_load(content)
-            if not yaml_data:
-                result["errors"].append("Empty or invalid YAML file")
-                return result
-                
-        except Exception as e:
-            result["errors"].append(f"Error parsing YAML: {str(e)}")
-            logger.error(f"Error extracting YAML dependencies: {str(e)}", exc_info=True)
-        
-        return result
-        """
-        Extract column-level lineage from DBT SQL code
-        
-        Args:
-            sql_code: SQL code to analyze
-            file_path: Path to the file (optional)
-            
-        Returns:
-            Dictionary with lineage information
-        """
-        # Initialize lineage result
-        result = {
-            "target_table": None,
-            "source_tables": [],
-            "column_level_lineage": {},
-            "columns": [],  # Add columns list for YAML-extracted columns
-            "errors": [],
-            "file_path": file_path
-        }
-        
-        # For YAML/YML files, use the YAML extractor
-        if file_path and (file_path.endswith('.yml') or file_path.endswith('.yaml')):
-            yaml_result = self._extract_yaml_dependencies(sql_code, file_path)
-            # Add YAML-extracted columns to the result
-            if 'columns' in yaml_result:
-                result['columns'] = yaml_result['columns']
-                logger.info(f"Extracted {len(yaml_result['columns'])} columns from YAML file: {file_path}")
-            
-            # If we have a model name from YAML, use it as the target table
-            if 'model_name' in yaml_result and yaml_result['model_name']:
-                result['target_table'] = yaml_result['model_name']
-                
-            return result
-        
-        # Skip non-SQL files like MD
-        if not self._looks_like_sql(sql_code):
-            result["errors"].append("Input doesn't appear to be SQL code")
-            return result
-            
-        # Extract DBT dependencies
-        deps = self.extract_dependencies(sql_code, file_path)
-        if deps["errors"]:
-            result["errors"].extend(deps["errors"])
-            
-        # Extract model name from dependencies if present
-        if deps.get("model_name"):
-            result["target_table"] = deps["model_name"]
-            
-        # Initialize source tables
-        source_tables = []
-        
-        # Add sources (e.g. source('raw', 'customers') -> raw.customers)
-        for source in deps.get("sources", []):
-            source_tables.append({
-                "name": source.get("table"),
-                "schema": source.get("source"),
-                "source_type": "dbt_source"
-            })
-            
-        # Add refs (e.g. ref('stg_customers') -> stg_customers)
-        for ref in deps.get("refs", []):
-            source_tables.append({
-                "name": ref.get("model"),
-                "schema": ref.get("project", "dbt_ref"),
-                "source_type": "dbt_ref"
-            })
-            
-        # Add direct table references
-        for table in deps.get("tables", []):
-            # Skip tables that look like macros or references
-            if isinstance(table, str) and not table.startswith('__dbt_'):
-                parts = table.split('.')
-                if len(parts) == 2:
-                    source_tables.append({
-                        "name": parts[1],
-                        "schema": parts[0],
-                        "source_type": "table_ref"
-                    })
-                else:
-                    source_tables.append({
-                        "name": table,
-                        "schema": None,
-                        "source_type": "table_ref"
-                    })
-                    
-        # Add source tables to result
-        result["source_tables"] = source_tables
-        
-        try:
-            # Parse SQL
-            ast, errors = self.parse_sql(sql_code, file_path)
-            if errors:
-                result["errors"].extend(errors)
-            
-            if ast:
-                # If the AST was parsed, extract source tables and relationships
-                from sqlglot.expressions import Table, Select
-                
-                # Use SQLGlotLineageExtractor for consistent extraction
-                from tools.sql_tools.lineage.sqlglot_lineage import SQLGlotLineageExtractor
-                lineage_extractor = SQLGlotLineageExtractor()
-                table_lineage = lineage_extractor.extract_table_lineage(ast, file_path)
-                
-                # Add source tables from the table lineage
-                if table_lineage.get("source_tables"):
-                    result["source_tables"] = table_lineage["source_tables"]
-                
-                # If we didn't get a target table from the model name, try to infer it
-                if not result["target_table"] and table_lineage.get("target_table"):
-                    result["target_table"] = table_lineage["target_table"]
-                
-                # If we still don't have a target table, try to infer it from the file name
-                if not result["target_table"] and file_path:
-                    # Extract the filename without extension
-                    import os
-                    base_name = os.path.basename(file_path)
-                    if base_name.endswith('.sql'):
-                        base_name = base_name[:-4]
-                    result["target_table"] = base_name
-                
-                # Extract column-level lineage if possible
-                column_lineage = lineage_extractor.extract_column_lineage(ast, file_path)
-                if column_lineage:
-                    result["column_level_lineage"] = column_lineage
-                    
-                    # Extract columns from column_lineage for consistency with YAML extraction
-                    if "target_columns" in column_lineage:
-                        for col in column_lineage["target_columns"]:
-                            if "name" in col:
-                                table_name = result["target_table"] if result["target_table"] else ""
-                                result["columns"].append({
-                                    "table_name": table_name,
-                                    "column_name": col["name"],
-                                    "description": col.get("description", ""),
-                                    "data_type": col.get("data_type", None),
-                                    "is_primary_key": col.get("is_primary_key", False),
-                                    "is_foreign_key": col.get("is_foreign_key", False)
-                                })
-            
-        except Exception as e:
-            result["errors"].append(f"Error extracting lineage: {str(e)}")
-            logger.error(f"Error in extract_lineage: {str(e)}", exc_info=True)
-        
-        return result
-    
-    def _is_macro_only_file(self, sql):
-        """
-        Check if a file contains only macro definitions
-        
-        Args:
-            sql_code: SQL code to analyze
-            file_path: Path to the file (optional)
-            
-        Returns:
-            Dictionary with lineage information
-        """
-        # Initialize lineage result
-        result = {
-            "target_table": None,
-            "source_tables": [],
-            "column_level_lineage": {},
-            "columns": [],  # Add columns list for YAML-extracted columns
-            "errors": [],
-            "file_path": file_path
-        }
-        
-        # For YAML/YML files, use the YAML extractor
-        if file_path and (file_path.endswith('.yml') or file_path.endswith('.yaml')):
-            yaml_result = self._extract_yaml_dependencies(sql_code, file_path)
-            # Add YAML-extracted columns to the result
-            if 'columns' in yaml_result:
-                result['columns'] = yaml_result['columns']
-                logger.info(f"Extracted {len(yaml_result['columns'])} columns from YAML file: {file_path}")
-            
-            # If we have a model name from YAML, use it as the target table
-            if 'model_name' in yaml_result and yaml_result['model_name']:
-                result['target_table'] = yaml_result['model_name']
-                
-            return result
-        
-        # Skip non-SQL files like MD
-        if not self._looks_like_sql(sql_code):
-            result["errors"].append("Input doesn't appear to be SQL code")
-            return result
-            
-        # Extract DBT dependencies
-        deps = self.extract_dependencies(sql_code, file_path)
-        if deps["errors"]:
-            result["errors"].extend(deps["errors"])
-            
-        # Extract model name from dependencies if present
-        if deps.get("model_name"):
-            result["target_table"] = deps["model_name"]
-            
-        # Initialize source tables
-        source_tables = []
-        
-        # Add sources (e.g. source('raw', 'customers') -> raw.customers)
-        for source in deps.get("sources", []):
-            source_tables.append({
-                "name": source.get("table"),
-                "schema": source.get("source"),
-                "source_type": "dbt_source"
-            })
-            
-        # Add refs (e.g. ref('stg_customers') -> stg_customers)
-        for ref in deps.get("refs", []):
-            source_tables.append({
-                "name": ref.get("model"),
-                "schema": ref.get("project", "dbt_ref"),
-                "source_type": "dbt_ref"
-            })
-            
-        # Add direct table references
-        for table in deps.get("tables", []):
-            # Skip tables that look like macros or references
-            if isinstance(table, str) and not table.startswith('__dbt_'):
-                parts = table.split('.')
-                if len(parts) == 2:
-                    source_tables.append({
-                        "name": parts[1],
-                        "schema": parts[0],
-                        "source_type": "table_ref"
-                    })
-                else:
-                    source_tables.append({
-                        "name": table,
-                        "schema": None,
-                        "source_type": "table_ref"
-                    })
-                    
-        # Add source tables to result
-        result["source_tables"] = source_tables
-        
-        try:
-            # Parse SQL
-            ast, errors = self.parse_sql(sql_code, file_path)
-            if errors:
-                result["errors"].extend(errors)
-            
-            if ast:
-                # If the AST was parsed, extract source tables and relationships
-                from sqlglot.expressions import Table, Select
-                
-                # Use SQLGlotLineageExtractor for consistent extraction
-                from tools.sql_tools.lineage.sqlglot_lineage import SQLGlotLineageExtractor
-                lineage_extractor = SQLGlotLineageExtractor()
-                table_lineage = lineage_extractor.extract_table_lineage(ast, file_path)
-                
-                # Add source tables from the table lineage
-                if table_lineage.get("source_tables"):
-                    result["source_tables"] = table_lineage["source_tables"]
-                
-                # If we didn't get a target table from the model name, try to infer it
-                if not result["target_table"] and table_lineage.get("target_table"):
-                    result["target_table"] = table_lineage["target_table"]
-                
-                # If we still don't have a target table, try to infer it from the file name
-                if not result["target_table"] and file_path:
-                    # Extract the filename without extension
-                    import os
-                    base_name = os.path.basename(file_path)
-                    if base_name.endswith('.sql'):
-                        base_name = base_name[:-4]
-                    result["target_table"] = base_name
-                
-                # Extract column-level lineage if possible
-                column_lineage = lineage_extractor.extract_column_lineage(ast, file_path)
-                if column_lineage:
-                    result["column_level_lineage"] = column_lineage
-                    
-                    # Extract columns from column_lineage for consistency with YAML extraction
-                    if "target_columns" in column_lineage:
-                        for col in column_lineage["target_columns"]:
-                            if "name" in col:
-                                table_name = result["target_table"] if result["target_table"] else ""
-                                result["columns"].append({
-                                    "table_name": table_name,
-                                    "column_name": col["name"],
-                                    "description": col.get("description", ""),
-                                    "data_type": col.get("data_type", None),
-                                    "is_primary_key": col.get("is_primary_key", False),
-                                    "is_foreign_key": col.get("is_foreign_key", False)
-                                })
-            
-        except Exception as e:
-            result["errors"].append(f"Error extracting lineage: {str(e)}")
-            logger.error(f"Error in extract_lineage: {str(e)}", exc_info=True)
-        
-        return result 
-
-    def _is_macro_only_file(self, sql):
-        """
-        Check if a file contains only macro definitions
-        
-        Args:
-            sql: SQL code to check
-            
-        Returns:
-            True if the file contains only macro definitions, False otherwise
-        """
-        # Remove comments to get a cleaner view
-        clean_sql = re.sub(r"--.*?$", "", sql, flags=re.MULTILINE)
-        clean_sql = re.sub(r"/\*.*?\*/", "", clean_sql, flags=re.DOTALL)
-        clean_sql = re.sub(r"{#.*?#}", "", clean_sql, flags=re.DOTALL)
-        clean_sql = re.sub(r'\x1b\[[0-9;]*m', '', clean_sql)  # Remove ANSI escape sequences
-        clean_sql = clean_sql.strip()
-        
-        if not clean_sql:
-            return False # Empty after cleaning
-
-        # Count macro definitions
-        macro_defs = re.findall(r"{%\s*macro\s+[^%]*%}", clean_sql)
-        
-        # Check if the file is mostly macro definitions
-        if macro_defs:
-            # Remove macro code blocks completely to see what's left
-            non_macro_content = re.sub(r"{%\s*macro\s+.*?{%\s*endmacro\s*%}", "", clean_sql, flags=re.DOTALL)
-            # Remove any remaining jinja comments/statements
-            non_macro_content = re.sub(r"({%.*?%}|{{.*?}}|{#.*?#})", "", non_macro_content, flags=re.DOTALL)
-            non_macro_content = non_macro_content.strip()
-            
-            # If there's very little non-macro content (e.g., just whitespace or comments), it's a macro-only file
-            # Also explicitly check if it only contains macro definitions
-            if len(non_macro_content) < 20:
-                 # Check if the remaining content looks like SQL fragments
-                if not re.search(r'\b(SELECT|CREATE|INSERT|UPDATE|DELETE|WITH|ALTER|MERGE)\b', non_macro_content, re.IGNORECASE):
-                    return True
-                
-        # Check if it *only* contains Jinja (macros, statements, expressions)
-        jinja_only_pattern = r"^(\s*({%.*?%}|{{.*?}}|{#.*?#})\s*)+$"
-        if re.match(jinja_only_pattern, clean_sql, re.DOTALL):
-            return True
-        
-        return False
-
-    def _reconstruct_dbt_sql(self, sql_code):
-        """
-        Reconstruct SQL from DBT's CTE pattern. Handles common DBT structures.
-        Attempts to find CTE definitions and a final SELECT statement.
-
-        Args:
-            sql_code: Preprocessed SQL code to reconstruct.
-
-        Returns:
-            Tuple: (Reconstructed SQL string or None, list of errors encountered)
-        """
-        errors = []
-        logger.debug("Starting CTE reconstruction.")
-        try:
-            # --- Find Final SELECT --- 
-            final_select_start_index = -1
-            select_matches = list(re.finditer(r'(?i)\bSELECT\b', sql_code))
-            for match in reversed(select_matches):
-                idx = match.start()
-                open_paren_count = sql_code[:idx].count('(')
-                close_paren_count = sql_code[:idx].count(')')
-                if open_paren_count <= close_paren_count:
-                    final_select_start_index = idx
-                    break
-            logger.debug(f"Final SELECT index identified at: {final_select_start_index}")
-
-            # --- Handle different structures based on final SELECT --- 
-            if final_select_start_index == -1:
-                # Case 1: No clear final SELECT. Assume CTE-only or single SELECT.
-                is_cte_like = re.search(r'(?i)\bAS\s*\(', sql_code)
-                is_select_like = re.match(r'(?i)^\s*SELECT\b', sql_code.strip())
-
-                if is_cte_like:
-                    logger.debug("No final SELECT found, attempting CTE-only reconstruction with dummy SELECT.")
-                    errors.append("Found CTE definitions but no clear final SELECT. Attempting parse with dummy SELECT.")
-                    cte_part_cleaned = sql_code.strip()
-                    if not cte_part_cleaned.lower().startswith('with'):
-                        cte_part_cleaned = "WITH " + cte_part_cleaned
-                    # Clean commas: ensure comma only between `) AS (` and `cte_name AS (`
-                    cte_part_cleaned = re.sub(r'\)\s*,\s*(?=[a-zA-Z_][a-zA-Z0-9_]*\s+AS\s*\()', r'),\n', cte_part_cleaned)
-                    cte_part_cleaned = cte_part_cleaned.rstrip().rstrip(',') # Remove trailing comma for sure
-                    
-                    # Find first CTE name for dummy select
-                    first_cte_name_match = re.search(r'(?i)\b(?:WITH|,)\s*([a-zA-Z_][a-zA-Z0-9_]*)\s+AS\s*\(', cte_part_cleaned)
-                    if first_cte_name_match:
-                        cte_name = first_cte_name_match.group(1)
-                        if cte_name:
-                            dummy_select = f"\nSELECT * FROM {cte_name}" # No semicolon needed for sqlglot usually
-                            reconstructed_sql = cte_part_cleaned + dummy_select
-                            logger.debug(f"Reconstructed CTE-only SQL (len {len(reconstructed_sql)}):\n{reconstructed_sql[:500]}...")
-                            return reconstructed_sql, errors
-                        else:
-                             errors.append("Could not extract first CTE name reliably for dummy SELECT.")
-                             return None, errors
-                    else:
-                        errors.append("Could not find any CTE name pattern for dummy SELECT.")
-                        return None, errors
-                elif is_select_like:
-                     logger.debug("No final SELECT found, but looks like a SELECT statement. Returning as is.")
-                     return sql_code.strip(), errors
-                else:
-                    errors.append("Could not identify final SELECT or CTE structure.")
-                    logger.debug("Failed to identify structure as CTE-like or SELECT-like.")
-                    return None, errors
-            else:
-                # Case 2: Found a potential final SELECT.
-                logger.debug("Potential final SELECT found. Splitting CTE and SELECT parts.")
-                final_select_sql = sql_code[final_select_start_index:].strip()
-                cte_part = sql_code[:final_select_start_index].strip()
-                
-                # --- Clean and Assemble CTE Part --- 
-                reconstructed_cte_part = ""
-                if cte_part:
-                    if re.search(r'(?i)\bAS\s*\(', cte_part):
-                        logger.debug("CTE part identified. Cleaning and adding WITH if needed.")
-                        reconstructed_cte_part = cte_part
-                        if not reconstructed_cte_part.lower().startswith('with'):
-                            reconstructed_cte_part = "WITH " + reconstructed_cte_part
+                        result["column_lineage"]["target_columns"] = column_lineage["target_columns"]
                         
-                        # Correct comma separation
-                        reconstructed_cte_part = re.sub(r'\)\s*,\s*(?=[a-zA-Z_][a-zA-Z0-9_]*\s+AS\s*\()', r'),\n', reconstructed_cte_part)
-                        # Remove any comma potentially lingering right before the final select part
-                        reconstructed_cte_part = reconstructed_cte_part.rstrip().rstrip(',') 
-                    else:
-                        errors.append(f"Ignoring potential non-CTE block before final SELECT: {cte_part[:100]}...")
-                        logger.debug("Block before final SELECT doesn't look like CTEs, ignoring.")
-
-                # --- Assemble Final SQL --- 
-                if reconstructed_cte_part:
-                    reconstructed_sql = reconstructed_cte_part.strip() + "\n\n" + final_select_sql # Ensure good separation
-                else:
-                    reconstructed_sql = final_select_sql
-
-                # Final cleanup
-                reconstructed_sql = re.sub(r';\s*;+', ';', reconstructed_sql).strip().rstrip(';') # Remove multiple/trailing semicolons
-                
-                logger.debug(f"Reconstructed SQL with CTEs and final SELECT (len {len(reconstructed_sql)}):\n{reconstructed_sql[:500]}...")
-                # Basic validation
-                if not re.search(r'(?i)\b(SELECT|WITH|CREATE|INSERT|UPDATE|DELETE|MERGE)\b', reconstructed_sql):
-                    errors.append(f"Reconstructed SQL lacks core SQL command: {reconstructed_sql[:100]}...")
-                    logger.warning("Reconstructed SQL failed basic validation (no command found).")
-                    return None, errors
-
-                return reconstructed_sql, errors
-
-        except Exception as e:
-            errors.append(f"Critical error during CTE reconstruction: {str(e)}")
-            logger.error(f"CTE Reconstruction failed critically: {e}", exc_info=True)
-            return None, errors
-        
-    def _extract_refs(self, sql):
-        """
-        Extract references to other DBT models using the ref() function in SQL code.
-        
-        Args:
-            sql: The SQL code to analyze
-            
-        Returns:
-            List of dictionaries containing extracted references
-        """
-        refs = []
-        # Pattern to match DBT ref calls like {% ref('model_name') %} or {{ ref('model_name') }}
-        # Also matches __dbt_ref_model_name which is a placeholder format used in preprocessing
-        patterns = [
-            r'{%\s*ref\s*\(\s*[\'\"](.*?)[\'\"](,\s*[\'\"](.*?)[\'\"])?\s*\)\s*%}', # {% ref('model_name') %}
-            r'{{\s*ref\s*\(\s*[\'\"](.*?)[\'\"](,\s*[\'\"](.*?)[\'\"])?\s*\)\s*}}', # {{ ref('model_name') }}
-            r'__dbt_ref_(.*?)\b'  # __dbt_ref_model_name
-        ]
-        
-        for pattern in patterns:
-            matches = re.finditer(pattern, sql, re.IGNORECASE)
-            for match in matches:
-                if match.group(1):
-                    if 'dbt_ref_' in pattern and match.group(1):
-                        # Simple format: __dbt_ref_model_name
-                        ref_dict = {"model": match.group(1)}
-                        refs.append(ref_dict)
-                    elif len(match.groups()) >= 3 and match.group(3):
-                        # Two-part format: ref('project_name', 'model_name')
-                        ref_dict = {
-                            "project": match.group(1),
-                            "model": match.group(3)
-                        }
-                        refs.append(ref_dict)
-                    else:
-                        # Simple format: ref('model_name')
-                        ref_dict = {"model": match.group(1)}
-                        refs.append(ref_dict)
-        
-        return refs
-    
-    def _extract_sources(self, sql):
-        """
-        Extract references to source tables using the source() function in SQL code.
-        
-        Args:
-            sql: The SQL code to analyze
-            
-        Returns:
-            List of dictionaries containing extracted source references
-        """
-        sources = []
-        # Pattern to match DBT source calls like {% source('source_name', 'table_name') %}
-        # Also matches __dbt_source_source_name__table_name which is a placeholder format used in preprocessing
-        patterns = [
-            r'{%\s*source\s*\(\s*[\'\"](.*?)[\'\"](,\s*[\'\"](.*?)[\'\"])?\s*\)\s*%}', # {% source('source_name', 'table_name') %}
-            r'{{\s*source\s*\(\s*[\'\"](.*?)[\'\"](,\s*[\'\"](.*?)[\'\"])?\s*\)\s*}}', # {{ source('source_name', 'table_name') }}
-            r'__dbt_source_(.*?)__(.*?)\b'  # __dbt_source_source_name__table_name
-        ]
-        
-        for pattern in patterns:
-            matches = re.finditer(pattern, sql, re.IGNORECASE)
-            for match in matches:
-                if '__dbt_source_' in pattern and match.group(1) and match.group(2):
-                    # Handle the __dbt_source_source_name__table_name pattern
-                    source_dict = {
-                        "source": match.group(1),
-                        "table": match.group(2)
-                    }
-                    sources.append(source_dict)
-                elif len(match.groups()) >= 3 and match.group(1) and match.group(3):
-                    # Standard format: source('source_name', 'table_name')
-                    source_dict = {
-                        "source": match.group(1),
-                        "table": match.group(3)
-                    }
-                    sources.append(source_dict)
-        
-    def _extract_table_refs_from_text(self, sql_code):
-        """
-        Extract table references from SQL text without parsing
-        
-        Args:
-            sql_code: SQL code to extract table references from
-            
-        Returns:
-            List of table references found
-        """
-        tables = []
-        
-        # Look for table names after FROM
-        from_pattern = r'(?i)from\s+([a-zA-Z0-9_\.]+)'
-        from_matches = re.findall(from_pattern, sql_code)
-        tables.extend(from_matches)
-        
-        # Look for table names after JOIN
-        join_pattern = r'(?i)join\s+([a-zA-Z0-9_\.]+)'
-        join_matches = re.findall(join_pattern, sql_code)
-        tables.extend(join_matches)
-        
-        # Look for DBT refs
-        ref_pattern = r'__dbt_ref_([a-zA-Z0-9_]+)'
-        ref_matches = re.findall(ref_pattern, sql_code)
-        tables.extend([f"__dbt_ref_{m}" for m in ref_matches])
-        
-        # Look for DBT sources
-        source_pattern = r'__dbt_source_([a-zA-Z0-9_]+)_([a-zA-Z0-9_]+)'
-        source_matches = re.findall(source_pattern, sql_code)
-        tables.extend([f"__dbt_source_{s[0]}_{s[1]}" for s in source_matches])
-        
-        return tables
-
-    def _extract_cte_dependencies(self, sql_code):
-        """
-        Extract dependencies from CTEs in a DBT SQL file
-        
-        Args:
-            sql_code: SQL code containing CTEs
-            
-        Returns:
-            Dictionary with refs and sources found in CTEs
-        """
-        result = {
-            "refs": [],
-            "sources": [],
-        }
-        
-        # Extract dependencies from CTE definitions
-        cte_pattern = r'(?i)(\w+)\s+as\s*\(\s*(.*?)\s*\)'
-        ctes = re.findall(cte_pattern, sql_code, re.DOTALL)
-        
-        for _, cte_sql in ctes:
-            # Extract refs from CTE SQL
-            refs = self._extract_refs(cte_sql)
-            if refs:
-                for ref in refs:
-                    if ref not in result["refs"]:
-                        result["refs"].append(ref)
-        
-            # Extract sources from CTE SQL
-            sources = self._extract_sources(cte_sql)
-            if sources:
-                for source in sources:
-                    if source not in result["sources"]:
-                        result["sources"].append(source)
-        
-        return result
-    
-    def extract_lineage(self, sql_code: str, file_path: Optional[str] = None) -> Dict[str, Any]:
-        """
-        Extract column-level lineage from DBT SQL code
-        
-        Args:
-            sql_code: SQL code to analyze
-            file_path: Path to the file (optional)
-            
-        Returns:
-            Dictionary with lineage information
-        """
-        # Initialize lineage result
-        result = {
-            "target_table": None,
-            "source_tables": [],
-            "column_level_lineage": {},
-            "columns": [],  # Add columns list for YAML-extracted columns
-            "errors": [],
-            "file_path": file_path
-        }
-        
-        # For YAML/YML files, use the YAML extractor
-        if file_path and (file_path.endswith('.yml') or file_path.endswith('.yaml')):
-            yaml_result = self._extract_yaml_dependencies(sql_code, file_path)
-            # Add YAML-extracted columns to the result
-            if 'columns' in yaml_result:
-                result['columns'] = yaml_result['columns']
-                logger.info(f"Extracted {len(yaml_result['columns'])} columns from YAML file: {file_path}")
-            
-            # If we have a model name from YAML, use it as the target table
-            if 'model_name' in yaml_result and yaml_result['model_name']:
-                result['target_table'] = yaml_result['model_name']
-                
-            return result
-        
-        # Skip non-SQL files like MD
-        if not self._looks_like_sql(sql_code):
-            result["errors"].append("Input doesn't appear to be SQL code")
-            return result
-            
-        # Extract DBT dependencies
-        deps = self.extract_dependencies(sql_code, file_path)
-        if deps["errors"]:
-            result["errors"].extend(deps["errors"])
-            
-        # Extract model name from dependencies if present
-        if deps.get("model_name"):
-            result["target_table"] = deps["model_name"]
-            
-        # Initialize source tables
-        source_tables = []
-        
-        # Add sources (e.g. source('raw', 'customers') -> raw.customers)
-        for source in deps.get("sources", []):
-            source_tables.append({
-                "name": source.get("table"),
-                "schema": source.get("source"),
-                "source_type": "dbt_source"
-            })
-            
-        # Add refs (e.g. ref('stg_customers') -> stg_customers)
-        for ref in deps.get("refs", []):
-            source_tables.append({
-                "name": ref.get("model"),
-                "schema": ref.get("project", "dbt_ref"),
-                "source_type": "dbt_ref"
-            })
-            
-        # Add direct table references
-        for table in deps.get("tables", []):
-            # Skip tables that look like macros or references
-            if isinstance(table, str) and not table.startswith('__dbt_'):
-                parts = table.split('.')
-                if len(parts) == 2:
-                    source_tables.append({
-                        "name": parts[1],
-                        "schema": parts[0],
-                        "source_type": "table_ref"
-                    })
-                else:
-                    source_tables.append({
-                        "name": table,
-                        "schema": None,
-                        "source_type": "table_ref"
-                    })
-                    
-        # Add source tables to result
-        result["source_tables"] = source_tables
-        
-        try:
-            # Parse SQL
-            ast, errors = self.parse_sql(sql_code, file_path)
-            if errors:
-                result["errors"].extend(errors)
-            
-            if ast:
-                # If the AST was parsed, extract source tables and relationships
-                from sqlglot.expressions import Table, Select
-                
-                # Use SQLGlotLineageExtractor for consistent extraction
-                from tools.sql_tools.lineage.sqlglot_lineage import SQLGlotLineageExtractor
-                lineage_extractor = SQLGlotLineageExtractor()
-                table_lineage = lineage_extractor.extract_table_lineage(ast, file_path)
-                
-                # Add source tables from the table lineage
-                if table_lineage.get("source_tables"):
-                    result["source_tables"] = table_lineage["source_tables"]
-                
-                # If we didn't get a target table from the model name, try to infer it
-                if not result["target_table"] and table_lineage.get("target_table"):
-                    result["target_table"] = table_lineage["target_table"]
-                
-                # If we still don't have a target table, try to infer it from the file name
-                if not result["target_table"] and file_path:
-                    # Extract the filename without extension
-                    import os
-                    base_name = os.path.basename(file_path)
-                    if base_name.endswith('.sql'):
-                        base_name = base_name[:-4]
-                    result["target_table"] = base_name
-                
-                # Extract column-level lineage if possible
-                column_lineage = lineage_extractor.extract_column_lineage(ast, file_path)
-                if column_lineage:
-                    result["column_level_lineage"] = column_lineage
-                    
-                    # Extract columns from column_lineage for consistency with YAML extraction
-                    if "target_columns" in column_lineage:
+                        # Also add to legacy format
                         for col in column_lineage["target_columns"]:
                             if "name" in col:
-                                table_name = result["target_table"] if result["target_table"] else ""
+                                table_name = result["table_lineage"]["target_table"] if result["table_lineage"]["target_table"] else ""
                                 result["columns"].append({
                                     "table_name": table_name,
                                     "column_name": col["name"],
@@ -1682,7 +911,28 @@ class DBTDialect(BaseSQLDialect):
                                     "is_primary_key": col.get("is_primary_key", False),
                                     "is_foreign_key": col.get("is_foreign_key", False)
                                 })
-            
+                    
+                    # Add column relationships to the column_lineage format
+                    if "column_relationships" in column_lineage:
+                        result["column_lineage"]["column_relationships"] = column_lineage["column_relationships"]
+                
+                # If we don't have any column relationships but have source tables and target columns,
+                # create simple relationships assuming column names match
+                if not result["column_lineage"]["column_relationships"] and \
+                   result["table_lineage"]["source_tables"] and \
+                   result["column_lineage"]["target_columns"]:
+                    
+                    for source_table in result["table_lineage"]["source_tables"]:
+                        for target_col in result["column_lineage"]["target_columns"]:
+                            if "name" in target_col:
+                                result["column_lineage"]["column_relationships"].append({
+                                    "source_table": source_table,
+                                    "source_column": target_col["name"],
+                                    "target_table": result["table_lineage"]["target_table"],
+                                    "target_column": target_col["name"],
+                                    "relationship_type": "dependency"
+                                })
+        
         except Exception as e:
             result["errors"].append(f"Error extracting lineage: {str(e)}")
             logger.error(f"Error in extract_lineage: {str(e)}", exc_info=True)

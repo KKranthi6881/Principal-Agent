@@ -15,14 +15,14 @@ logger.setLevel(logging.INFO)
 
 # Directly import the dialect classes to ensure they're available
 try:
-    from .postgresql import PostgreSQLDialect
+    from .postgres import PostgreSQLDialect
     logger.info("Successfully imported PostgreSQL dialect")
 except ImportError as e:
     logger.warning(f"Unable to import PostgreSQL dialect: {str(e)}")
     PostgreSQLDialect = None
 
 try:
-    from .tsql import TSQLDialect
+    from .tsql.tsql_dialect import TSQLDialect
     logger.info("Successfully imported T-SQL dialect")
 except ImportError as e:
     logger.warning(f"Unable to import T-SQL dialect: {str(e)}")

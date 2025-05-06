@@ -137,8 +137,8 @@ class TaskDB:
     
     def update_task(self, task_id: str, status: str = None, total_items: int = None,
                    processed_items: int = None, successful_items: int = None, 
-                   failed_items: int = None, error: str = None, 
-                   metadata: Dict[str, Any] = None) -> bool:
+                   failed_items: int = None, error: str = None, progress: int = None,
+                   current_step: str = None, metadata: Dict[str, Any] = None) -> bool:
         """
         Update an existing task
         
@@ -150,6 +150,8 @@ class TaskDB:
             successful_items: Number of successful items (optional)
             failed_items: Number of failed items (optional)
             error: Error message (optional)
+            progress: Progress percentage 0-100 (optional)
+            current_step: Current processing step name (optional)
             metadata: Additional metadata to merge with existing (optional)
             
         Returns:
@@ -199,6 +201,20 @@ class TaskDB:
             if failed_items is not None:
                 update_fields.append("failed_items = ?")
                 params.append(failed_items)
+            
+            # Support progress parameter (percentage 0-100)
+            if progress is not None:
+                # Store progress in metadata if it's not there
+                if metadata is None:
+                    metadata = {}
+                metadata['progress'] = progress
+            
+            # Support current_step parameter (current processing step)
+            if current_step is not None:
+                # Store current_step in metadata if it's not there
+                if metadata is None:
+                    metadata = {}
+                metadata['current_step'] = current_step
             
             if error is not None:
                 update_fields.append("error = ?")
@@ -421,6 +437,35 @@ class TaskDB:
             logger.error(f"Error creating task chunk: {str(e)}")
             conn.rollback()
             raise
+        finally:
+            conn.close()
+    
+    def delete_task(self, task_id: str) -> bool:
+        """
+        Delete a task and its associated chunks
+        
+        Args:
+            task_id: Task ID to delete
+            
+        Returns:
+            Success flag
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            # First delete associated chunks
+            cursor.execute("DELETE FROM task_chunks WHERE task_id = ?", (task_id,))
+            
+            # Then delete the task
+            cursor.execute("DELETE FROM tasks WHERE task_id = ?", (task_id,))
+            conn.commit()
+            
+            return cursor.rowcount > 0
+        except Exception as e:
+            logger.error(f"Error deleting task: {str(e)}")
+            conn.rollback()
+            return False
         finally:
             conn.close()
     

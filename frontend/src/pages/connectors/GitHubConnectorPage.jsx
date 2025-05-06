@@ -288,19 +288,19 @@ const GitHubConnectorPage = () => {
                   </FormControl>
 
                   <FormControl>
-                    <FormLabel>Repository URL</FormLabel>
+                    <FormLabel>{isEnterprise ? "Enterprise GitHub Domain" : "Repository URL"}</FormLabel>
                     <Input
                       name="repoUrl"
                       value={config.repoUrl}
                       onChange={handleInputChange}
                       placeholder={isEnterprise ? 
-                        "https://source.datanerd.us/dataos/dbt_core_model.git" : 
+                        "github.mycompany.com" : 
                         "https://github.com/username/repo"}
                       type="url"
                     />
                     <Text fontSize="xs" color="gray.500" mt={1}>
                       {isEnterprise ? 
-                        "Enter the complete enterprise repository URL including domain and .git extension" : 
+                        "Enter ONLY your GitHub Enterprise domain (no paths, no /api/v3)" : 
                         "Standard GitHub repository URL"}
                     </Text>
                   </FormControl>
@@ -369,9 +369,14 @@ const GitHubConnectorPage = () => {
                     <AlertIcon />
                     <Box fontSize="sm">
                       <Text fontWeight="medium">For Enterprise GitHub URLs:</Text>
-                      <Text>• Enter the complete URL (e.g., https://source.datanerd.us/dataos/dbt_core_model.git)</Text>
+                      <Text>• Enter your GitHub Enterprise domain (e.g., <code>github.mycompany.com</code>)</Text>
+                      <Text>• Do NOT include repository paths - just the base domain</Text>
+                      <Text>• The system will automatically add <code>/api/v3</code> if needed</Text>
                       <Text>• Include username and access token for authentication</Text>
-                      <Text>• Make sure to use the .git extension if required by your enterprise GitHub</Text>
+                      <Divider my={2} />
+                      <Text fontSize="sm" fontStyle="italic" color="blue.600">
+                        Example: If your GitHub Enterprise instance is at <code>github.example.org</code>, just enter that
+                      </Text>
                     </Box>
                   </Alert>
 

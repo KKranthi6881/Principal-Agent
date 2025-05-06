@@ -9,6 +9,11 @@ import time
 import asyncio
 import logging
 import threading
+import datetime
+import uuid
+import re
+import json
+import traceback
 from typing import Dict, List, Any, Optional, Tuple, Set
 import subprocess
 from urllib.parse import urlparse
@@ -58,7 +63,8 @@ class ChunkedLineageProcessor:
         Returns:
             Task ID
         """
-        # Create a task record
+        # Create a task record with timestamp
+        current_time = datetime.datetime.now().isoformat()
         self.task_id = self.task_db.create_task(
             task_type='lineage_extraction',
             connector_id=self.connector_id,
@@ -66,7 +72,9 @@ class ChunkedLineageProcessor:
             tech_stack=self.tech_stack,
             metadata={
                 'branch': self.branch,
-                'chunk_size': self.chunk_size
+                'chunk_size': self.chunk_size,
+                'started_at': current_time,
+                'display_name': self._get_repo_display_name(),
             }
         )
         
@@ -82,6 +90,26 @@ class ChunkedLineageProcessor:
         thread.start()
         
         return self.task_id
+        
+    def _get_repo_display_name(self) -> str:
+        """Extract a display name from the repository URL"""
+        try:
+            parsed = urlparse(self.repo_url)
+            if not parsed.path:
+                return self.repo_url
+                
+            # Remove .git extension if present
+            path = parsed.path
+            if path.endswith('.git'):
+                path = path[:-4]
+                
+            # Get the last part of the path as repo name
+            parts = path.strip('/').split('/')
+            if len(parts) >= 1:
+                return parts[-1]
+            return self.repo_url
+        except Exception:
+            return self.repo_url
     
     def _process_repository_thread(self):
         """
@@ -89,6 +117,19 @@ class ChunkedLineageProcessor:
         This runs in a separate thread to avoid blocking the main application
         """
         try:
+            # Update status - starting repository clone
+            self.task_db.update_task(
+                self.task_id,
+                status='running',
+                progress=5,
+                current_step='cloning_repository',
+                metadata={
+                    **(self.task_db.get_task(self.task_id).get('metadata', {}) or {}),
+                    'current_operation': 'Cloning repository...',
+                    'last_updated': datetime.datetime.now().isoformat()
+                }
+            )
+            
             # Clone the repository
             success, self.temp_dir, error = self._clone_repository()
             
@@ -97,9 +138,28 @@ class ChunkedLineageProcessor:
                 self.task_db.update_task(
                     self.task_id,
                     status='failed',
-                    error=f"Failed to clone repository: {error}"
+                    error=f"Failed to clone repository: {error}",
+                    metadata={
+                        **(self.task_db.get_task(self.task_id).get('metadata', {}) or {}),
+                        'failure_reason': 'clone_failed',
+                        'error_details': error,
+                        'completed_at': datetime.datetime.now().isoformat()
+                    }
                 )
                 return
+            
+            # Update status - finding SQL files
+            self.task_db.update_task(
+                self.task_id,
+                status='running',
+                progress=15,
+                current_step='finding_sql_files',
+                metadata={
+                    **(self.task_db.get_task(self.task_id).get('metadata', {}) or {}),
+                    'current_operation': 'Preparing file chunks for processing...',
+                    'last_updated': datetime.datetime.now().isoformat()
+                }
+            )
             
             # Find SQL files
             sql_files = self._find_sql_files(self.temp_dir)
@@ -109,44 +169,97 @@ class ChunkedLineageProcessor:
                 self.task_db.update_task(
                     self.task_id,
                     status='completed',
+                    progress=100,
                     total_items=0,
                     processed_items=0,
                     successful_items=0,
-                    failed_items=0
+                    failed_items=0,
+                    metadata={
+                        **(self.task_db.get_task(self.task_id).get('metadata', {}) or {}),
+                        'current_operation': 'Completed - No SQL files found',
+                        'last_updated': datetime.datetime.now().isoformat(),
+                        'completed_at': datetime.datetime.now().isoformat()
+                    }
                 )
                 # Clean up
                 shutil.rmtree(self.temp_dir, ignore_errors=True)
                 return
             
-            # Update task with total file count
+            # Update task with total file count and progress
             self.task_db.update_task(
                 self.task_id,
-                total_items=len(sql_files)
+                total_items=len(sql_files),
+                progress=20,
+                current_step='preparing_chunks',
+                metadata={
+                    **(self.task_db.get_task(self.task_id).get('metadata', {}) or {}),
+                    'current_operation': f'Preparing to process {len(sql_files)} SQL files',
+                    'sql_file_count': len(sql_files),
+                    'last_updated': datetime.datetime.now().isoformat()
+                }
             )
             
             # Divide files into chunks
             file_chunks = self._create_chunks(sql_files)
             
             # Process each chunk
-            chunk_tasks = []
+            processed_count = 0
+            total_count = len(sql_files)
+            successful_items = 0
+            failed_items = 0
+            
             for chunk_number, file_chunk in enumerate(file_chunks):
+                # Calculate progress (25% to 75% range for processing chunks)
+                progress = 25 + (chunk_number / len(file_chunks) * 50)
+                
+                # Update task status before processing chunk
+                self.task_db.update_task(
+                    self.task_id,
+                    status='running',
+                    progress=int(progress),
+                    current_step=f'processing_chunk_{chunk_number+1}_of_{len(file_chunks)}',
+                    processed_items=processed_count,
+                    successful_items=successful_items,
+                    failed_items=failed_items,
+                    metadata={
+                        **(self.task_db.get_task(self.task_id).get('metadata', {}) or {}),
+                        'current_operation': f'Processing chunk {chunk_number+1} of {len(file_chunks)}',
+                        'last_updated': datetime.datetime.now().isoformat()
+                    }
+                )
+                
+                # Create chunk record
                 chunk_id = self.task_db.create_task_chunk(
                     task_id=self.task_id,
                     chunk_number=chunk_number,
                     total_chunks=len(file_chunks),
                     item_count=len(file_chunk),
                     metadata={
-                        'files': [os.path.relpath(f, self.temp_dir) for f in file_chunk]
+                        'files': [os.path.relpath(f, self.temp_dir) for f in file_chunk],
+                        'started_at': datetime.datetime.now().isoformat()
                     }
                 )
                 
                 # Process the chunk
-                self._process_chunk(chunk_id, file_chunk)
+                chunk_results = self._process_chunk(chunk_id, file_chunk)
+                processed_count += len(file_chunk)
+                successful_items += chunk_results.get('successful', 0)
+                failed_items += chunk_results.get('failed', 0)
             
-            # All chunks completed, update task status
+            # Update that we're generating comprehensive lineage
             self.task_db.update_task(
                 self.task_id,
-                status='completed'
+                status='running',
+                progress=80,
+                current_step='generating_comprehensive_lineage',
+                processed_items=processed_count,
+                successful_items=successful_items,
+                failed_items=failed_items,
+                metadata={
+                    **(self.task_db.get_task(self.task_id).get('metadata', {}) or {}),
+                    'current_operation': 'Generating comprehensive lineage data...',
+                    'last_updated': datetime.datetime.now().isoformat()
+                }
             )
             
             # Generate comprehensive lineage for all tables
@@ -154,6 +267,24 @@ class ChunkedLineageProcessor:
                 self._generate_comprehensive_lineage()
             except Exception as e:
                 logger.error(f"Error generating comprehensive lineage: {str(e)}")
+                # Still continue to completion, just log the error
+            
+            # All processing complete - update task status
+            self.task_db.update_task(
+                self.task_id,
+                status='completed',
+                progress=100,
+                current_step='completed',
+                processed_items=processed_count,
+                successful_items=successful_items,
+                failed_items=failed_items,
+                metadata={
+                    **(self.task_db.get_task(self.task_id).get('metadata', {}) or {}),
+                    'current_operation': 'Processing complete',
+                    'completed_at': datetime.datetime.now().isoformat(),
+                    'last_updated': datetime.datetime.now().isoformat()
+                }
+            )
             
             # Clean up
             try:
@@ -167,7 +298,15 @@ class ChunkedLineageProcessor:
             self.task_db.update_task(
                 self.task_id,
                 status='failed',
-                error=f"Error processing repository: {str(e)}"
+                error=f"Error processing repository: {str(e)}",
+                metadata={
+                    **(self.task_db.get_task(self.task_id).get('metadata', {}) or {}),
+                    'current_operation': 'Failed due to unexpected error',
+                    'error_details': str(e),
+                    'error_traceback': traceback.format_exc(),
+                    'completed_at': datetime.datetime.now().isoformat(),
+                    'last_updated': datetime.datetime.now().isoformat()
+                }
             )
             
             # Clean up
@@ -188,51 +327,106 @@ class ChunkedLineageProcessor:
             # Get GitHub token
             token = self._get_github_token()
             
-            # Clone command
-            if token:
-                # Use token for authentication
-                # Extract repo owner and name from URL
-                parsed_url = urlparse(self.repo_url)
-                path_parts = parsed_url.path.strip('/').split('/')
-                if len(path_parts) >= 2:
-                    owner = path_parts[0]
-                    repo = path_parts[1]
-                    if repo.endswith('.git'):
-                        repo = repo[:-4]
-                    
-                    # Format URL with token
+            # Extract repo owner and name from URL
+            parsed_url = urlparse(self.repo_url)
+            path_parts = parsed_url.path.strip('/').split('/')
+            
+            if len(path_parts) >= 2:
+                owner = path_parts[0]
+                repo = path_parts[1]
+                if repo.endswith('.git'):
+                    repo = repo[:-4]
+                
+                # Format URL with token if available
+                if token:
                     auth_url = f"https://{token}@github.com/{owner}/{repo}.git"
-                    cmd = ['git', 'clone', '--branch', self.branch, auth_url, temp_dir]
+                    repo_url_to_use = auth_url
                 else:
-                    # Fallback to original URL
-                    cmd = ['git', 'clone', '--branch', self.branch, self.repo_url, temp_dir]
-            else:
-                # Clone without token
-                cmd = ['git', 'clone', '--branch', self.branch, self.repo_url, temp_dir]
-            
-            # Execute clone command
-            result = subprocess.run(cmd, capture_output=True, text=True)
-            
-            if result.returncode != 0:
-                # Try again with 'main' branch if it failed and we're using a different branch
-                if self.branch != 'main':
-                    logger.warning(f"Failed to clone branch {self.branch}, trying 'main' branch")
-                    cmd = [part if part != self.branch else 'main' for part in cmd]
-                    result = subprocess.run(cmd, capture_output=True, text=True)
+                    repo_url_to_use = self.repo_url
+                
+                # First try: Detect default branch without specifying a branch
+                logger.info(f"Attempting to clone repository with default branch detection")
+                initial_cmd = ['git', 'clone', repo_url_to_use, temp_dir]
+                result = subprocess.run(initial_cmd, capture_output=True, text=True)
+                
+                # If default branch clone succeeded
+                if result.returncode == 0:
+                    logger.info(f"Successfully cloned {self.repo_url} using default branch to {temp_dir}")
+                    return True, temp_dir, None
+                
+                # If default branch clone failed, try with specific branch if provided
+                if self.branch:
+                    logger.info(f"Default branch clone failed, trying with specified branch: {self.branch}")
+                    # Remove directory contents if it exists
+                    if os.path.exists(temp_dir):
+                        shutil.rmtree(temp_dir)
+                        os.makedirs(temp_dir)
                     
-                    if result.returncode != 0:
-                        # Try 'master' branch as a last resort
-                        logger.warning(f"Failed to clone 'main' branch, trying 'master' branch")
-                        cmd = [part if part != 'main' else 'master' for part in cmd]
-                        result = subprocess.run(cmd, capture_output=True, text=True)
+                    branch_cmd = ['git', 'clone', '--branch', self.branch, repo_url_to_use, temp_dir]
+                    result = subprocess.run(branch_cmd, capture_output=True, text=True)
+                    
+                    if result.returncode == 0:
+                        logger.info(f"Successfully cloned {self.repo_url} with branch {self.branch} to {temp_dir}")
+                        return True, temp_dir, None
+                
+                # If all else fails, try to list remote branches and clone with one of them
+                logger.info("Trying to detect available branches")
+                list_cmd = ['git', 'ls-remote', '--heads', repo_url_to_use]
+                list_result = subprocess.run(list_cmd, capture_output=True, text=True)
+                
+                if list_result.returncode == 0:
+                    # Parse branches from the output
+                    branches = []
+                    for line in list_result.stdout.splitlines():
+                        if 'refs/heads/' in line:
+                            branch_name = line.split('refs/heads/')[1].strip()
+                            branches.append(branch_name)
+                    
+                    logger.info(f"Detected branches: {branches}")
+                    
+                    # Try common branch names first, then others
+                    priority_branches = ['main', 'master', 'dev', 'develop', 'trunk']
+                    for branch_name in priority_branches:
+                        if branch_name in branches:
+                            # Remove directory contents if it exists
+                            if os.path.exists(temp_dir):
+                                shutil.rmtree(temp_dir)
+                                os.makedirs(temp_dir)
+                            
+                            branch_cmd = ['git', 'clone', '--branch', branch_name, repo_url_to_use, temp_dir]
+                            result = subprocess.run(branch_cmd, capture_output=True, text=True)
+                            
+                            if result.returncode == 0:
+                                logger.info(f"Successfully cloned {self.repo_url} with branch {branch_name} to {temp_dir}")
+                                return True, temp_dir, None
+                    
+                    # If none of the priority branches worked, try the first available branch
+                    if branches:
+                        # Remove directory contents if it exists
+                        if os.path.exists(temp_dir):
+                            shutil.rmtree(temp_dir)
+                            os.makedirs(temp_dir)
+                        
+                        first_branch = branches[0]
+                        branch_cmd = ['git', 'clone', '--branch', first_branch, repo_url_to_use, temp_dir]
+                        result = subprocess.run(branch_cmd, capture_output=True, text=True)
+                        
+                        if result.returncode == 0:
+                            logger.info(f"Successfully cloned {self.repo_url} with branch {first_branch} to {temp_dir}")
+                            return True, temp_dir, None
+            else:
+                # Fallback to original URL with simple clone
+                cmd = ['git', 'clone', self.repo_url, temp_dir]
+                result = subprocess.run(cmd, capture_output=True, text=True)
+                
+                if result.returncode == 0:
+                    logger.info(f"Successfully cloned {self.repo_url} to {temp_dir}")
+                    return True, temp_dir, None
             
-            if result.returncode != 0:
-                error_msg = f"Git clone failed: {result.stderr}"
-                logger.error(error_msg)
-                return False, temp_dir, error_msg
-            
-            logger.info(f"Successfully cloned {self.repo_url} to {temp_dir}")
-            return True, temp_dir, None
+            # If we reached here, all attempts failed
+            error_msg = f"Git clone failed: {result.stderr}"
+            logger.error(error_msg)
+            return False, temp_dir, error_msg
             
         except Exception as e:
             error_msg = f"Error cloning repository: {str(e)}"
@@ -309,13 +503,16 @@ class ChunkedLineageProcessor:
         logger.info(f"Divided {len(files)} files into {len(chunks)} chunks of size {self.chunk_size}")
         return chunks
     
-    def _process_chunk(self, chunk_id: str, files: List[str]):
+    def _process_chunk(self, chunk_id: str, files: List[str]) -> Dict[str, int]:
         """
         Process a chunk of files
         
         Args:
             chunk_id: Chunk ID
             files: List of file paths in this chunk
+            
+        Returns:
+            Dictionary with success/failure counts
         """
         # Update chunk status
         self.task_db.update_task_chunk(chunk_id, status='processing')
@@ -411,59 +608,90 @@ class ChunkedLineageProcessor:
                 table_lineage = lineage_extractor.extract_table_lineage(sql_ast, github_path)
                 column_lineage = lineage_extractor.extract_column_lineage(sql_ast, github_path)
                 
-                # Additional extraction for DBT files using dialect-specific extractor
-                if self.tech_stack.lower() == "dbt" and dialect_handler and hasattr(dialect_handler, 'extract_lineage'):
+                # Use dialect-specific extraction for all supported dialects (PostgreSQL, T-SQL, DBT, etc.)
+                if dialect_handler and hasattr(dialect_handler, 'extract_lineage'):
                     try:
-                        dbt_lineage = dialect_handler.extract_lineage(sql_code, github_path)
-                        logger.info(f"Extracted DBT lineage for {github_path}: {len(str(dbt_lineage))} bytes")
+                        # Extract lineage using dialect-specific implementation
+                        dialect_lineage = dialect_handler.extract_lineage(sql_code, github_path)
+                        logger.info(f"Extracted {self.tech_stack} dialect lineage for {github_path}: {len(str(dialect_lineage))} bytes")
                         
-                        # Merge or override lineage data for DBT
-                        if dbt_lineage:
-                            # Get target table from DBT lineage if available
-                            if dbt_lineage.get("target_table") and not table_lineage.get("target_table"):
-                                table_lineage["target_table"] = dbt_lineage["target_table"]
-                                logger.info(f"Using DBT target table: {dbt_lineage['target_table']}")
-                            
-                            # Get source tables from DBT lineage if available
-                            if dbt_lineage.get("source_tables"):
-                                if not table_lineage.get("source_tables"):
-                                    table_lineage["source_tables"] = dbt_lineage["source_tables"]
-                                else:
-                                    # Merge source tables
-                                    existing_sources = {s.get('name'): s for s in table_lineage["source_tables"] if s.get('name')}
-                                    for source in dbt_lineage["source_tables"]:
-                                        source_name = source.get('name')
-                                        if source_name and source_name not in existing_sources:
-                                            table_lineage["source_tables"].append(source)
+                        # Process the lineage information
+                        if dialect_lineage:
+                            # Handle table-level lineage
+                            if "table_lineage" in dialect_lineage:
+                                # Get target table from dialect lineage if available
+                                if dialect_lineage["table_lineage"].get("target_table") and not table_lineage.get("target_table"):
+                                    table_lineage["target_table"] = dialect_lineage["table_lineage"]["target_table"]
+                                    logger.info(f"Using {self.tech_stack} target table: {dialect_lineage['table_lineage']['target_table']}")
                                 
-                                logger.info(f"Found {len(dbt_lineage['source_tables'])} DBT source tables")
-                            
-                            # For column lineage, prefer DBT's extraction since it handles macros better
-                            if dbt_lineage.get("columns"):
-                                logger.info(f"Found {len(dbt_lineage['columns'])} columns in DBT lineage")
-                                if not column_lineage:
-                                    column_lineage = {"columns": []}
-                                column_lineage["columns"] = dbt_lineage["columns"]
-                            
-                            # Get column relationships
-                            if dbt_lineage.get("column_level_lineage"):
-                                # Extract column relationships from DBT lineage
-                                cl_lineage = dbt_lineage.get("column_level_lineage", {})
+                                # Get source tables from dialect lineage if available
+                                if dialect_lineage["table_lineage"].get("source_tables"):
+                                    if not table_lineage.get("source_tables"):
+                                        table_lineage["source_tables"] = dialect_lineage["table_lineage"]["source_tables"]
+                                    else:
+                                        # Merge source tables, avoiding duplicates
+                                        existing_sources = {s.get('name') if isinstance(s, dict) else s: s 
+                                                          for s in table_lineage["source_tables"]}
+                                        
+                                        for source in dialect_lineage["table_lineage"]["source_tables"]:
+                                            source_name = source.get('name') if isinstance(source, dict) else source
+                                            if source_name and source_name not in existing_sources:
+                                                table_lineage["source_tables"].append(source)
                                 
-                                # Try to find column relationships
+                                logger.info(f"Found {len(dialect_lineage['table_lineage'].get('source_tables', []))} {self.tech_stack} source tables")
+                            
+                            # Handle column-level lineage (new format for PostgreSQL and T-SQL dialects)
+                            if "column_lineage" in dialect_lineage:
+                                logger.info(f"Found column-level lineage in {self.tech_stack} dialect")
+                                
+                                # Process target columns
+                                if dialect_lineage["column_lineage"].get("target_columns"):
+                                    column_lineage["target_columns"] = dialect_lineage["column_lineage"]["target_columns"]
+                                    logger.info(f"Found {len(column_lineage['target_columns'])} target columns")
+                                
+                                # Process source columns
+                                if dialect_lineage["column_lineage"].get("source_columns"):
+                                    column_lineage["source_columns"] = dialect_lineage["column_lineage"]["source_columns"]
+                                    logger.info(f"Found {len(column_lineage['source_columns'])} source columns")
+                                
+                                # Process column relationships
+                                if dialect_lineage["column_lineage"].get("column_relationships"):
+                                    column_lineage["column_relationships"] = dialect_lineage["column_lineage"]["column_relationships"]
+                                    logger.info(f"Found {len(column_lineage['column_relationships'])} column relationships")
+                                
+                                # Process column-level lineage mapping (column-to-column dependencies)
+                                if dialect_lineage["column_lineage"].get("column_level_lineage"):
+                                    column_lineage["column_level_lineage"] = dialect_lineage["column_lineage"]["column_level_lineage"]
+                            
+                            # Handle older DBT format (for backward compatibility)
+                            if "columns" in dialect_lineage:
+                                logger.info(f"Found {len(dialect_lineage.get('columns', []))} columns in {self.tech_stack} lineage (legacy format)")
+                                if not column_lineage.get("columns"):
+                                    column_lineage["columns"] = []
+                                column_lineage["columns"] = dialect_lineage["columns"]
+                            
+                            # Handle old-style column relationships (for backward compatibility)
+                            if "column_level_lineage" in dialect_lineage:
+                                legacy_cl = dialect_lineage.get("column_level_lineage", {})
+                                
+                                # Extract relationships from legacy format
                                 relationships = []
-                                if cl_lineage.get("relationships"):
-                                    relationships = cl_lineage.get("relationships")
-                                elif cl_lineage.get("column_relationships"):
-                                    relationships = cl_lineage.get("column_relationships")
+                                if legacy_cl.get("relationships"):
+                                    relationships = legacy_cl.get("relationships")
+                                elif legacy_cl.get("column_relationships"):
+                                    relationships = legacy_cl.get("column_relationships")
                                 
                                 if relationships:
-                                    logger.info(f"Found {len(relationships)} column relationships in DBT lineage")
+                                    logger.info(f"Found {len(relationships)} column relationships in legacy format")
                                     if not column_lineage.get("column_relationships"):
                                         column_lineage["column_relationships"] = []
                                     column_lineage["column_relationships"].extend(relationships)
-                    except Exception as dbt_err:
-                        logger.warning(f"Error extracting DBT lineage for {github_path}: {str(dbt_err)}")
+                                
+                                # Make the legacy lineage available
+                                column_lineage["column_level_lineage"] = legacy_cl
+                    
+                    except Exception as e:
+                        logger.error(f"Error processing {self.tech_stack} lineage: {str(e)}", exc_info=True)
                 
                 # Store lineage in database
                 lineage_info = {
@@ -508,18 +736,146 @@ class ChunkedLineageProcessor:
                     
                     tables_created += 1
                     
-                    # Store lineage
-                    lineage_id = self.lineage_db.store_lineage(
-                        table_id=table_id,
-                        lineage_data=lineage_info,
-                        github_path=github_path
+                    # Process columns and relationships directly rather than relying on store_lineage
+                    columns_created = 0
+                    column_ids = {}
+                    
+                    # Process target columns first
+                    if column_lineage and column_lineage.get("target_columns"):
+                        logger.info(f"Processing {len(column_lineage.get('target_columns', []))} target columns")
+                        for column in column_lineage.get("target_columns", []):
+                            try:
+                                # Extract column properties
+                                if isinstance(column, dict):
+                                    column_name = column.get("name") or column.get("column_name")
+                                    data_type = column.get("data_type", "unknown")
+                                    description = column.get("description", "")
+                                    is_primary = column.get("is_primary_key", False)
+                                    is_foreign = column.get("is_foreign_key", False)
+                                    # Get column table if available - override with target_table if not specified
+                                    column_table = column.get("table") or target_table
+                                elif isinstance(column, str):
+                                    column_name = column
+                                    data_type = "unknown"
+                                    description = ""
+                                    is_primary = False
+                                    is_foreign = False
+                                    column_table = target_table
+                                
+                                if column_name:
+                                    logger.info(f"Creating column: {column_name} in table {target_table}")
+                                    # Create column and store ID
+                                    column_id = self.lineage_db.create_or_get_column(
+                                        table_id=table_id,
+                                        column_name=column_name,
+                                        data_type=data_type,
+                                        description=description,
+                                        is_primary_key=is_primary,
+                                        is_foreign_key=is_foreign,
+                                        github_path=github_path
+                                    )
+                                    
+                                    # Store column ID with both simple and qualified names
+                                    column_ids[column_name] = column_id
+                                    column_ids[f"{column_table}.{column_name}"] = column_id
+                                    columns_created += 1
+                            except Exception as e:
+                                logger.warning(f"Error creating column {column_name}: {str(e)}")
+                    
+                    # Then process column relationships
+                    relationships_created = 0
+                    if column_lineage and column_lineage.get("column_relationships"):
+                        logger.info(f"Processing {len(column_lineage.get('column_relationships', []))} column relationships")
+                        for rel in column_lineage.get("column_relationships", []):
+                            try:
+                                source_table_name = rel.get("source_table")
+                                source_column_name = rel.get("source_column")
+                                target_column_name = rel.get("target_column")
+                                rel_type = rel.get("relationship_type", "dependency")
+                                
+                                if not source_column_name or not target_column_name:
+                                    logger.warning(f"Skipping relationship with missing columns: {rel}")
+                                    continue
+                                
+                                # Make sure we have source table ID
+                                source_table_id = None
+                                if source_table_name:
+                                    # Check if source_table_name is a dict and extract the name
+                                    if isinstance(source_table_name, dict) and "name" in source_table_name:
+                                        source_table_name = source_table_name["name"]
+                                    
+                                    # Find or create source table
+                                    source_table = self.lineage_db.get_table_by_name(source_table_name)
+                                    if not source_table:
+                                        # Create source table
+                                        source_table_id = self.lineage_db.create_or_get_table(
+                                            table_name=source_table_name,
+                                            tech_stack=self.tech_stack,
+                                            github_repo=self.repo_url,
+                                            connector_id=self.connector_id
+                                        )
+                                    else:
+                                        source_table_id = source_table["table_id"]
+                                
+                                    # Create or get source column
+                                    source_column_id = self.lineage_db.create_or_get_column(
+                                        table_id=source_table_id,
+                                        column_name=source_column_name,
+                                        github_path=github_path
+                                    )
+                                    
+                                    # Get target column ID (try different ways)
+                                    target_column_id = column_ids.get(target_column_name)
+                                    if not target_column_id:
+                                        # Try with qualified name
+                                        target_column_id = column_ids.get(f"{target_table}.{target_column_name}")
+                                    
+                                    if not target_column_id:
+                                        # Create target column if not already tracked
+                                        target_column_id = self.lineage_db.create_or_get_column(
+                                            table_id=table_id,
+                                            column_name=target_column_name,
+                                            github_path=github_path
+                                        )
+                                        column_ids[target_column_name] = target_column_id
+                                    
+                                    # Create the column-level relationship
+                                    logger.info(f"Creating column relationship: {source_column_name} ({source_table_name}) -> {target_column_name} ({target_table})")
+                                    self.lineage_db.create_or_get_relationship(
+                                        source_table_id=source_table_id,
+                                        target_table_id=table_id,
+                                        relationship_type=rel_type,
+                                        source_column_id=source_column_id,
+                                        target_column_id=target_column_id,
+                                        github_path=github_path
+                                    )
+                                    relationships_created += 1
+                            except Exception as e:
+                                logger.warning(f"Error creating column relationship: {str(e)}")
+                    
+                    # Create a lineage definition for visualization
+                    lineage_def = {
+                        "tables": [{
+                            "id": table_id,
+                            "name": target_table,
+                            "columns": column_lineage.get("target_columns", [])
+                        }],
+                        "relationships": column_lineage.get("column_relationships", [])
+                    }
+                    
+                    # Add source tables if available
+                    if "source_tables" in table_lineage:
+                        lineage_def["source_tables"] = table_lineage["source_tables"]
+                    
+                    # Store the lineage definition
+                    lineage_id = self.lineage_db.add_lineage_definition(
+                        root_table_id=table_id,
+                        lineage_json=lineage_def,
+                        tech_stack=self.tech_stack
                     )
                     
                     logger.info(f"Stored lineage for table {target_table} with ID {lineage_id}")
-                    
-                    # Process columns if available from column lineage
-                    columns_created = 0
-                    column_ids = {}
+                    logger.info(f"Created {columns_created} columns and {relationships_created} relationships")
                     
                     # Handle columns from standard column lineage
                     if column_lineage:
@@ -701,9 +1057,17 @@ class ChunkedLineageProcessor:
             metadata={
                 "tables_created": tables_created,
                 "successful_files": successful,
-                "failed_files": failed
+                "failed_files": failed,
+                "completed_at": datetime.datetime.now().isoformat()
             }
         )
+        
+        # Return success and failure counts for tracking
+        return {
+            "successful": successful,
+            "failed": failed, 
+            "tables_created": tables_created
+        }
     
     def _generate_comprehensive_lineage(self):
         """

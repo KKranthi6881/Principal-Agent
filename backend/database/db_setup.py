@@ -251,6 +251,7 @@ def setup_lineage_db():
             tech_stack TEXT NOT NULL,
             github_path TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (root_table_id) REFERENCES tables(table_id)
         )
         """)

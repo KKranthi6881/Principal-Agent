@@ -54,7 +54,9 @@ import {
   IoTerminal,
   IoWarning,
   IoLogoPython,
-  IoLogoJavascript
+  IoLogoJavascript,
+  IoRefresh,
+  IoAlertCircleOutline
 } from 'react-icons/io5';
 import SyntaxHighlighter from 'react-syntax-highlighter';
 import { docco } from 'react-syntax-highlighter/dist/esm/styles/hljs';
@@ -883,13 +885,22 @@ const RepositoryPage = () => {
       
       const data = await response.json();
       console.log('Lineage API response:', data);
+      console.log('Lineage API success flag:', data?.success);
+      console.log('Lineage JSON structure:', data?.lineage_json ? Object.keys(data.lineage_json) : 'No lineage_json found');
       
       if (data && data.success && data.lineage_json) {
-        console.log('Lineage data received:', data.lineage_json);
-        // Transform the data for the LineageGraph component
-        const transformedData = transformLineageData(data.lineage_json);
+        console.log('Lineage data received and is valid, proceeding to transform');
+        // Pass the entire data object to transformLineageData for more context
+        const transformedData = transformLineageData(data);
+        console.log('Transformed lineage data result:', transformedData ? 'Valid data returned' : 'NULL returned');
         
         if (transformedData) {
+          console.log('Setting lineage data in state:', {
+            models: transformedData.models.length,
+            edges: transformedData.edges.length,
+            columns: transformedData.columns.length,
+            column_lineage: transformedData.column_lineage.length
+          });
           setLineageData(transformedData);
           toast({
             title: 'Lineage Data Available',
@@ -900,6 +911,7 @@ const RepositoryPage = () => {
           });
         } else {
           // We got data but it didn't transform correctly
+          console.error('Transformation returned null despite valid input data');
           setLineageData(null);
           setShowLineage(false);
           toast({
@@ -936,139 +948,397 @@ const RepositoryPage = () => {
   };
 
   // Transform lineage data to format expected by LineageGraph
-  const transformLineageData = (lineageJson) => {
-    console.log('Transforming lineage data with keys:', Object.keys(lineageJson));
+  const transformLineageData = (apiResponse) => {
+    console.log('Transforming lineage data from API response:', apiResponse);
     
     try {
-      // First, add the root table to make sure it's included
-      const allTables = [...(Array.isArray(lineageJson.tables) ? lineageJson.tables : [])];
-      
-      // Add root table if it's not already in the tables array
-      if (lineageJson.root_table && !allTables.some(t => t.id === lineageJson.root_table.id)) {
-        allTables.push(lineageJson.root_table);
-      }
-      
-      // Log the table information for debugging
-      console.log('Root table:', lineageJson.root_table);
-      console.log('All tables count:', allTables.length);
-      console.log('Sample tables:', allTables.slice(0, 3));
-      
-      // If we don't have any tables, create at least one for the root
-      if (allTables.length === 0 && lineageJson.root_table) {
-        allTables.push({
-          id: 'root-table',
-          name: lineageJson.root_table.name || 'Root Table',
-          github_path: lineageJson.root_table.github_path || '',
-          tech_stack: lineageJson.root_table.tech_stack || 'unknown',
-        });
-      }
-      
-      // Transform tables to models (safely handle missing data)
-      const models = allTables.map(table => ({
-        id: table.id || `table-${Math.random().toString(36).substring(2, 9)}`,
-        name: table.name || 'Unknown',
-        path: table.github_path || '',
-        type: table.tech_stack || 'unknown',
-        highlight: lineageJson.root_table && table.id === lineageJson.root_table.id
-      }));
-      
-      // Create a set of valid model IDs to filter edges
-      const modelIds = new Set(models.map(model => model.id));
-      console.log('Valid model IDs count:', modelIds.size);
-      
-      // If we have relationships, use them; otherwise create a simple self-referential edge
-      let edges = [];
-      
-      if (Array.isArray(lineageJson.relationships) && lineageJson.relationships.length > 0) {
-        // Log relationships for debugging
-        console.log('Relationships count:', lineageJson.relationships.length);
-        console.log('Sample relationship:', lineageJson.relationships[0]);
-        
-        // Transform relationships to edges (safely handle missing data)
-        edges = lineageJson.relationships
-          .filter(rel => {
-            // Only include relationships where both source and target tables exist in our models
-            return rel.source && rel.target && 
-                  rel.source.table_id && rel.target.table_id && 
-                  modelIds.has(rel.source.table_id) && modelIds.has(rel.target.table_id);
-          })
-          .map(rel => ({
-            id: rel.id || `edge-${Math.random().toString(36).substring(2, 9)}`,
-            source: rel.source.table_id, 
-            target: rel.target.table_id, 
-            type: rel.type || 'depends_on'
-          }));
-      } else if (models.length > 0) {
-        // Create at least one edge if we have models but no relationships
-        // This ensures we have something to display
-        if (models.length === 1) {
-          // Self-reference for single model
-          edges = [{
-            id: 'self-edge',
-            source: models[0].id, 
-            target: models[0].id, 
-            type: 'self'
-          }];
-        } else if (models.length > 1) {
-          // Connect first two models
-          edges = [{
-            id: 'default-edge',
-            source: models[0].id, 
-            target: models[1].id, 
-            type: 'depends_on'
-          }];
-        }
-      }
-      
-      // Transform columns if they exist and belong to valid models
-      const columns = Array.isArray(lineageJson.columns) ? lineageJson.columns
-        .filter(col => col.table_id && modelIds.has(col.table_id))
-        .map(col => ({
-          id: col.id || `col-${Math.random().toString(36).substring(2, 9)}`,
-          name: col.name || 'Unknown',
-          modelId: col.table_id,
-          dataType: col.data_type || 'unknown',
-          type: col.is_primary_key ? 'primary_key' : col.is_foreign_key ? 'foreign_key' : 'regular'
-        })) : [];
-      
-      // Create a set of valid column IDs for filtering column connections
-      const columnIds = new Set(columns.map(col => col.id));
-      
-      // Column lineage connections if they exist
-      const columnConnections = Array.isArray(lineageJson.relationships) ? 
-        lineageJson.relationships
-          .filter(rel => {
-            return rel.source?.column_id && rel.target?.column_id && 
-                  columnIds.has(rel.source.column_id) && columnIds.has(rel.target.column_id);
-          })
-          .map(rel => ({
-            id: `col_${rel.id || Math.random().toString(36).substring(2, 9)}`,
-            fromColumn: rel.source.column_id,
-            toColumn: rel.target.column_id,
-            type: rel.type || 'depends_on'
-          })) : [];
-      
-      // Validate that we have valid models and edges
-      const validData = models.length > 0 && edges.length > 0;
-      
-      console.log('Transformed data:', {
-        models: models.length,
-        edges: edges.length,
-        columns: columns.length,
-        column_lineage: columnConnections.length,
-        valid: validData
-      });
-      
-      if (!validData) {
-        console.error('Invalid lineage data: insufficient valid models or edges');
+      // Check if the API response indicates success and contains lineage_json
+      if (!apiResponse || !apiResponse.success || !apiResponse.lineage_json) {
+        console.error('API response unsuccessful or missing lineage_json:', apiResponse?.message || 'Unknown error');
         return null;
       }
       
-      // Always return at least this minimum structure
+      // Extract the lineage_json from the API response
+      const lineageJson = apiResponse.lineage_json;
+      console.log('Lineage JSON structure:', Object.keys(lineageJson));
+      
+      // Create maps for lookups
+      const tableIdMap = new Map(); // Maps table ID to model ID
+      const tableNameMap = new Map(); // Maps table name to model ID
+      const columnIdMap = new Map(); // Maps column ID to processed column
+      const tableColumnMap = new Map(); // Maps table+column name to processed column ID
+      
+      // Generate a deterministic unique ID
+      const generateId = (prefix, value) => `${prefix}-${String(value || 'unknown').replace(/\W+/g, '_')}`;
+      
+      /* STEP 1: Detect API response structure and normalize data */
+      let tables = [];
+      let rootTableId = null;
+      let relationshipsList = [];
+      let columnsList = [];
+      
+      // Normalized extraction based on structure
+      if (lineageJson.table) {
+        // New-style API response with single root table
+        console.log('Detected new-style API format with single table');
+        // Add the main table
+        tables.push(lineageJson.table);
+        rootTableId = lineageJson.table.table_id;
+        
+        // Add related tables if they exist
+        if (lineageJson.related_tables && typeof lineageJson.related_tables === 'object') {
+          Object.values(lineageJson.related_tables).forEach(table => {
+            if (table && table.table_id) {
+              tables.push(table);
+            }
+          });
+        }
+        
+        // Get relationships
+        if (Array.isArray(lineageJson.relationships)) {
+          relationshipsList = lineageJson.relationships;
+        }
+        
+        // Get columns
+        if (Array.isArray(lineageJson.columns)) {
+          columnsList = lineageJson.columns;
+        }
+      } else if (Array.isArray(lineageJson.tables) || lineageJson.root_table) {
+        // Legacy-style API response with tables array
+        console.log('Detected legacy-style API format with tables array');
+        
+        // Get tables from the array
+        if (Array.isArray(lineageJson.tables)) {
+          tables = [...lineageJson.tables];
+        }
+        
+        // Add root table if it exists
+        if (lineageJson.root_table) {
+          if (!tables.some(t => t.id === lineageJson.root_table.id)) {
+            tables.push(lineageJson.root_table);
+          }
+          rootTableId = lineageJson.root_table.id;
+        }
+        
+        // Get relationships
+        if (Array.isArray(lineageJson.relationships)) {
+          relationshipsList = lineageJson.relationships;
+        }
+        
+        // Get columns
+        if (Array.isArray(lineageJson.columns)) {
+          columnsList = lineageJson.columns;
+        }
+      }
+      
+      // Create a single dummy table if nothing was found
+      if (tables.length === 0) {
+        const dummyTable = {
+          id: 'table-dummy',
+          table_id: 'table-dummy', 
+          name: 'Unknown Table',
+          table_name: 'Unknown Table',
+          github_path: apiResponse.github_path || '',
+          tech_stack: apiResponse.tech_stack || 'unknown'
+        };
+        tables.push(dummyTable);
+        rootTableId = dummyTable.id || dummyTable.table_id;
+      }
+      
+      /* STEP 2: Transform tables into models for visualization */
+      console.log('Processing tables:', tables.length);
+      
+      const models = tables.map(table => {
+        // Handle different table ID formats in various API responses
+        const tableId = table.table_id || table.id || generateId('table', table.name || table.table_name || 'unknown');
+        const tableName = table.table_name || table.name || 'Unknown Table';
+        
+        // Create mappings for lookups
+        tableIdMap.set(tableId, tableId);
+        if (tableName) {
+          tableNameMap.set(tableName.toLowerCase(), tableId);
+        }
+        
+        // Create the model in format expected by LineageGraph component
+        return {
+          id: tableId,
+          name: tableName,
+          path: table.github_path || apiResponse.github_path || '',
+          type: table.tech_stack || 'unknown',
+          // Highlight the root table if it matches
+          highlight: tableId === rootTableId || 
+                     (lineageJson.root_table_id && tableId === lineageJson.root_table_id)
+        };
+      });
+      
+      console.log('Created models:', models.map(m => m.name));
+      
+      /* STEP 3: Process Relationships into edges */
+      const processEdges = () => {
+        if (!Array.isArray(relationshipsList) || relationshipsList.length === 0) {
+          return [];
+        }
+        
+        const validEdges = [];
+        const processedEdgeKeys = new Set(); // To avoid duplicates
+        
+        relationshipsList.forEach((rel, idx) => {
+          let sourceId = null;
+          let targetId = null;
+          
+          // Try different relationship formats
+          
+          // Format 1: Source and target as objects with table_id
+          if (rel.source && rel.target) {
+            sourceId = rel.source.table_id && tableIdMap.has(rel.source.table_id) ? 
+              tableIdMap.get(rel.source.table_id) : null;
+              
+            targetId = rel.target.table_id && tableIdMap.has(rel.target.table_id) ? 
+              tableIdMap.get(rel.target.table_id) : null;
+          }
+          
+          // Format 2: Source and target as table name strings
+          if (!sourceId && !targetId && rel.source_table && rel.target_table) {
+            sourceId = tableNameMap.has(rel.source_table.toLowerCase()) ? 
+              tableNameMap.get(rel.source_table.toLowerCase()) : null;
+              
+            targetId = tableNameMap.has(rel.target_table.toLowerCase()) ? 
+              tableNameMap.get(rel.target_table.toLowerCase()) : null;
+          }
+          
+          // Format 3: Direct source_id and target_id
+          if (!sourceId && rel.source_id && tableIdMap.has(rel.source_id)) {
+            sourceId = tableIdMap.get(rel.source_id);
+          }
+          
+          if (!targetId && rel.target_id && tableIdMap.has(rel.target_id)) {
+            targetId = tableIdMap.get(rel.target_id);
+          }
+          
+          // Only create edge if we have valid source and target
+          if (sourceId && targetId) {
+            // Avoid duplicate edges
+            const edgeKey = `${sourceId}-${targetId}`;
+            if (!processedEdgeKeys.has(edgeKey)) {
+              processedEdgeKeys.add(edgeKey);
+              
+              validEdges.push({
+                id: rel.id || `edge-${idx}`,
+                source: sourceId,
+                target: targetId,
+                type: rel.relationship_type || rel.type || 'depends_on'
+              });
+            }
+          }
+        });
+        
+        return validEdges;
+      };
+      
+      // Get the edges from relationships
+      let edges = processEdges();
+      console.log('Processed relationships into edges:', edges.length);
+      
+      // Create default edges if we don't have any but have models
+      if (edges.length === 0 && models.length > 0) {
+        if (models.length === 1) {
+          // Self-reference for a single model
+          edges = [{
+            id: 'self-edge',
+            source: models[0].id,
+            target: models[0].id,
+            type: 'self'
+          }];
+        } else {
+          // Connect consecutive models
+          for (let i = 0; i < models.length - 1; i++) {
+            edges.push({
+              id: `default-edge-${i}`,
+              source: models[i].id,
+              target: models[i + 1].id,
+              type: 'depends_on'
+            });
+          }
+        }
+        console.log('Created default edges:', edges.length);
+      }
+      
+      /* STEP 4: Process Columns */
+      const processColumns = () => {
+        const processedColumns = [];
+        const localColumnMap = new Map(); // For tracking columns within this function
+        
+        // Process standalone columns array
+        if (Array.isArray(columnsList)) {
+          console.log('Processing standalone columns:', columnsList.length);
+          columnsList.forEach((col, idx) => {
+            // Find the table this column belongs to
+            if (col.table_id && tableIdMap.has(col.table_id)) {
+              const modelId = tableIdMap.get(col.table_id);
+              const columnId = col.id || col.column_id || `col-${modelId}-${idx}`;
+              
+              const processedColumn = {
+                id: columnId,
+                name: col.name || col.column_name || `Column ${idx}`,
+                modelId: modelId,
+                dataType: col.data_type || 'unknown',
+                type: col.is_primary_key ? 'primary_key' : 
+                      col.is_foreign_key ? 'foreign_key' : 'regular'
+              };
+              
+              processedColumns.push(processedColumn);
+              localColumnMap.set(columnId, processedColumn);
+            }
+          });
+        }
+        
+        // Also check for columns embedded in tables
+        tables.forEach(table => {
+          const tableId = table.table_id || table.id;
+          if (tableId && Array.isArray(table.columns)) {
+            console.log(`Processing embedded columns for table ${table.name || table.table_name}:`, table.columns.length);
+            const modelId = tableIdMap.get(tableId);
+            if (!modelId) return;
+            
+            table.columns.forEach((col, idx) => {
+              const columnId = col.id || col.column_id || `${modelId}-col-${idx}`;
+              
+              // Skip if already processed
+              if (processedColumns.some(c => c.id === columnId)) return;
+              
+              const processedColumn = {
+                id: columnId,
+                name: col.name || col.column_name || `Column ${idx}`,
+                modelId: modelId,
+                dataType: col.data_type || 'unknown',
+                type: col.is_primary_key ? 'primary_key' : 
+                      col.is_foreign_key ? 'foreign_key' : 'regular'
+              };
+              
+              processedColumns.push(processedColumn);
+              localColumnMap.set(columnId, processedColumn);
+            });
+          }
+        });
+        
+        console.log('Processed total columns:', processedColumns.length);
+        return { processedColumns };
+      };
+      
+      // Get processed columns and mappings
+      const { processedColumns } = processColumns();
+      console.log('Processed columns:', processedColumns ? processedColumns.length : 0);
+      
+      // 4. Process Column Relationships
+      const processColumnRelationships = () => {
+        if (!Array.isArray(relationshipsList) || relationshipsList.length === 0) {
+          return [];
+        }
+        
+        const validColumnConnections = [];
+        const processedKeys = new Set(); // To avoid duplicates
+        
+        // Create column mapping for efficient lookup
+        const colMapping = new Map(); // Maps column ID to its table ID
+        
+        // Build mapping from columns we already processed
+        if (processedColumns && processedColumns.length > 0) {
+          processedColumns.forEach(col => {
+            if (col.id && col.modelId) {
+              colMapping.set(col.id, col.modelId);
+            }
+          });
+        }
+        
+        relationshipsList.forEach((rel, idx) => {
+          let sourceColId = null;
+          let targetColId = null;
+          
+          // Try direct column IDs
+          if (rel.source && rel.target && rel.source.column_id && rel.target.column_id) {
+            if (colMapping.has(rel.source.column_id)) {
+              sourceColId = rel.source.column_id;
+            }
+            if (colMapping.has(rel.target.column_id)) {
+              targetColId = rel.target.column_id;
+            }
+          }
+          
+          // Try table+column name lookup
+          if (!sourceColId && !targetColId && 
+              rel.source_table && rel.source_column && 
+              rel.target_table && rel.target_column) {
+            
+            let sourceTableId, targetTableId;
+            
+            // Get table IDs
+            if (tableNameMap.has(rel.source_table.toLowerCase())) {
+              sourceTableId = tableNameMap.get(rel.source_table.toLowerCase());
+            }
+            if (tableNameMap.has(rel.target_table.toLowerCase())) {
+              targetTableId = tableNameMap.get(rel.target_table.toLowerCase());
+            }
+            
+            // If we have table IDs, try to find matching columns in processedColumns
+            if (sourceTableId && targetTableId && processedColumns) {
+              // Look for matching columns by table ID and column name
+              const sourceColumn = processedColumns.find(col => 
+                col.modelId === sourceTableId && 
+                col.name.toLowerCase() === rel.source_column.toLowerCase()
+              );
+              
+              const targetColumn = processedColumns.find(col => 
+                col.modelId === targetTableId && 
+                col.name.toLowerCase() === rel.target_column.toLowerCase()
+              );
+              
+              if (sourceColumn) sourceColId = sourceColumn.id;
+              if (targetColumn) targetColId = targetColumn.id;
+            }
+          }
+          
+          // Create connection if we have both source and target
+          if (sourceColId && targetColId) {
+            const relationshipKey = `${sourceColId}-${targetColId}`;
+            if (!processedKeys.has(relationshipKey)) {
+              processedKeys.add(relationshipKey);
+              validColumnConnections.push({
+                id: `col-rel-${idx}`,
+                fromColumn: sourceColId,
+                toColumn: targetColId,
+                type: rel.relationship_type || rel.type || 'depends_on'
+              });
+            }
+          }
+        });
+        
+        return validColumnConnections;
+      };
+      
+      // Get column connections
+      const columnConnections = processColumnRelationships();
+      console.log('Processed column relationships:', columnConnections.length);
+      
+      // 5. Validate and Return
+      const hasValidData = models.length > 0 && edges.length > 0;
+      
+      console.log('Final transformed data:', {
+        models: models.length,
+        edges: edges.length,
+        columns: processedColumns.length,
+        column_connections: columnConnections.length,
+        valid: hasValidData
+      });
+      
+      if (!hasValidData) {
+        console.error('Invalid lineage data: insufficient models or edges');
+        return null;
+      }
+      
       return {
         models,
         edges,
-        columns,
+        columns: processedColumns,
         column_lineage: columnConnections
       };
     } catch (error) {
@@ -1915,20 +2185,91 @@ return (
                         <LineageGraph data={lineageData} width="100%" height="100%" />
                       ) : (
                         <Box 
-                          position="absolute" 
-                          top="50%" 
-                          left="50%" 
-                          transform="translate(-50%, -50%)"
-                          textAlign="center"
-                          p={4}
-                          borderRadius="md"
-                          bg="red.50"
-                          border="1px"
-                          borderColor="red.200"
+                          width="100%"
+                          height="100%"
+                          p={6}
+                          overflowY="auto"
                         >
-                          <Icon as={IoWarning} color="red.500" boxSize={8} mb={2} />
-                          <Text fontWeight="bold" color="red.600" mb={2}>Lineage Visualization Error</Text>
-                          <Text color="red.600">Could not render the lineage graph with the available data.</Text>
+                          <VStack spacing={4} align="stretch">
+                            <Box textAlign="center">
+                              <Icon as={IoWarning} color="red.500" boxSize={8} mb={2} />
+                              <Text fontWeight="bold" fontSize="lg" mb={2}>Lineage Visualization Error</Text>
+                              <Text color="red.600" mb={4}>Could not render the lineage graph with the available data.</Text>
+                            </Box>
+                            
+                            <Box bg="gray.50" p={4} borderRadius="md" border="1px" borderColor="gray.200">
+                              <Heading size="sm" mb={2}>Debug Information</Heading>
+                              <Divider mb={3} />
+                              
+                              <Text fontWeight="bold" mb={1}>Last API Response:</Text>
+                              <Box 
+                                as="pre" 
+                                fontSize="xs" 
+                                p={2} 
+                                bg="black" 
+                                color="green.300" 
+                                borderRadius="md" 
+                                maxH="200px" 
+                                overflowY="auto"
+                                mb={3}
+                              >
+                                {JSON.stringify({
+                                  lineage_data_null: lineageData === null,
+                                  lineage_data_empty: lineageData && Object.keys(lineageData).length === 0,
+                                  file_path: selectedFile?.path || 'No file selected',
+                                  connector: selectedConnector?.repo_url || 'No connector',
+                                  show_lineage: showLineage,
+                                }, null, 2)}
+                              </Box>
+                              
+                              <Button
+                                size="sm"
+                                leftIcon={<Icon as={IoRefresh} />}
+                                colorScheme="blue"
+                                onClick={() => {
+                                  // Retry fetching lineage data
+                                  if (selectedConnector && selectedFile) {
+                                    fetchLineageData(selectedConnector.repo_url, selectedFile.path);
+                                  }
+                                }}
+                                mb={3}
+                              >
+                                Retry Lineage Fetch
+                              </Button>
+                              
+                              <Box mt={3}>
+                                <Text fontWeight="bold" mb={1}>Expected Lineage Data Format:</Text>
+                                <Text fontSize="xs" mb={2}>LineageGraph component requires data in this structure:</Text>
+                                <Box 
+                                  as="pre" 
+                                  fontSize="xs" 
+                                  p={2} 
+                                  bg="gray.700" 
+                                  color="green.300" 
+                                  borderRadius="md" 
+                                  maxH="200px" 
+                                  overflowY="auto"
+                                >
+                                  {
+`{
+  "models": [
+    { "id": "table1", "name": "Table1", "path": "/path/to/table1", "type": "table" }
+  ],
+  "edges": [
+    { "id": "edge1", "source": "table1", "target": "table2", "type": "depends_on" }
+  ],
+  "columns": [
+    { "id": "col1", "modelId": "table1", "name": "Column1", "dataType": "integer" }
+  ],
+  "column_lineage": [
+    { "id": "col_edge1", "fromColumn": "col1", "toColumn": "col2" }
+  ]
+}`
+                                  }
+                                </Box>
+                              </Box>
+                            </Box>
+                          </VStack>
                         </Box>
                       )}
                     </Box>
