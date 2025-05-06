@@ -295,7 +295,54 @@ def trigger_lineage_extraction(connector_id: str, connector: Dict[str, Any]) -> 
     Helper function to trigger lineage extraction in the background
     """
     try:
-        # First, ensure the repository is cloned locally
+        # Log full connector information for debugging (without token)
+        sanitized_connector = connector.copy()
+        if 'token' in sanitized_connector:
+            sanitized_connector['token'] = '***REDACTED***'
+        logger.info(f"Triggering lineage extraction for connector: {sanitized_connector}")
+        
+        # Get repository URL either from repo_url or construct it
+        repo_url = None
+        if connector.get('repo_url'):
+            repo_url = connector.get('repo_url')
+            logger.info(f"Using explicit repo_url for lineage extraction: {repo_url}")
+            
+        # Handle enterprise GitHub case
+        if connector.get('github_type') == 'enterprise' and connector.get('api_url'):
+            # Try to construct from api_url, owner, and repositories
+            try:
+                api_url = connector.get('api_url')
+                parsed = urlparse(api_url)
+                base_domain = parsed.netloc.replace('/api/v3', '')
+                
+                # If we have owner/repo information, use it
+                if connector.get('owner') and connector.get('repositories'):
+                    repos = connector.get('repositories')
+                    if isinstance(repos, str):
+                        try:
+                            repos = json.loads(repos)
+                        except:
+                            repos = []
+                    
+                    if repos and len(repos) > 0:
+                        repo_name = repos[0]
+                        owner = connector.get('owner')
+                        repo_url = f"https://{base_domain}/{owner}/{repo_name}"
+                        if not repo_url.endswith('.git'):
+                            repo_url += '.git'
+                        logger.info(f"Constructed enterprise repo URL for lineage extraction: {repo_url}")
+            except Exception as e:
+                logger.error(f"Error constructing enterprise repo URL: {e}")
+        
+        # Ensure we have a repo URL
+        if not repo_url:
+            logger.error("No repository URL could be determined for lineage extraction")
+            return {
+                "status": "error",
+                "message": "No repository URL could be determined for lineage extraction"
+            }
+        
+        # First, try to clone the repository locally
         clone_result = clone_github_repository(connector)
         if clone_result["status"] == "error":
             logger.warning(f"Could not clone repository before lineage extraction: {clone_result['message']}")
@@ -308,11 +355,16 @@ def trigger_lineage_extraction(connector_id: str, connector: Dict[str, Any]) -> 
         # Use tech_stack from connector
         tech_stack = connector.get("tech_stack", "postgresql")
         
+        # Include the repo_url explicitly in the request
+        request_data = {
+            "tech_stack": tech_stack,
+            "repo_url": repo_url
+        }
+        
+        logger.info(f"Making lineage extraction request to {url} with data: {request_data}")
+        
         # Make the request
-        response = requests.post(
-            url,
-            json={"tech_stack": tech_stack}
-        )
+        response = requests.post(url, json=request_data)
         
         if response.status_code == 200:
             return {

@@ -465,7 +465,8 @@ async def extract_lineage_from_github(
     connector_id: str = Path(..., description="GitHub connector ID"),
     tech_stack: Optional[str] = Query(None, description="Override tech stack (optional)"),
     branch: Optional[str] = Query("main", description="Branch to extract from"),
-    chunk_size: Optional[int] = Query(50, description="Number of files per processing chunk")
+    chunk_size: Optional[int] = Query(50, description="Number of files per processing chunk"),
+    repo_url: Optional[str] = None
 ):
     """
     Start a background task to extract lineage from a GitHub repository
@@ -495,34 +496,74 @@ async def extract_lineage_from_github(
         # Convert to dict
         connector_dict = dict(connector)
         
-        # Determine the repository URL
-        repo_url = connector_dict.get('repo_url')
+        # Check if repo_url was provided in the request body (highest priority)
+        if not repo_url:
+            # Fall back to repo_url from connector
+            repo_url = connector_dict.get('repo_url')
+            logger.info(f"Using repo_url from connector: {repo_url}")
+        else:
+            logger.info(f"Using repo_url from request: {repo_url}")
         
+        # If still no repo_url and we have repositories info, try to construct one
         if not repo_url and connector_dict.get('repositories'):
-            # Try to construct a URL from owner/repo or organization/repo
-            repositories = json.loads(connector_dict['repositories'])
+            # Handle different repository formats
+            repositories = None
+            if isinstance(connector_dict['repositories'], str):
+                try:
+                    repositories = json.loads(connector_dict['repositories'])
+                except Exception as e:
+                    logger.error(f"Error parsing repositories JSON: {e}")
+            else:
+                repositories = connector_dict['repositories']
+                
             if repositories and len(repositories) > 0:
                 owner = connector_dict.get('owner')
                 organization = connector_dict.get('organization')
+                github_type = connector_dict.get('github_type')
                 
                 # Use first repository for now
                 repo_name = repositories[0]
                 
-                if owner:
-                    repo_url = f"https://github.com/{owner}/{repo_name}"
-                elif organization:
-                    repo_url = f"https://github.com/{organization}/{repo_name}"
+                # Determine domain based on GitHub type
+                if github_type == 'enterprise' and connector_dict.get('api_url'):
+                    try:
+                        # Extract domain from API URL
+                        api_url = connector_dict.get('api_url')
+                        parsed = urlparse(api_url)
+                        base_domain = parsed.netloc.replace('/api/v3', '')
+                        logger.info(f"Using enterprise domain for URL construction: {base_domain}")
+                        
+                        if owner:
+                            repo_url = f"https://{base_domain}/{owner}/{repo_name}"
+                        elif organization:
+                            repo_url = f"https://{base_domain}/{organization}/{repo_name}"
+                            
+                        # Ensure .git suffix for enterprise GitHub
+                        if repo_url and not repo_url.endswith('.git'):
+                            repo_url += '.git'
+                    except Exception as e:
+                        logger.error(f"Error constructing enterprise repo URL: {e}")
+                else:
+                    # Standard GitHub URL
+                    if owner:
+                        repo_url = f"https://github.com/{owner}/{repo_name}"
+                    elif organization:
+                        repo_url = f"https://github.com/{organization}/{repo_name}"
         
         if not repo_url:
+            conn.close()
             raise HTTPException(
                 status_code=400, 
                 detail="Unable to determine repository URL from connector settings"
             )
         
+        # Log the determined repository URL
+        logger.info(f"Final repository URL for lineage extraction: {repo_url}")
+        
         # Use connector's tech stack if not overridden
         if not tech_stack:
             tech_stack = connector_dict.get('tech_stack', 'postgresql')
-        
+            
         # Use connector's branch if provided
         if not branch and connector_dict.get('default_branch'):
             branch = connector_dict.get('default_branch')
