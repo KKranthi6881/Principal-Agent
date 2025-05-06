@@ -88,22 +88,35 @@ def clone_repository(repo_url: str, branch: str = 'main') -> Optional[str]:
     Returns:
         Path to the cloned repository if successful, None otherwise
     """
-    # Fix for URL duplication issue - check if URL starts with https://github.com/https://github.com
+    # Sanitize the repo URL for logging (in case it contains credentials)
+    parsed_url = urlparse(repo_url)
+    safe_url_for_logs = f"{parsed_url.scheme}://{parsed_url.netloc}{parsed_url.path}"
+    if '@' in safe_url_for_logs:
+        # Hide credentials if present
+        parts = safe_url_for_logs.split('@')
+        if len(parts) > 1:
+            safe_url_for_logs = f"{parsed_url.scheme}://***:***@{parts[1]}"
+    
+    # Make sure URL ends with .git for enterprise repositories
+    if parsed_url.netloc != 'github.com' and not repo_url.endswith('.git'):
+        repo_url = repo_url + '.git'
+        logger.info(f"Appended .git to enterprise repository URL")
+        
+    # Fix for URL duplication issues
     if repo_url.startswith('https://github.com/https://github.com'):
         repo_url = repo_url.replace('https://github.com/https://github.com', 'https://github.com')
-    # Fix for URLs that might have https://github.com/ and then owner/repo
     elif repo_url.startswith('https://github.com/') and '/github.com/' in repo_url:
         # Extract just the owner/repo part
         parts = repo_url.split('/github.com/')
         if len(parts) > 1:
             repo_url = 'https://github.com/' + parts[1]
     
-    logger.info(f"Using repository URL: {repo_url}")
+    logger.info(f"Using repository URL: {safe_url_for_logs}")
     repo_path = get_repo_storage_path(repo_url, branch)
     
     # If the repository already exists, just return the path
     if has_local_repo(repo_url, branch):
-        logger.info(f"Repository {repo_url} already exists at {repo_path}")
+        logger.info(f"Repository already exists at {repo_path}")
         return repo_path
     
     # Create parent directory if it doesn't exist
@@ -115,10 +128,11 @@ def clone_repository(repo_url: str, branch: str = 'main') -> Optional[str]:
     
     try:
         # Clone the repository
-        logger.info(f"Cloning {repo_url} to {repo_path}...")
+        logger.info(f"Cloning repository to {repo_path}...")
         
-        cmd = ['git', 'clone', '--branch', branch, repo_url, repo_path]
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        # Run git clone command directly to preserve authentication in the URL
+        cmd = [f"git clone --branch {branch} {repo_url} {repo_path}"]
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
         
         if result.returncode != 0:
             # If branch doesn't exist, try with default branch

@@ -99,6 +99,13 @@ def encrypt_token(token: str) -> str:
     cipher = get_cipher()
     return cipher.encrypt(token.encode()).decode()
 
+def decrypt_token(encrypted_token: str) -> str:
+    """Decrypt a GitHub token"""
+    if not encrypted_token:
+        return None
+    cipher = get_cipher()
+    return cipher.decrypt(encrypted_token.encode()).decode()
+
 # Pydantic models for request/response
 class GitHubConnectorCreate(BaseModel):
     """GitHub connector creation model"""
@@ -573,7 +580,15 @@ async def create_github_connector(connector: GitHubConnectorCreate, background_t
                     logger.error(f"Error constructing repo_url for enterprise connector: {e}")
         
         # Clone the repository in the background
-        logger.info(f"Scheduling repository clone with connector data: {connector_data}")
+        sanitized_data = {k:v for k,v in connector_data.items() if k != 'token'}
+        logger.info(f"Scheduling repository clone with connector data: {sanitized_data}")
+        
+        # For enterprise connections, make sure repo_url is in the proper format
+        if connector.github_type == 'enterprise' and connector.repo_url:
+            # Make sure the URL ends with .git if not already
+            if not connector.repo_url.endswith('.git'):
+                connector_data['repo_url'] = connector.repo_url + '.git'
+                logger.info(f"Appended .git to repo URL: {connector_data['repo_url']}")
         background_tasks.add_task(clone_github_repository, connector_data)
         
         # Trigger lineage extraction in the background if active
