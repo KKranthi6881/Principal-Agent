@@ -164,13 +164,16 @@ def clone_github_repository(connector: Dict[str, Any]) -> Dict[str, Any]:
     Helper function to clone a GitHub repository locally
     """
     try:
+        # Log full connector settings for debugging (without token)
+        sanitized_connector = connector.copy()
+        if 'token' in sanitized_connector:
+            sanitized_connector['token'] = '***REDACTED***'
+        logger.info(f"Cloning repository with connector settings: {sanitized_connector}")
+        
         # Determine the repository URL and branch
         repo_url = None
         branch = connector.get("default_branch", "main")
         github_type = connector.get("github_type")
-        
-        # Log key connector attributes for debugging
-        logger.info(f"Cloning repository with github_type: {github_type}, owner: {connector.get('owner')}, org: {connector.get('organization')}")
         
         # Setup base domain for repository URL construction
         base_domain = "github.com"  # Default for public GitHub
@@ -178,36 +181,66 @@ def clone_github_repository(connector: Dict[str, Any]) -> Dict[str, Any]:
         # For enterprise GitHub, use the domain from the API URL
         if github_type == "enterprise" and connector.get("api_url"):
             try:
-                parsed = urlparse(connector.get("api_url"))
+                api_url = connector.get("api_url")
+                logger.info(f"Using enterprise API URL: {api_url}")
+                
+                parsed = urlparse(api_url)
                 base_domain = parsed.netloc
                 # Remove any api/v3 part from netloc if somehow included
                 base_domain = base_domain.replace('/api/v3', '')
-                logger.info(f"Using enterprise GitHub domain: {base_domain}")
+                logger.info(f"Extracted enterprise GitHub domain: {base_domain}")
             except Exception as e:
                 logger.error(f"Error parsing enterprise GitHub API URL: {e}")
         
         # Direct repository URL (highest priority)
-        if connector.get("repo_url"):
-            repo_url = connector["repo_url"]
+        if connector.get("repo_url") and connector.get("repo_url").strip():
+            repo_url = connector["repo_url"].strip()
             logger.info(f"Using explicitly provided repo URL: {repo_url}")
+            
+        # For repositories property, handle both string JSON and array formats
+        repositories = []
+        if connector.get("repositories"):
+            if isinstance(connector["repositories"], str):
+                try:
+                    repositories = json.loads(connector["repositories"])
+                    logger.info(f"Parsed repositories from JSON string: {repositories}")
+                except Exception as e:
+                    logger.error(f"Error parsing repositories JSON: {e}")
+            elif isinstance(connector["repositories"], list):
+                repositories = connector["repositories"]
+                logger.info(f"Using repositories from list: {repositories}")
+        
         # Owner and repositories
-        elif connector.get("owner") and connector.get("repositories") and len(connector["repositories"]) > 0:
+        if not repo_url and connector.get("owner") and repositories and len(repositories) > 0:
             owner = connector["owner"]
-            repo_name = connector["repositories"][0]  # Take the first repo for now
+            repo_name = repositories[0]  # Take the first repo for now
             repo_url = f"https://{base_domain}/{owner}/{repo_name}"
             logger.info(f"Constructed repo URL from owner/repo: {repo_url}")
-        # Organization repositories (would need to be enhanced to handle multiple)
-        elif connector.get("organization") and connector.get("repositories") and len(connector["repositories"]) > 0:
+            
+        # Organization repositories
+        elif not repo_url and connector.get("organization") and repositories and len(repositories) > 0:
             org = connector["organization"]
-            repo_name = connector["repositories"][0]  # Take the first repo for now
+            repo_name = repositories[0]  # Take the first repo for now
             repo_url = f"https://{base_domain}/{org}/{repo_name}"
             logger.info(f"Constructed repo URL from org/repo: {repo_url}")
+            
+        # Last resort - try to find any repository information
+        elif not repo_url:
+            # Additional debug info
+            logger.warning(f"Attempting to recover repository URL from limited information")
+            # Check if we have any repositories at all 
+            if repositories and len(repositories) > 0:
+                repo_name = repositories[0]
+                # If we have just a repo name but no owner/org, try to use authenticated user
+                # This is a last resort
+                repo_url = f"https://{base_domain}/unknown-owner/{repo_name}"
+                logger.warning(f"Constructed fallback repo URL: {repo_url}")
         
         if not repo_url:
-            logger.error(f"No repository URL could be determined from connector settings")
+            logger.error(f"Failed to determine repository URL from connector settings")
             return {
                 "status": "error",
-                "message": "No repository URL could be determined"
+                "message": "No repository URL could be determined from connector settings"
             }
             
         logger.info(f"Cloning repository: {repo_url}, branch: {branch}")
@@ -483,13 +516,22 @@ async def create_github_connector(connector: GitHubConnectorCreate, background_t
             except:
                 created_connector['repositories'] = []
         
-        # Prepare connector data
+        # Prepare connector data 
         connector_data = {
             **created_connector,
             'has_token': has_token
         }
         
+        # For enterprise GitHub, make sure to pass the repo information correctly
+        if connector.github_type == 'enterprise':
+            logger.info(f"Enterprise GitHub connector created with: API URL={connector.api_url}, Owner={connector.owner}, Org={connector.organization}, Repos={connector.repositories}")
+            
+            # Store the repositories directly to avoid parsing issues during cloning
+            if connector.repositories and not connector_data.get('repositories'):
+                connector_data['repositories'] = connector.repositories
+        
         # Clone the repository in the background
+        logger.info(f"Scheduling repository clone with connector data: {connector_data}")
         background_tasks.add_task(clone_github_repository, connector_data)
         
         # Trigger lineage extraction in the background if active
